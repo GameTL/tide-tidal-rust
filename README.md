@@ -8,7 +8,7 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 
 ## Features
 
-- Home feed, favourite tracks, playlists (with folders), mixes, albums, search
+- Home feed, favourite tracks, playlists (with folders), mixes, artist pages, album details, and catalog search
 - Lossless FLAC playback at the track's native sample rate, with seek,
   shuffle, repeat and gapless hand-over to the next track
 - Synced lyrics in the full-screen now-playing view
@@ -19,20 +19,36 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 ## Run
 
 ```bash
-cargo run --release -p tidal-app
+cargo run --release -p tide-app
 ```
 
 The first launch shows a login screen (TIDAL device-code flow in your browser).
+
+To build a macOS app bundle with the TIDE icon and launch it from Finder or the Dock:
+
+```bash
+sh scripts/bundle-macos.sh
+open target/release/TIDE.app
+```
+
+Pass `debug` to build `target/debug/TIDE.app`.
+
+### Desktop typography
+
+For the desktop client's Nationale font, extract the `Fonts` folder from the
+[TIDAL press kit](https://tidal.com/press) into `crates/tide-app/fonts`, or
+set `TIDAL_FONT_DIR` to its absolute path before building. Builds without
+these optional local files use Helvetica Neue.
 
 ## Layout
 
 | Crate | Purpose |
 | --- | --- |
-| `crates/tidal-api` | Login, session handling, TIDAL web API |
-| `crates/tidal-cache` | SQLite metadata store, audio and artwork caches |
-| `crates/tidal-audio` | Decoder and gapless CoreAudio output engine |
-| `crates/tidal-macos` | Media keys and Now Playing |
-| `crates/tidal-app` | The Slint application (`tide` binary) |
+| `crates/tide-api` | Login, session handling, TIDAL web API |
+| `crates/tide-cache` | SQLite metadata store, audio and artwork caches |
+| `crates/tide-audio` | Decoder and gapless CoreAudio output engine |
+| `crates/tide-macos` | Media keys and Now Playing |
+| `crates/tide-app` | The Slint application (`TIDE` binary) |
 
 See [Goal.md](Goal.md) for the design goals and [SECURITY.md](SECURITY.md) for how
 login tokens and local data are handled.

@@ -10,7 +10,7 @@ limitation, it says so.
 | --- | --- | --- |
 | OAuth access token and refresh token | `~/Library/Application Support/tidal-rust/session.json` | Lets a holder act as your TIDAL account until revoked |
 | Account details returned by TIDAL (user id, e-mail/username, country) | Same file | Stored alongside the tokens by the login library |
-| One-time login code (device code, or the address you paste for the Max-quality login) | Memory only | Exchanged for tokens over HTTPS, never written to disk |
+| One-time login code (the redirect address of the browser login, or a device code) | Memory only | Exchanged for tokens over HTTPS, never written to disk |
 
 TIDE never sees or stores your TIDAL password. Both login flows happen on
 TIDAL's own pages in your browser.
@@ -38,15 +38,38 @@ TIDAL's own pages in your browser.
   `session.json`, and clears the cached account data (home feed, playlists,
   favourites, lyrics). App preferences are kept.
 
+## How the login is completed
+
+The default login is TIDAL's PKCE flow, which unlocks Hi-Res. It opens
+TIDAL's own sign-in page in your default browser and ends on a fixed TIDAL
+address that carries a one-time code. That address cannot point back at a
+desktop app, so TIDE picks it up in one of these ways, and only while a
+login is in progress (at most ten minutes):
+
+- **Scriptable browsers (Safari, Chrome, Arc, Brave, Edge, Vivaldi, Opera).**
+  TIDE asks the browser, through macOS Automation, for a tab whose address
+  starts with `https://tidal.com/android/login/auth`. macOS asks for your
+  permission the first time. The comparison runs inside the script, so no
+  other tab address is returned to TIDE.
+- **Any other browser (Firefox, Zen, ...).** Copy the address; TIDE notices
+  a clipboard entry that starts with the same prefix. Other clipboard
+  content is ignored and never leaves the helper script. You can also paste
+  the address into the box that appears.
+
+TIDE does not read browser profiles, history or cookies. The one-time code
+is exchanged over HTTPS and is useless afterwards.
+
 ## What else is stored on this Mac
 
 | Data | Location | Protection |
 | --- | --- | --- |
-| Library metadata, listening history, lyrics, preferences | `~/Library/Application Support/tidal-rust/library.db` | Mode `0600`, no tokens |
+| Library metadata, listening history, play counts, cache hit statistics, lyrics, preferences | `~/Library/Application Support/tidal-rust/library.db` | Mode `0600`, no tokens |
 | Audio you have played | `~/Library/Caches/tidal-rust/audio/` | Unencrypted audio files, no tokens |
 | Artwork | `~/Library/Caches/tidal-rust/images/` | Public images |
 
-The audio cache can be emptied from Settings.
+The audio cache has a size limit you set in Settings and can be emptied
+there. Play counts are kept only in the local database; they decide which
+cached tracks are kept when the cache is full and are never sent anywhere.
 
 ## Network behaviour
 

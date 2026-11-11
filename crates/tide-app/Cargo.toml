@@ -1,0 +1,34 @@
+[package]
+name = "tide-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "TIDE"
+path = "src/main.rs"
+
+[dependencies]
+slint = { version = "1.18.1", features = ["unstable-winit-030"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+tide-api = { path = "../tide-api" }
+tide-cache = { path = "../tide-cache" }
+tide-audio = { path = "../tide-audio" }
+tide-macos = { path = "../tide-macos" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+open = "5.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString"] }
+
+[build-dependencies]
+slint-build = "1.18.1"

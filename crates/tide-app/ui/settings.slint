@@ -1,0 +1,543 @@
+// Settings page (⌘,).
+import { ScrollView } from "std-widgets.slint";
+import { App, Theme, EditableInput } from "common.slint";
+
+component Card inherits Rectangle {
+    border-radius: 12px;
+    background: #0e0e10;
+    border-width: 1px;
+    border-color: #17171a;
+    VerticalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        @children
+    }
+}
+
+component Row inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> divider: true;
+    min-height: 82px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 6px;
+        padding-right: 190px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        if root.detail != "": Text {
+            text: root.detail;
+            color: #c8c8c8;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+    }
+
+    if divider: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: #19191c;
+    }
+    @children
+}
+
+component Toggle inherits Rectangle {
+    in property <bool> on;
+    callback toggled(bool);
+    width: 46px;
+    height: 28px;
+    border-radius: 14px;
+    background: on ? white : #2a2a2a;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled(!root.on);
+        }
+    }
+
+    Rectangle {
+        x: on ? 21px : 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: black;
+        animate x {
+            duration: 120ms;
+        }
+    }
+}
+
+component QualityRow inherits Rectangle {
+    in property <string> key;
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> divider: true;
+    property <bool> selected: App.quality == key;
+    height: 82px;
+    background: selected ? @linear-gradient(90deg, #2a230a 0%, #0e0e10 45%) : transparent;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            App.set-quality(root.key);
+        }
+    }
+
+    Rectangle {
+        x: 0px;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        background: #1f1f22;
+        if selected: Rectangle {
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: Theme.max;
+        }
+    }
+
+    VerticalLayout {
+        x: 48px;
+        alignment: center;
+        spacing: 6px;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: root.detail;
+            color: #c8c8c8;
+            font-size: 13px;
+        }
+    }
+
+    if divider: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: #19191c;
+    }
+}
+
+component SectionTitle inherits Text {
+    color: Theme.text;
+    font-size: 17px;
+    font-weight: 600;
+    height: 62px;
+    vertical-alignment: bottom;
+}
+
+component SmallButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    callback clicked();
+    width: label.preferred-width + 36px;
+    height: 38px;
+    border-radius: 19px;
+    background: primary ? (ta.has-hover ? #e6e6e6 : white) : (ta.has-hover ? #2c2c2c : #1f1f22);
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    label := Text {
+        text: root.text;
+        color: root.primary ? black : white;
+        font-size: 14px;
+        font-weight: 600;
+    }
+}
+
+// Max-quality (PKCE) login. TIDAL's sign-in page opens in the default browser
+// and TIDE picks up the result by itself; the paste box only appears when that
+// isn't possible.
+export component MaxLogin inherits VerticalLayout {
+    in property <string> button-text: "Log in with TIDAL";
+    in property <bool> centered: false;
+    spacing: 12px;
+    HorizontalLayout {
+        alignment: centered ? center : start;
+        spacing: 10px;
+        SmallButton {
+            text: App.pkce-waiting ? "Open the browser again" : root.button-text;
+            primary: true;
+            clicked => {
+                App.pkce-start();
+            }
+        }
+
+        if App.pkce-offer-safari: SmallButton {
+            text: "Use Safari instead";
+            clicked => {
+                App.pkce-start-safari();
+            }
+        }
+    }
+
+    if App.pkce-status != "": Text {
+        text: App.pkce-status;
+        color: Theme.max;
+        font-size: 13px;
+        wrap: word-wrap;
+        horizontal-alignment: centered ? center : left;
+    }
+    if App.pkce-manual: HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            height: 38px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: paste.has-focus ? #3a3a3a : #222222;
+            background: #0a0a0a;
+            if paste.text == "": Text {
+                x: 12px;
+                text: "…or paste the address here";
+                color: Theme.text-secondary;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            paste := EditableInput {
+                x: 12px;
+                width: parent.width - 24px;
+                height: 18px;
+                color: Theme.text;
+                font-size: 13px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                accepted => {
+                    App.pkce-finish(self.text);
+                }
+            }
+        }
+
+        SmallButton {
+            text: "Finish";
+            clicked => {
+                App.pkce-finish(paste.text);
+                paste.text = "";
+            }
+        }
+    }
+}
+
+export component SettingsView inherits Rectangle {
+    property <length> column-w: min(892px, self.width - 64px);
+    ScrollView {
+        VerticalLayout {
+            padding-left: (root.width - root.column-w) / 2;
+            padding-right: (root.width - root.column-w) / 2;
+            padding-top: 12px;
+            padding-bottom: 60px;
+            alignment: start;
+            Text {
+                text: "Settings";
+                color: Theme.text;
+                font-size: 28px;
+                font-weight: 700;
+                height: 44px;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                height: 52px;
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 26px;
+                    for tab[i] in ["General", "Account", "About"]: Rectangle {
+                        width: label.preferred-width;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                App.settings-tab = i;
+                            }
+                        }
+
+                        label := Text {
+                            text: tab;
+                            color: App.settings-tab == i ? Theme.text : Theme.text-secondary;
+                            font-size: 15px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+
+                        if App.settings-tab == i: Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            background: white;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: #19191c;
+                }
+            }
+
+            if App.settings-tab == 0: VerticalLayout {
+                spacing: 0px;
+                SectionTitle {
+                    text: "Audio quality";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    QualityRow {
+                        key: "low";
+                        title: "Low";
+                        detail: "AAC 320 kbps. Balance audio quality and data consumption";
+                    }
+
+                    QualityRow {
+                        key: "high";
+                        title: "High";
+                        detail: "16-bit, 44.1 kHz";
+                    }
+
+                    QualityRow {
+                        key: "max";
+                        title: "Max";
+                        detail: "Up to 24-bit, 192 kHz when available";
+                        divider: false;
+                    }
+                }
+
+                SectionTitle {
+                    text: "Playback";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    Row {
+                        title: "Sound output";
+                        detail: App.output-info;
+                    }
+
+                    Row {
+                        title: "Match output sample rate";
+                        detail: "Switches the output device to each track's sample rate for bit-perfect playback. Never used for Bluetooth or AirPlay. The device gets its original rate back when you pause or quit.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.rate-matching;
+                            toggled(v) => {
+                                App.set-rate-matching(v);
+                            }
+                        }
+                    }
+                }
+
+                SectionTitle {
+                    text: "Display";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    if App.bpm-available: Row {
+                        title: "Audio metadata";
+                        detail: "Show BPM in track lists when there is room.";
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.show-audio-metadata;
+                            toggled(v) => { App.set-show-audio-metadata(v); }
+                        }
+                    }
+
+                    Row {
+                        title: "Show collection in sidebar";
+                        detail: "Show collection shortcuts in the sidebar. You can also reach them from Navigation.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.show-collection;
+                            toggled(v) => { App.set-show-collection(v); }
+                        }
+                    }
+                }
+
+                SectionTitle {
+                    text: "Performance & storage";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    Row {
+                        title: "Low-memory rendering";
+                        detail: "Draws the window on the CPU, roughly halving memory use. Turn off for GPU rendering (smoother scrolling, more memory). Takes effect after restarting TIDE.";
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.low-memory;
+                            toggled(v) => {
+                                App.set-low-memory(v);
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Offline audio cache";
+                        detail: App.cache-info;
+                        SmallButton {
+                            x: parent.width - self.width;
+                            text: "Clear";
+                            clicked => {
+                                App.clear-cache();
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Maximum cache size";
+                        detail: "When the cache is full, the tracks you play least are removed first. What you play most stays.";
+                        Rectangle {
+                            x: parent.width - self.width;
+                            width: 118px;
+                            height: 38px;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: size-input.has-focus ? #4a4a4a : #26262a;
+                            background: #0a0a0a;
+                            size-input := EditableInput {
+                                x: 12px;
+                                width: parent.width - 52px;
+                                height: 20px;
+                                text <=> App.cache-max;
+                                color: Theme.text;
+                                font-size: 15px;
+                                single-line: true;
+                                input-type: decimal;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                selection-background-color: #4a4a4a;
+                                accepted => {
+                                    App.set-cache-max(self.text);
+                                    self.clear-focus();
+                                }
+                                changed has-focus => {
+                                    if !self.has-focus {
+                                        App.set-cache-max(self.text);
+                                    }
+                                }
+                            }
+
+                            Text {
+                                x: parent.width - 36px;
+                                text: "GB";
+                                color: Theme.text-secondary;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Keep most played offline";
+                        detail: "Re-downloads your most played tracks in the background if they are missing from the cache.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.keep-most-played;
+                            toggled(v) => {
+                                App.set-keep-most-played(v);
+                            }
+                        }
+                    }
+                }
+            }
+            if App.settings-tab == 1: VerticalLayout {
+                spacing: 0px;
+                SectionTitle {
+                    text: "Account";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    Row {
+                        title: App.username;
+                        detail: App.max-login ? "Max quality enabled (up to 24-bit, 192 kHz)" : "Device-code session (up to 16-bit, 44.1 kHz)";
+                        divider: false;
+                        SmallButton {
+                            x: parent.width - self.width;
+                            text: "Log out";
+                            clicked => {
+                                App.logout();
+                            }
+                        }
+                    }
+                }
+
+                if !App.max-login: SectionTitle {
+                    text: "Max quality";
+                }
+                if !App.max-login: Rectangle {
+                    height: 14px;
+                }
+                if !App.max-login: Card {
+                    VerticalLayout {
+                        padding-top: 18px;
+                        padding-bottom: 18px;
+                        spacing: 12px;
+                        Text {
+                            text: "This session was created with a device code, which TIDAL limits to 16-bit, 44.1 kHz. Log in again to unlock Hi-Res (up to 24-bit, 192 kHz).";
+                            color: #c8c8c8;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+
+                        MaxLogin {
+                            button-text: "Log in for Max quality";
+                        }
+                    }
+                }
+            }
+            if App.settings-tab == 2: VerticalLayout {
+                spacing: 0px;
+                SectionTitle {
+                    text: "About";
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Card {
+                    Row {
+                        title: "Version " + App.app-version;
+                        detail: "An unofficial, independent player for TIDAL written in Rust. Not affiliated with or endorsed by TIDAL.";
+                    }
+
+                    Row {
+                        title: "Your data";
+                        detail: "Login tokens stay on this Mac in a file only your user can read. TIDE talks only to TIDAL's servers. See SECURITY.md.";
+                        divider: false;
+                    }
+                }
+            }
+        }
+    }
+}

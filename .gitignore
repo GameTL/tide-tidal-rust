@@ -4,3 +4,6 @@
 
 # Screenshots of the official client used as a private design reference
 /reference/
+
+# Optional local Nationale fonts from the TIDAL press kit
+/crates/tide-app/fonts/

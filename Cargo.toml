@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/tidal-api",
-    "crates/tidal-cache",
-    "crates/tidal-audio",
-    "crates/tidal-macos",
-    "crates/tidal-app",
+    "crates/tide-api",
+    "crates/tide-cache",
+    "crates/tide-audio",
+    "crates/tide-macos",
+    "crates/tide-app",
 ]
 resolver = "2"
 

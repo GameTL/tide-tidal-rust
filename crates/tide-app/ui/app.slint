@@ -1,0 +1,187 @@
+import { Palette } from "std-widgets.slint";
+import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage } from "common.slint";
+import { Sidebar, TopBar, PlayerBar } from "chrome.slint";
+import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView } from "views.slint";
+import { SettingsView } from "settings.slint";
+import { Typography } from "@typography";
+
+export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage }
+
+export component MainWindow inherits Window {
+    title: "TIDE";
+    min-width: 960px;
+    min-height: 620px;
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    background: Theme.bg;
+    default-font-size: 15px;
+    default-font-family: Typography.family;
+
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+    }
+
+    // Native macOS menu bar. Hide (⌘H), Hide Others and Quit (⌘Q) come from
+    // the standard application menu that Slint adds automatically.
+    MenuBar {
+        Menu {
+            title: "File";
+            MenuItem { title: "Close Window"; shortcut: @keys(Control + W); activated => { App.close-window(); } }
+        }
+
+        Menu {
+            title: "Edit";
+            MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { App.edit("undo"); } }
+            MenuItem { title: "Redo"; shortcut: @keys(Control + Shift + Z); activated => { App.edit("redo"); } }
+            MenuSeparator { }
+            MenuItem { title: "Cut"; shortcut: @keys(Control + X); activated => { App.edit("cut"); } }
+            MenuItem { title: "Copy"; shortcut: @keys(Control + C); activated => { App.edit("copy"); } }
+            MenuItem { title: "Paste"; shortcut: @keys(Control + V); activated => { App.edit("paste"); } }
+            MenuItem { title: "Select All"; shortcut: @keys(Control + A); activated => { App.edit("select-all"); } }
+        }
+
+        Menu {
+            title: "Playback";
+            MenuItem {
+                title: "Play/Pause";
+                shortcut: @keys(Control + P);
+                activated => {
+                    App.toggle-play();
+                }
+            }
+
+            MenuItem {
+                title: "Next";
+                shortcut: @keys(Control + RightArrow);
+                activated => {
+                    App.next();
+                }
+            }
+
+            MenuItem {
+                title: "Previous";
+                shortcut: @keys(Control + LeftArrow);
+                activated => {
+                    App.prev();
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: "Shuffle";
+                shortcut: @keys(Control + S);
+                activated => {
+                    App.toggle-shuffle();
+                }
+            }
+
+            MenuItem {
+                title: "Repeat";
+                shortcut: @keys(Control + R);
+                activated => {
+                    App.cycle-repeat();
+                }
+            }
+        }
+
+        Menu {
+            title: "View";
+            MenuItem {
+                title: "Settings…";
+                shortcut: @keys(Control + ",");
+                activated => {
+                    App.navigate("settings");
+                }
+            }
+
+            MenuItem {
+                title: "Now Playing";
+                shortcut: @keys(Control + L);
+                activated => {
+                    App.open-now-playing();
+                }
+            }
+        }
+
+        Menu {
+            title: "Navigation";
+            MenuItem {
+                title: "Back";
+                shortcut: @keys(Control + "[");
+                activated => { App.back(); }
+            }
+            MenuItem {
+                title: "Forward";
+                shortcut: @keys(Control + "]");
+                activated => { App.forward(); }
+            }
+            MenuItem {
+                title: "Search";
+                shortcut: @keys(Control + F);
+                activated => { App.navigate("focus-search"); }
+            }
+            MenuSeparator { }
+            MenuItem { title: "Music"; activated => { App.navigate("home"); } }
+            MenuItem { title: "Explore"; activated => { App.navigate("explore"); } }
+            MenuItem { title: "Feed"; activated => { App.navigate("feed"); } }
+            MenuSeparator { }
+            MenuItem { title: "Mixes & Radio"; activated => { App.navigate("mixes"); } }
+            MenuItem { title: "Playlists"; activated => { App.navigate("playlists"); } }
+            MenuItem { title: "Albums"; activated => { App.navigate("albums"); } }
+            MenuItem { title: "Tracks"; activated => { App.navigate("tracks"); } }
+            MenuItem { title: "Videos"; activated => { App.navigate("videos"); } }
+            MenuItem { title: "Profiles"; activated => { App.navigate("profiles"); } }
+            MenuItem { title: "Save for Later"; activated => { App.navigate("later"); } }
+        }
+
+        Menu {
+            title: "Window";
+            MenuItem {
+                title: "Minimize";
+                shortcut: @keys(Control + M);
+                activated => {
+                    App.minimize();
+                }
+            }
+        }
+
+        Menu {
+            title: "Help";
+            MenuItem { title: "TIDAL Help"; activated => { App.open-help(); } }
+        }
+    }
+
+    if !App.logged-in: LoginView { }
+    if App.logged-in: VerticalLayout {
+        HorizontalLayout {
+            Sidebar { }
+
+            Rectangle {
+                background: Theme.bg;
+                clip: true;
+                Rectangle {
+                    y: App.view == "album" || App.view == "artist" ? 0px : 64px;
+                    height: parent.height - self.y;
+                    if App.view == "home": HomeView { }
+                    if App.view == "tracks" || App.view == "detail" || App.view == "album" || App.view == "artist" || App.view == "search" || App.view == "queue": TracksView { }
+                    if App.view == "grid": GridView { }
+                    if App.view == "stub": StubView { }
+                    if App.view == "settings": SettingsView { }
+                }
+
+                TopBar {
+                    y: 0;
+                }
+            }
+        }
+
+        PlayerBar { }
+    }
+    if App.logged-in && App.show-now-playing: NowPlayingView {
+        PlayerBar {
+            y: parent.height - self.height;
+            overlay: true;
+        }
+    }
+}

@@ -5645,7 +5645,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tidal-api"
+name = "tide-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5660,28 +5660,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "tidal-app"
+name = "tide-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
  "image",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "open",
  "serde",
  "serde_json",
  "slint",
  "slint-build",
- "tidal-api",
- "tidal-audio",
- "tidal-cache",
- "tidal-macos",
+ "tide-api",
+ "tide-audio",
+ "tide-cache",
+ "tide-macos",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "tidal-audio"
+name = "tide-audio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5693,7 +5696,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tidal-cache"
+name = "tide-cache"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5703,13 +5706,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tidal-api",
+ "tide-api",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "tidal-macos"
+name = "tide-macos"
 version = "0.1.0"
 dependencies = [
  "anyhow",
