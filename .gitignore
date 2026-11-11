@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Screenshots of the official client used as a private design reference
+/reference/

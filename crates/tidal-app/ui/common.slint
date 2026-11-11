@@ -1,0 +1,346 @@
+// Shared theme, data types, application state and small building blocks.
+
+export struct TrackData {
+    id: string,
+    title: string,
+    artist: string,
+    album: string,
+    duration: string,
+    date-added: string,
+    bpm: string,
+    explicit: bool,
+    favorite: bool,
+    cover: image,
+}
+
+export struct CardData {
+    id: string,
+    kind: string, // playlist | album | mix | artist | folder | tracks
+    title: string,
+    subtitle: string,
+    image: image,
+}
+
+export struct SectionData {
+    title: string,
+    layout: string, // shortcuts | cards | rows | tracks
+    cards: [CardData],
+    tracks: [TrackData],
+}
+
+export struct LyricLine {
+    text: string,
+    active: bool,
+}
+
+export global Theme {
+    out property <color> bg: #000000;
+    out property <color> surface: #141414;
+    out property <color> surface-hover: #1c1c1c;
+    out property <color> pill: #1e1e1e;
+    out property <color> selected: #262626;
+    out property <color> border: #1a1a1a;
+    out property <color> player-bg: #1b1b1c;
+    out property <color> text: #ffffff;
+    out property <color> text-secondary: #8c8c8c;
+    out property <color> text-dim: #4d4d4d;
+    out property <color> text-header: #999999;
+    out property <color> max: #ffd432;
+    out property <color> lossless: #33ffee;
+}
+
+export global App {
+    // Session
+    in property <bool> logged-in: false;
+    in property <string> username: "";
+    in property <string> user-code: "";
+    in property <string> verification-url: "";
+    in property <string> auth-status: "";
+
+    // Navigation. view: home | tracks | detail | grid | search | queue | stub
+    in property <string> view: "home";
+    in property <string> nav-key: "home";
+    in property <string> page-title: "";
+    in property <string> page-subtitle: "";
+    in property <image> page-cover;
+    in property <bool> page-has-cover: false;
+    in property <bool> loading: false;
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
+    in-out property <string> search-text: "";
+    in-out property <string> filter-text: "";
+
+    // Content
+    in property <[SectionData]> sections;
+    in property <[TrackData]> tracks;
+    in property <bool> tracks-show-date: true;
+    in property <[CardData]> grid-cards;
+    in property <[CardData]> sidebar-playlists;
+
+    // Player
+    in property <bool> has-track: false;
+    in property <string> current-id: "";
+    in property <string> np-title: "";
+    in property <string> np-artist: "";
+    in property <string> np-context: "";
+    in property <image> np-cover;
+    in property <image> np-cover-large;
+    in property <color> np-tint: #3a3a3a;
+    in property <bool> np-explicit: false;
+    in property <bool> np-favorite: false;
+    in property <bool> playing: false;
+    in property <bool> buffering: false;
+    in property <float> progress: 0.0;
+    in property <string> elapsed: "0:00";
+    in property <string> total: "0:00";
+    in property <string> quality-label: "";
+    in property <string> quality-tier: "max"; // max | lossless | high
+    in property <string> output-info: "";
+    in-out property <float> volume: 1.0;
+    in property <bool> muted: false;
+    in property <bool> shuffle: false;
+    in property <int> repeat-mode: 0; // 0 off, 1 all, 2 one
+    out property <color> accent: quality-tier == "max" ? Theme.max : quality-tier == "lossless" ? Theme.lossless : Theme.text;
+
+    // Now playing overlay
+    in-out property <bool> show-now-playing: false;
+    in property <[LyricLine]> lyrics;
+    in property <string> lyrics-status: "";
+
+    callback navigate(string);
+    callback open-card(CardData);
+    callback back();
+    callback forward();
+    callback search(string);
+    callback filter(string);
+    callback rows-visible(int, int);
+    callback play-track(string);
+    callback play-section-track(int, string);
+    callback play-all(bool);
+    callback toggle-play();
+    callback next();
+    callback prev();
+    callback seek(float);
+    callback set-volume(float);
+    callback toggle-mute();
+    callback toggle-shuffle();
+    callback cycle-repeat();
+    callback toggle-favorite(string);
+    callback open-now-playing();
+    callback login();
+    callback open-browser();
+    callback logout();
+    callback drag-window();
+}
+
+export component Icon inherits Image {
+    in property <color> tint: Theme.text;
+    in property <length> size: 20px;
+    width: size;
+    height: size;
+    colorize: tint;
+    image-fit: contain;
+}
+
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> size: 20px;
+    in property <color> tint: Theme.text-secondary;
+    in property <color> hover-tint: Theme.text;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: size + 16px;
+    height: size + 16px;
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Icon {
+        source: root.icon;
+        size: root.size;
+        tint: !root.enabled ? Theme.text-dim : ta.has-hover ? root.hover-tint : root.tint;
+    }
+}
+
+// Artwork with rounded corners and a neutral placeholder while loading.
+export component Cover inherits Rectangle {
+    in property <image> source;
+    in property <length> radius: 4px;
+    in property <bool> round: false;
+    border-radius: round ? self.width / 2 : radius;
+    background: #1c1c1c;
+    clip: true;
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.source;
+        image-fit: cover;
+    }
+}
+
+// The gradient "My Tracks" tile used for the favourites shortcut.
+export component TracksTile inherits Rectangle {
+    in property <length> radius: 4px;
+    border-radius: radius;
+    background: @linear-gradient(135deg, #6a5cff 0%, #3aa0ff 55%, #5ad1ff 100%);
+    Icon {
+        source: @image-url("icons/heart-fill.svg");
+        size: root.width * 0.3;
+        x: root.width - self.width - root.width * 0.12;
+        y: root.height * 0.12;
+    }
+
+    Text {
+        x: root.width * 0.1;
+        y: root.height - self.height - root.height * 0.08;
+        text: "My Tracks";
+        color: white;
+        font-size: max(6px, root.width * 0.11);
+        font-weight: 700;
+    }
+}
+
+export component CardArt inherits Rectangle {
+    in property <CardData> card;
+    in property <length> radius: 4px;
+    if card.kind == "tracks": TracksTile {
+        width: 100%;
+        height: 100%;
+        radius: root.radius;
+    }
+    if card.kind == "folder": Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: root.radius;
+        background: #1c1c1c;
+        Icon {
+            source: @image-url("icons/folder.svg");
+            size: root.width * 0.42;
+            tint: Theme.text-secondary;
+        }
+    }
+    if card.kind != "tracks" && card.kind != "folder": Cover {
+        width: 100%;
+        height: 100%;
+        source: card.image;
+        radius: root.radius;
+        round: card.kind == "artist";
+    }
+}
+
+export component ExplicitBadge inherits Rectangle {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: #e6e6e6;
+    Text {
+        text: "E";
+        color: black;
+        font-size: 10px;
+        font-weight: 800;
+    }
+}
+
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> primary: false;
+    callback clicked();
+    height: 53px;
+    width: 176px;
+    border-radius: self.height / 2;
+    background: primary ? (ta.has-hover ? #e6e6e6 : white) : (ta.has-hover ? #222222 : Theme.surface);
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                source: root.icon;
+                size: 22px;
+                tint: root.primary ? black : white;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.primary ? black : white;
+            font-size: 17px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Thin progress / volume slider. Reports the released (or dragged) fraction.
+export component Slider inherits Rectangle {
+    in property <float> value;
+    in property <bool> live: false;
+    callback changed(float);
+    property <float> shown: ta.pressed ? drag : value;
+    property <float> drag;
+    height: 16px;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.drag = clamp(self.mouse-x / self.width, 0, 1);
+                if root.live {
+                    root.changed(root.drag);
+                }
+            } else if e.kind == PointerEventKind.up {
+                root.changed(root.drag);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.drag = clamp(self.mouse-x / self.width, 0, 1);
+                if root.live {
+                    root.changed(root.drag);
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: #404040;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            border-radius: 2px;
+            background: white;
+        }
+    }
+
+    if ta.has-hover || ta.pressed: Rectangle {
+        x: clamp(root.width * root.shown - 6px, 0px, root.width - 12px);
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: white;
+    }
+}
+
+// Empty chrome area that moves the window when dragged (the title bar is hidden).
+export component DragArea inherits TouchArea {
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            App.drag-window();
+        }
+    }
+}

@@ -21,6 +21,7 @@ async fn test_services_initialization() {
         duration_secs: 215,
         cover_url: Some("https://resources.tidal.com/images/test/640x640.jpg".to_string()),
         audio_quality: "HI_RES".to_string(),
+        ..Default::default()
     };
 
     meta.save_favorites(&[track.clone()]).unwrap();

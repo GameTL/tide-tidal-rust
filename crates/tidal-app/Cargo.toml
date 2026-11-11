@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "tide"
+path = "src/main.rs"
+
 [dependencies]
-slint = "1.18.1"
+slint = { version = "1.18.1", features = ["unstable-winit-030"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tidal-api = { path = "../tidal-api" }
 tidal-cache = { path = "../tidal-cache" }
 tidal-audio = { path = "../tidal-audio" }

@@ -6,6 +6,9 @@ use tidlers::client::models::playback::AudioQuality;
 use tidlers::client::models::search::config::{SearchConfig, SearchType};
 use tidlers::TidalClient;
 
+pub mod web;
+pub use web::{ApiHandle, Card, Lyrics, Section, StreamInfo};
+
 #[derive(Error, Debug)]
 pub enum ApiError {
     #[error("Authentication failed: {0}")]
@@ -22,7 +25,7 @@ pub enum ApiError {
     NoStream(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrackItem {
     pub id: String,
     pub title: String,
@@ -33,6 +36,13 @@ pub struct TrackItem {
     pub duration_secs: u32,
     pub cover_url: Option<String>,
     pub audio_quality: String,
+    #[serde(default)]
+    pub explicit: bool,
+    /// Human-readable "date added" label (e.g. "Last week") when listed from a collection.
+    #[serde(default)]
+    pub date_added: Option<String>,
+    #[serde(default)]
+    pub bpm: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +145,40 @@ impl TidalService {
         Ok(true)
     }
 
+    /// Snapshot of the current credentials for lock-free API calls.
+    pub fn handle(&self) -> Option<web::ApiHandle> {
+        Some(web::ApiHandle {
+            token: self.client.session.auth.access_token.clone()?,
+            country: self.country_code(),
+            user_id: self.client.session.auth.user_id?,
+        })
+    }
+
+    /// Refresh the access token if it is close to expiry and persist the session.
+    pub async fn refresh(&mut self) -> Result<(), ApiError> {
+        self.client.refresh_access_token(false).await.map_err(|e| ApiError::Auth(e.to_string()))?;
+        self.save_session()
+    }
+
+    pub fn user_id(&self) -> Option<u64> {
+        self.client.session.auth.user_id
+    }
+
+    /// Display name of the logged-in account.
+    pub fn username(&self) -> Option<String> {
+        let info = serde_json::to_value(self.client.user_info.as_ref()?).ok()?;
+        ["username", "email", "firstName"]
+            .iter()
+            .find_map(|k| info.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from))
+    }
+
+    pub fn country_code(&self) -> String {
+        self.client.user_info.as_ref()
+            .and_then(|u| serde_json::to_value(u).ok())
+            .and_then(|v| v.get("countryCode").and_then(|c| c.as_str()).map(String::from))
+            .unwrap_or_else(|| "US".into())
+    }
+
     pub fn is_authenticated(&self) -> bool {
         self.session_file.exists()
     }
@@ -166,6 +210,7 @@ impl TidalService {
                 duration_secs: track.duration as u32,
                 cover_url,
                 audio_quality: format!("{:?}", track.audio_quality),
+                ..Default::default()
             });
         }
         Ok(tracks)
@@ -207,6 +252,7 @@ impl TidalService {
             duration_secs: track.duration as u32,
             cover_url,
             audio_quality: format!("{:?}", track.audio_quality),
+            ..Default::default()
         })
     }
 
@@ -254,6 +300,7 @@ impl TidalService {
                     duration_secs: track.duration as u32,
                     cover_url,
                     audio_quality: track.audio_quality.unwrap_or_else(|| "LOSSLESS".to_string()),
+                    ..Default::default()
                 });
             }
         }

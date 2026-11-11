@@ -70,8 +70,36 @@ impl MetadataCache {
             );
 
             CREATE INDEX IF NOT EXISTS idx_history_played ON history(played_at DESC);
+
+            CREATE TABLE IF NOT EXISTS kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             "
         )?;
+        Ok(())
+    }
+
+    /// Store an arbitrary JSON document (home feed, playlists, ...) for instant offline boot.
+    pub fn put_json(&self, key: &str, json: &str) -> Result<(), CacheError> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            params![key, json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_json(&self, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| r.get(0)).ok()
+    }
+
+    pub fn clear_json(&self) -> Result<(), CacheError> {
+        self.conn.lock().unwrap().execute("DELETE FROM kv", [])?;
         Ok(())
     }
 
@@ -125,6 +153,7 @@ impl MetadataCache {
                 duration_secs: row.get(6)?,
                 cover_url: row.get(7)?,
                 audio_quality: row.get(8)?,
+                ..Default::default()
             }))
         } else {
             Ok(None)
@@ -164,6 +193,7 @@ impl MetadataCache {
                 duration_secs: row.get(6)?,
                 cover_url: row.get(7)?,
                 audio_quality: row.get(8)?,
+                ..Default::default()
             })
         })?;
         let mut result = Vec::new();
@@ -203,6 +233,7 @@ impl MetadataCache {
                 duration_secs: row.get(6)?,
                 cover_url: row.get(7)?,
                 audio_quality: row.get(8)?,
+                ..Default::default()
             })
         })?;
         let mut result = Vec::new();
@@ -270,13 +301,29 @@ impl AudioCache {
         let client = reqwest::Client::new();
         let mut file = std::fs::File::create(&tmp)?;
 
-        for url in urls {
-            let mut resp = client.get(url).send().await?.error_for_status()?;
-            while let Some(chunk) = resp.chunk().await? {
+        // DASH streams are hundreds of small segments: fetch a window of them
+        // concurrently, but always write in order.
+        const WINDOW: usize = 8;
+        for window in urls.chunks(WINDOW) {
+            let mut set = tokio::task::JoinSet::new();
+            for (i, url) in window.iter().enumerate() {
+                let (client, url) = (client.clone(), url.clone());
+                set.spawn(async move {
+                    let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+                    Ok::<_, reqwest::Error>((i, bytes))
+                });
+            }
+            let mut parts = vec![None; window.len()];
+            while let Some(joined) = set.join_next().await {
+                let (i, bytes) = joined.map_err(|e| std::io::Error::other(e.to_string()))??;
+                parts[i] = Some(bytes);
+            }
+            for part in parts.into_iter().flatten() {
                 use std::io::Write;
-                file.write_all(&chunk)?;
+                file.write_all(&part)?;
             }
         }
+        drop(file);
 
         std::fs::rename(&tmp, &dest)?;
         self.enforce_quota()?;
@@ -377,6 +424,7 @@ mod tests {
             duration_secs: 240,
             cover_url: Some("https://example.com/cover.jpg".to_string()),
             audio_quality: "HI_RES".to_string(),
+            ..Default::default()
         };
 
         cache.save_favorites(&[track.clone()]).unwrap();

@@ -1,0 +1,949 @@
+// Main content views.
+import { ScrollView } from "std-widgets.slint";
+import { App, Theme, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, PillButton, DragArea } from "common.slint";
+
+// ---------------------------------------------------------------- cards
+
+component MediaCard inherits Rectangle {
+    in property <CardData> card;
+    height: self.width + 76px;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            App.open-card(root.card);
+        }
+    }
+
+    CardArt {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.width;
+        card: root.card;
+        opacity: ta.has-hover ? 0.8 : 1.0;
+    }
+
+    Text {
+        x: 0;
+        y: root.width + 12px;
+        width: root.width;
+        text: card.title;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: 500;
+        overflow: elide;
+        horizontal-alignment: card.kind == "artist" ? center : left;
+    }
+
+    Text {
+        x: 0;
+        y: root.width + 35px;
+        width: root.width;
+        height: 42px;
+        text: card.subtitle;
+        color: Theme.text-secondary;
+        font-size: 15px;
+        wrap: word-wrap;
+        overflow: elide;
+        vertical-alignment: top;
+        horizontal-alignment: card.kind == "artist" ? center : left;
+    }
+}
+
+// Compact tile: artwork left, two lines of text.
+component RowCard inherits Rectangle {
+    in property <CardData> card;
+    in property <bool> tile: false;
+    in property <length> art: 48px;
+    height: tile ? 66px : 62px;
+    border-radius: 4px;
+    background: tile ? (ta.has-hover ? #1e1e1e : Theme.surface) : (ta.has-hover ? #111111 : transparent);
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            App.open-card(root.card);
+        }
+    }
+
+    CardArt {
+        x: tile ? 9px : 0px;
+        width: root.art;
+        height: root.art;
+        card: root.card;
+        radius: 3px;
+    }
+
+    VerticalLayout {
+        x: (tile ? 9px : 0px) + root.art + 13px;
+        width: root.width - self.x - 12px;
+        alignment: center;
+        spacing: 3px;
+        Text {
+            text: card.title;
+            color: Theme.text;
+            font-size: tile ? 13.5px : 15px;
+            font-weight: tile ? 600 : 500;
+            overflow: elide;
+        }
+
+        if card.subtitle != "": Text {
+            text: card.subtitle;
+            color: Theme.text-secondary;
+            font-size: tile ? 13px : 15px;
+            overflow: elide;
+        }
+    }
+}
+
+component RowTrack inherits Rectangle {
+    in property <TrackData> track;
+    callback play();
+    property <bool> active: track.id == App.current-id;
+    height: 62px;
+    border-radius: 4px;
+    background: ta.has-hover ? #111111 : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.play();
+        }
+    }
+
+    Cover {
+        x: 0;
+        width: 62px;
+        height: 62px;
+        source: track.cover;
+        radius: 3px;
+    }
+
+    VerticalLayout {
+        x: 75px;
+        width: root.width - 75px - 56px;
+        alignment: center;
+        spacing: 3px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            Text {
+                text: track.title;
+                color: active ? App.accent : Theme.text;
+                font-size: 15px;
+                font-weight: 500;
+                overflow: elide;
+            }
+
+            if track.explicit: VerticalLayout {
+                alignment: center;
+                ExplicitBadge { }
+            }
+        }
+
+        Text {
+            text: track.artist;
+            color: Theme.text-secondary;
+            font-size: 15px;
+            overflow: elide;
+        }
+    }
+
+    Icon {
+        x: root.width - 44px;
+        source: @image-url("icons/more.svg");
+        size: 20px;
+        tint: Theme.text-secondary;
+    }
+}
+
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <bool> arrows: false;
+    in property <bool> can-prev: false;
+    in property <bool> can-next: false;
+    callback prev();
+    callback next();
+    height: 34px;
+    Text {
+        x: 0;
+        text: root.title;
+        color: Theme.text;
+        font-size: 20px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+
+    HorizontalLayout {
+        x: root.width - self.width - 10px;
+        width: self.preferred-width;
+        spacing: 10px;
+        if root.arrows: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 13px;
+                background: #141414;
+                IconButton {
+                    icon: @image-url("icons/chevron-left.svg");
+                    size: 14px;
+                    enabled: root.can-prev;
+                    tint: Theme.text;
+                    clicked => {
+                        root.prev();
+                    }
+                }
+            }
+        }
+        if root.arrows: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 13px;
+                background: #141414;
+                IconButton {
+                    icon: @image-url("icons/chevron-right.svg");
+                    size: 14px;
+                    enabled: root.can-next;
+                    tint: Theme.text;
+                    clicked => {
+                        root.next();
+                    }
+                }
+            }
+        }
+        Text {
+            text: "View all";
+            color: Theme.text-secondary;
+            font-size: 15px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Carousel inherits Rectangle {
+    in property <SectionData> section;
+    property <length> gap: 17px;
+    property <int> per-page: max(2, floor((self.width + gap) / (200px + gap)));
+    property <length> card-w: (self.width - (per-page - 1) * gap) / per-page;
+    property <int> offset: 0;
+    property <int> max-offset: max(0, section.cards.length - per-page);
+    height: 34px + 16px + card-w + 76px;
+    SectionHeader {
+        y: 0;
+        title: section.title;
+        arrows: true;
+        can-prev: root.offset > 0;
+        can-next: root.offset < root.max-offset;
+        prev => {
+            root.offset = max(0, root.offset - root.per-page);
+        }
+        next => {
+            root.offset = min(root.max-offset, root.offset + root.per-page);
+        }
+    }
+
+    Rectangle {
+        y: 50px;
+        height: card-w + 76px;
+        clip: true;
+        Rectangle {
+            x: -min(root.offset, root.max-offset) * (card-w + gap);
+            width: section.cards.length * (card-w + gap);
+            animate x {
+                duration: 280ms;
+                easing: ease-out;
+            }
+            for card[i] in section.cards: MediaCard {
+                x: i * (card-w + gap);
+                y: 0;
+                width: card-w;
+                card: card;
+            }
+        }
+    }
+}
+
+component RowGrid inherits Rectangle {
+    in property <SectionData> section;
+    in property <int> section-index;
+    in property <bool> tiles: false;
+    property <int> cols: self.width > 760px ? 3 : 2;
+    property <length> gap-x: tiles ? 9px : 30px;
+    property <length> row-h: tiles ? 75px : 79px;
+    property <length> col-w: (self.width - (cols - 1) * gap-x) / cols;
+    property <int> count: section.layout == "tracks" ? section.tracks.length : section.cards.length;
+    property <length> head: tiles ? 0px : 50px;
+    height: head + ceil(count / cols) * row-h - (tiles ? 9px : 17px);
+    if !tiles: SectionHeader {
+        y: 0;
+        title: section.title;
+    }
+    if section.layout == "tracks": Rectangle {
+        y: head;
+        for track[i] in section.tracks: RowTrack {
+            x: mod(i, cols) * (col-w + gap-x);
+            y: floor(i / cols) * row-h;
+            width: col-w;
+            track: track;
+            play => {
+                App.play-section-track(root.section-index, track.id);
+            }
+        }
+    }
+    if section.layout != "tracks": Rectangle {
+        y: head;
+        for card[i] in section.cards: RowCard {
+            x: mod(i, cols) * (col-w + gap-x);
+            y: floor(i / cols) * row-h;
+            width: col-w;
+            card: card;
+            tile: root.tiles;
+            art: root.tiles ? 48px : 62px;
+        }
+    }
+}
+
+component Spinner inherits Rectangle {
+    height: 120px;
+    Text {
+        text: "Loading…";
+        color: Theme.text-secondary;
+        font-size: 15px;
+    }
+}
+
+export component HomeView inherits Rectangle {
+    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    ScrollView {
+        VerticalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-top: 4px;
+            padding-bottom: 48px;
+            spacing: 0px;
+            alignment: start;
+            // Tabs
+            Rectangle {
+                height: 44px;
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: 18px;
+                    for tab[i] in ["For you", "Staff Picks", "Uploads"]: Rectangle {
+                        width: label.preferred-width;
+                        label := Text {
+                            text: tab;
+                            color: i == 0 ? Theme.text : Theme.text-secondary;
+                            font-size: 15px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+
+                        if i == 0: Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            background: white;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: #161616;
+                }
+            }
+
+            Rectangle {
+                height: 35px;
+            }
+
+            if App.sections.length == 0: Spinner { }
+            for section[i] in App.sections: VerticalLayout {
+                padding-bottom: section.layout == "shortcuts" ? 44px : 38px;
+                if section.layout == "shortcuts": RowGrid {
+                    section: section;
+                    section-index: i;
+                    tiles: true;
+                }
+                if section.layout == "cards": Carousel {
+                    section: section;
+                }
+                if section.layout == "rows" || section.layout == "tracks": RowGrid {
+                    section: section;
+                    section-index: i;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- track table
+
+component HeaderLabel inherits Text {
+    color: Theme.text-header;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.6px;
+    vertical-alignment: center;
+}
+
+component Cell inherits Text {
+    color: Theme.text;
+    font-size: 15px;
+    font-weight: 500;
+    overflow: elide;
+    vertical-alignment: center;
+}
+
+component TrackRow inherits Rectangle {
+    in property <TrackData> track;
+    in property <int> index;
+    in property <bool> wide;
+    in property <bool> show-date;
+    in property <length> x-artist;
+    in property <length> x-album;
+    in property <length> x-date;
+    in property <length> x-time;
+    in property <length> x-bpm;
+    property <bool> active: track.id == App.current-id;
+    height: 53px;
+    border-radius: 6px;
+    background: ta.has-hover ? #121212 : transparent;
+    ta := TouchArea {
+        double-clicked => {
+            App.play-track(track.id);
+        }
+    }
+
+    // Index / play affordance
+    Rectangle {
+        x: 0;
+        width: 44px;
+        if active && !ta.has-hover: Icon {
+            source: @image-url("icons/volume.svg");
+            size: 17px;
+            tint: App.accent;
+        }
+        if !active && !ta.has-hover: Text {
+            text: index + 1;
+            color: #7c7c7c;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        if ta.has-hover: IconButton {
+            icon: active && App.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+            size: 15px;
+            tint: Theme.text;
+            clicked => {
+                if (active) {
+                    App.toggle-play();
+                } else {
+                    App.play-track(track.id);
+                }
+            }
+        }
+    }
+
+    Cover {
+        x: 46px;
+        width: 46px;
+        height: 46px;
+        source: track.cover;
+        radius: 2px;
+    }
+
+    HorizontalLayout {
+        x: 105px;
+        width: x-artist - 105px - 24px;
+        alignment: start;
+        spacing: 8px;
+        Cell {
+            text: track.title;
+            color: active ? App.accent : Theme.text;
+        }
+
+        if track.explicit: VerticalLayout {
+            alignment: center;
+            ExplicitBadge { }
+        }
+    }
+
+    Cell {
+        x: x-artist;
+        width: x-album - x-artist - 24px;
+        text: track.artist;
+    }
+
+    Cell {
+        x: x-album;
+        width: (show-date ? x-date : x-time) - x-album - 20px;
+        text: track.album;
+    }
+
+    if show-date: Cell {
+        x: x-date;
+        width: x-time - x-date - 12px;
+        text: track.date-added;
+    }
+    Cell {
+        x: x-time;
+        text: track.duration;
+    }
+
+    if wide: Cell {
+        x: x-bpm;
+        text: track.bpm;
+    }
+    Icon {
+        x: root.width - 66px;
+        source: @image-url("icons/plus.svg");
+        size: 18px;
+        tint: Theme.text-secondary;
+    }
+
+    IconButton {
+        x: root.width - 42px;
+        icon: track.favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+        size: 17px;
+        tint: Theme.text;
+        clicked => {
+            App.toggle-favorite(track.id);
+        }
+    }
+}
+
+export component TracksView inherits Rectangle {
+    property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 89px);
+    property <length> w: self.width - 2 * pad;
+    property <bool> wide: w > 980px;
+    property <bool> show-date: App.tracks-show-date && w > 760px;
+    property <bool> has-cover: App.page-has-cover;
+    property <bool> filterable: App.view == "tracks";
+    property <length> row-h: 53px;
+    // Vertical layout of the header block.
+    property <length> y-title: has-cover ? 4px : 8px;
+    property <length> hero-h: has-cover ? 218px : 38px;
+    property <length> y-buttons: y-title + hero-h + (has-cover ? 28px : 24px);
+    property <length> y-filter: y-buttons + 53px + 36px;
+    property <length> y-columns: filterable ? y-filter + 44px + 40px : y-buttons + 53px + 30px;
+    property <length> header-h: y-columns + 36px;
+    // Column positions (fractions measured from the official client).
+    property <length> x-artist: wide ? w * 0.324 : w * 0.40;
+    property <length> x-album: wide ? w * 0.544 : w * 0.64;
+    property <length> x-date: w * 0.724;
+    property <length> x-time: wide ? w * 0.839 : w - 150px;
+    property <length> x-bpm: w * 0.891;
+    // Hand-rolled virtualisation so the header scrolls with the rows.
+    property <int> first: max(0, floor((-sv.content-y - header-h) / row-h));
+    property <int> visible-rows: ceil(self.height / row-h) + 2;
+    changed first => {
+        App.rows-visible(first, visible-rows);
+    }
+    changed visible-rows => {
+        App.rows-visible(first, visible-rows);
+    }
+    sv := ScrollView {
+        content-width: root.width;
+        content-height: header-h + App.tracks.length * row-h + 48px;
+        if has-cover: Cover {
+            x: pad;
+            y: y-title;
+            width: 218px;
+            height: 218px;
+            source: App.page-cover;
+            radius: 4px;
+        }
+        Text {
+            x: has-cover ? pad + 218px + 32px : pad;
+            y: has-cover ? y-title + 74px : y-title;
+            width: root.width - self.x - pad;
+            height: 38px;
+            text: App.page-title;
+            color: Theme.text;
+            font-size: has-cover ? 34px : 28px;
+            font-weight: 700;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        if has-cover: Text {
+            x: pad + 218px + 32px;
+            y: y-title + 124px;
+            width: root.width - self.x - pad;
+            text: App.page-subtitle;
+            color: Theme.text-secondary;
+            font-size: 15px;
+            overflow: elide;
+        }
+        PillButton {
+            x: pad;
+            y: y-buttons;
+            text: "Play";
+            icon: @image-url("icons/play.svg");
+            primary: true;
+            clicked => {
+                App.play-all(false);
+            }
+        }
+
+        PillButton {
+            x: pad + 176px + 18px;
+            y: y-buttons;
+            text: "Shuffle";
+            icon: @image-url("icons/shuffle.svg");
+            clicked => {
+                App.play-all(true);
+            }
+        }
+
+        if filterable: Rectangle {
+            x: pad;
+            y: y-filter;
+            width: w;
+            height: 44px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: filter.has-focus ? #3a3a3a : Theme.border;
+            Icon {
+                x: 16px;
+                source: @image-url("icons/search.svg");
+                size: 16px;
+            }
+
+            if filter.text == "": Text {
+                x: 49px;
+                text: "Filter tracks";
+                color: #aeafb2;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            filter := TextInput {
+                x: 49px;
+                width: parent.width - 65px;
+                height: 20px;
+                text <=> App.filter-text;
+                color: Theme.text;
+                font-size: 15px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                edited => {
+                    App.filter(self.text);
+                }
+            }
+        }
+        Rectangle {
+            x: pad;
+            y: y-columns;
+            width: w;
+            height: 36px;
+            HeaderLabel {
+                x: 0;
+                width: 44px;
+                text: "#";
+                horizontal-alignment: center;
+            }
+
+            HeaderLabel {
+                x: 46px;
+                text: "TITLE";
+            }
+
+            HeaderLabel {
+                x: x-artist;
+                text: "ARTIST";
+            }
+
+            HeaderLabel {
+                x: x-album;
+                text: "ALBUM";
+            }
+
+            if show-date: HeaderLabel {
+                x: x-date;
+                text: "DATE ADDED";
+            }
+            if show-date: Icon {
+                x: x-date + 91px;
+                source: @image-url("icons/chevron-down.svg");
+                size: 14px;
+                tint: Theme.lossless;
+            }
+            HeaderLabel {
+                x: x-time;
+                text: "TIME";
+            }
+
+            if wide: HeaderLabel {
+                x: x-bpm;
+                text: "BPM";
+            }
+        }
+
+        for i in root.visible-rows: TrackRow {
+            x: pad;
+            y: header-h + (first + i) * row-h;
+            width: w;
+            visible: first + i < App.tracks.length;
+            track: App.tracks[first + i];
+            index: first + i;
+            wide: root.wide;
+            show-date: root.show-date;
+            x-artist: root.x-artist;
+            x-album: root.x-album;
+            x-date: root.x-date;
+            x-time: root.x-time;
+            x-bpm: root.x-bpm;
+        }
+        if App.tracks.length == 0: Text {
+            x: pad;
+            y: header-h + 24px;
+            text: App.loading ? "Loading…" : "Nothing here yet";
+            color: Theme.text-secondary;
+            font-size: 15px;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- card grid
+
+export component GridView inherits Rectangle {
+    property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 90px);
+    property <length> w: self.width - 2 * pad;
+    property <length> gap: 18px;
+    property <int> cols: max(2, floor((w + gap) / (236px + gap)));
+    property <length> card-w: (w - (cols - 1) * gap) / cols;
+    property <length> cell-h: card-w + 76px + 64px;
+    ScrollView {
+        content-width: root.width;
+        content-height: 82px + ceil(App.grid-cards.length / cols) * cell-h + 24px;
+        HorizontalLayout {
+            x: pad;
+            y: 8px;
+            height: 38px;
+            width: self.preferred-width;
+            spacing: 22px;
+            Text {
+                text: App.page-title;
+                color: Theme.text;
+                font-size: 28px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    source: @image-url("icons/more.svg");
+                    size: 22px;
+                    tint: Theme.text-secondary;
+                }
+            }
+        }
+
+        for card[i] in App.grid-cards: MediaCard {
+            x: pad + mod(i, cols) * (card-w + gap);
+            y: 82px + floor(i / cols) * cell-h;
+            width: card-w;
+            card: card;
+        }
+        if App.grid-cards.length == 0: Text {
+            x: pad;
+            y: 100px;
+            text: App.loading ? "Loading…" : "Nothing here yet";
+            color: Theme.text-secondary;
+            font-size: 15px;
+        }
+    }
+}
+
+export component StubView inherits Rectangle {
+    VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+        Text {
+            text: App.page-title;
+            color: Theme.text;
+            font-size: 28px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "This section isn't available in tidal-rust yet.";
+            color: Theme.text-secondary;
+            font-size: 15px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- now playing
+
+export component NowPlayingView inherits Rectangle {
+    background: #1a1a1a;
+    Rectangle {
+        background: @linear-gradient(180deg, App.np-tint 0%, App.np-tint.darker(0.6) 55%, #1a1716 100%);
+    }
+
+    // Swallow clicks so they don't reach the view underneath.
+    TouchArea { }
+
+    DragArea {
+        y: 0;
+        height: 64px;
+    }
+
+    property <length> art: min(self.height - 96px - 200px, self.width * 0.40);
+    Cover {
+        x: max(48px, root.width * 0.28 - self.width / 2);
+        y: (root.height - 96px - self.height) / 2 + 20px;
+        width: art;
+        height: art;
+        source: App.np-cover-large;
+        radius: 2px;
+        drop-shadow-blur: 60px;
+        drop-shadow-color: #00000080;
+    }
+
+    VerticalLayout {
+        x: root.width * 0.51;
+        y: 96px;
+        width: root.width * 0.37;
+        height: root.height - 96px - 110px;
+        alignment: center;
+        spacing: 30px;
+        if App.lyrics.length == 0: Text {
+            text: App.lyrics-status;
+            color: #ffffff80;
+            font-size: 28px;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        for line in App.lyrics: Text {
+            text: line.text;
+            color: line.active ? white : #ffffff66;
+            font-size: line.active ? 42px : 38px;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+    }
+
+    HorizontalLayout {
+        x: root.width - self.width - 16px;
+        y: 12px;
+        width: self.preferred-width;
+        height: 40px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 68px;
+                height: 34px;
+                border-radius: 17px;
+                background: white;
+                Text {
+                    text: "Lyrics";
+                    color: black;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+            }
+        }
+
+        IconButton {
+            icon: @image-url("icons/chevron-down.svg");
+            size: 18px;
+            tint: #ffffffb0;
+            clicked => {
+                App.show-now-playing = false;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- login
+
+export component LoginView inherits Rectangle {
+    background: Theme.bg;
+    DragArea {
+        y: 0;
+        height: 64px;
+    }
+
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 420px;
+                height: 440px;
+                border-radius: 16px;
+                background: #0e0e0e;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: 40px;
+                    spacing: 18px;
+                    alignment: center;
+                    Text {
+                        text: "T I D E";
+                        color: Theme.text;
+                        font-size: 30px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: App.user-code == "" ? "Log in to start listening in Max quality." : "Enter this code at link.tidal.com";
+                        color: Theme.text-secondary;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    if App.user-code != "": Rectangle {
+                        height: 72px;
+                        border-radius: 10px;
+                        background: #161616;
+                        TextInput {
+                            text: App.user-code;
+                            read-only: true;
+                            color: Theme.lossless;
+                            font-size: 34px;
+                            font-weight: 700;
+                            letter-spacing: 6px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        PillButton {
+                            width: 240px;
+                            text: App.user-code == "" ? "Log in" : "Open browser";
+                            primary: true;
+                            clicked => {
+                                if (App.user-code == "") {
+                                    App.login();
+                                } else {
+                                    App.open-browser();
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: App.auth-status;
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}
