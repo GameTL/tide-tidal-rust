@@ -27,6 +27,8 @@ impl MetadataCache {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&db_path)?;
+        // Library and listening history are personal: owner-only access.
+        tidal_api::restrict_to_owner(&db_path);
         let cache = Self { conn: std::sync::Mutex::new(conn) };
         cache.init_schema()?;
         Ok(cache)
@@ -99,7 +101,8 @@ impl MetadataCache {
     }
 
     pub fn clear_json(&self) -> Result<(), CacheError> {
-        self.conn.lock().unwrap().execute("DELETE FROM kv", [])?;
+        // Account data goes; app preferences stay.
+        self.conn.lock().unwrap().execute("DELETE FROM kv WHERE key != 'settings'", [])?;
         Ok(())
     }
 
@@ -328,6 +331,29 @@ impl AudioCache {
         std::fs::rename(&tmp, &dest)?;
         self.enforce_quota()?;
         Ok(dest)
+    }
+
+    /// Number of cached tracks and their total size in bytes.
+    pub fn usage(&self) -> (usize, u64) {
+        std::fs::read_dir(&self.base_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .fold((0, 0), |(n, bytes), m| (n + 1, bytes + m.len()))
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// Delete every cached audio file.
+    pub fn clear(&self) -> Result<(), CacheError> {
+        for entry in std::fs::read_dir(&self.base_dir)?.flatten() {
+            if entry.metadata().is_ok_and(|m| m.is_file()) {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn enforce_quota(&self) -> Result<(), CacheError> {

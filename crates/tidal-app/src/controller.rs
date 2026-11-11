@@ -23,7 +23,32 @@ use crate::{App, CardData, LyricLine, MainWindow, SectionData, TrackData};
 pub const QUALITY_KEY: &str = "MAX";
 const PREFETCH_BEFORE_END: Duration = Duration::from_secs(25);
 
+/// User preferences, persisted in the local database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// "max" | "high" | "low"
+    pub quality: String,
+    /// Render on the CPU (about half the memory of the GPU renderer).
+    pub low_memory: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { quality: "max".into(), low_memory: true }
+    }
+}
+
+impl Settings {
+    pub fn load(meta: &MetadataCache) -> Self {
+        meta.get_json("settings").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+    }
+}
+
 pub struct Ctx {
+    pub settings: RwLock<Settings>,
+    /// A PKCE (Max-quality) login that has been started but not finished yet.
+    pkce: tokio::sync::Mutex<Option<TidalService>>,
     pub svc: tokio::sync::Mutex<TidalService>,
     pub api: RwLock<Option<ApiHandle>>,
     pub meta: MetadataCache,
@@ -39,10 +64,13 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(svc: TidalService) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let meta = MetadataCache::new()?;
         Ok(Arc::new(Self {
+            settings: RwLock::new(Settings::load(&meta)),
+            pkce: tokio::sync::Mutex::new(None),
             svc: tokio::sync::Mutex::new(svc),
             api: RwLock::new(None),
-            meta: MetadataCache::new()?,
+            meta,
             audio: AudioCache::new()?,
             images: ImageCache::new()?,
             player: AudioPlayer::new()?,
@@ -61,13 +89,15 @@ impl Ctx {
     pub async fn resolve_audio(&self, track_id: &str) -> Result<PathBuf, String> {
         let lock = self.downloads.lock().unwrap().entry(track_id.to_string()).or_default().clone();
         let _one_download_per_track = lock.lock().await;
-        if let Some(path) = self.audio.get_cached(track_id, QUALITY_KEY) {
+        let quality = self.settings.read().unwrap().quality.clone();
+        let cache_key = quality.to_uppercase();
+        if let Some(path) = self.audio.get_cached(track_id, &cache_key) {
             return Ok(path);
         }
         let api = self.api().ok_or("offline and not cached")?;
-        let stream = api.stream(track_id).await.map_err(|e| e.to_string())?;
+        let stream = api.stream(track_id, &quality).await.map_err(|e| e.to_string())?;
         tracing::info!(track_id, quality = %stream.quality, bits = stream.bit_depth, rate = stream.sample_rate, "resolved stream");
-        self.audio.fetch_or_cache(track_id, QUALITY_KEY, &stream.urls).await.map_err(|e| e.to_string())
+        self.audio.fetch_or_cache(track_id, &cache_key, &stream.urls).await.map_err(|e| e.to_string())
     }
 
     fn with_media(&self, f: impl FnOnce(&mut MacMediaControls)) {
@@ -90,6 +120,7 @@ enum Page {
     Detail { kind: String, id: String, title: String, subtitle: String, cover: Image },
     Search(String),
     Queue,
+    Settings,
     Stub { key: String, title: String },
 }
 
@@ -103,6 +134,8 @@ struct State {
     favorites: Vec<TrackItem>,
     fav_ids: HashSet<String>,
     sections: Vec<Section>,
+    /// Per home section: card model, track model, and how many cards have artwork requested.
+    section_models: Vec<(Rc<VecModel<CardData>>, Rc<VecModel<TrackData>>, usize)>,
 
     /// Tracks behind the table on screen (after filtering) and its model.
     page_tracks: Vec<TrackItem>,
@@ -311,6 +344,18 @@ impl Ui {
         });
         bind!(on_logout, |ui| ui.logout());
         bind!(on_drag_window, |ui| crate::platform::drag_window(&ui.win));
+        bind!(on_minimize, |ui| ui.win.window().set_minimized(true));
+        bind!(on_section_visible, |ui, index, upto| ui.section_visible(index.max(0) as usize, upto.max(0) as usize));
+        bind!(on_set_quality, |ui, quality| ui.update_settings(|s| s.quality = quality.to_string()));
+        bind!(on_set_low_memory, |ui, on| ui.update_settings(|s| s.low_memory = on));
+        bind!(on_clear_cache, |ui| {
+            if let Err(e) = ui.ctx.audio.clear() {
+                tracing::warn!("could not clear the audio cache: {e}");
+            }
+            ui.present_settings();
+        });
+        bind!(on_pkce_start, |ui| ui.pkce_start());
+        bind!(on_pkce_finish, |ui, url| ui.pkce_finish(url.trim().to_string()));
     }
 
     // ------------------------------------------------------------ boot
@@ -320,6 +365,8 @@ impl Ui {
         let app = self.app();
         app.set_logged_in(has_session);
         app.set_quality_label("Max".into());
+        app.set_app_version(env!("CARGO_PKG_VERSION").into());
+        self.present_settings();
         app.set_output_info(format!("System Default · {} kHz", self.ctx.player.sample_rate() as f32 / 1000.0).into());
         if !has_session {
             return;
@@ -327,10 +374,10 @@ impl Ui {
         self.restore_cached();
         self.show(Page::Home, true);
         self.spawn(|ctx| async move {
-            let (ok, api, username) = {
+            let (ok, api, username, max_login) = {
                 let mut svc = ctx.svc.lock().await;
                 let ok = svc.load_session().await.unwrap_or(false);
-                (ok, svc.handle(), svc.username())
+                (ok, svc.handle(), svc.username(), svc.is_pkce())
             };
             if !ok {
                 tracing::warn!("Could not refresh the session; running from local cache only");
@@ -338,6 +385,7 @@ impl Ui {
             *ctx.api.write().unwrap() = if ok { api } else { None };
             on_ui(move |ui| {
                 ui.app().set_username(username.unwrap_or_else(|| "TIDAL".into()).into());
+                ui.app().set_max_login(max_login);
                 if ok {
                     ui.sync_library();
                 }
@@ -416,6 +464,9 @@ impl Ui {
 
     fn load_image(self: &Rc<Self>, url: &str, max_px: u32, apply: impl FnOnce(&Image, Color) + 'static) {
         let key = url_key(url, max_px);
+        if std::env::var_os("TIDE_NO_ART").is_some() {
+            return;
+        }
         {
             let mut st = self.state.borrow_mut();
             if let Some((img, tint)) = st.images.get(&key).cloned() {
@@ -496,18 +547,17 @@ impl Ui {
 
     fn set_sections(self: &Rc<Self>, sections: Vec<Section>) {
         let fav_ids = self.state.borrow().fav_ids.clone();
+        let mut models = Vec::with_capacity(sections.len());
         let rows: Vec<SectionData> = sections
             .iter()
             .map(|s| {
                 let rows_layout = s.layout == "cards" && s.title.eq_ignore_ascii_case("Recently played");
-                let small = s.layout == "shortcuts" || rows_layout;
-                let cards = self.cards_model(&s.cards, if small { 112 } else { 256 });
+                // Artwork is requested later, when the section scrolls near the viewport.
+                let cards = Rc::new(VecModel::from(s.cards.iter().map(card_row).collect::<Vec<_>>()));
                 let tracks = Rc::new(VecModel::from(
                     s.tracks.iter().map(|t| track_row(t, fav_ids.contains(&t.id))).collect::<Vec<_>>(),
                 ));
-                for (i, t) in s.tracks.iter().enumerate() {
-                    self.load_track_cover(&tracks, i, t, 128);
-                }
+                models.push((cards.clone(), tracks.clone(), 0));
                 SectionData {
                     title: s.title.as_str().into(),
                     layout: if rows_layout { "rows".into() } else { s.layout.as_str().into() },
@@ -516,8 +566,130 @@ impl Ui {
                 }
             })
             .collect();
-        self.state.borrow_mut().sections = sections;
+        {
+            let mut st = self.state.borrow_mut();
+            st.sections = sections;
+            st.section_models = models;
+        }
         self.app().set_sections(ModelRc::from(Rc::new(VecModel::from(rows))));
+    }
+
+    /// Home section `index` is near the viewport: fetch artwork for its first `upto` cards.
+    fn section_visible(self: &Rc<Self>, index: usize, upto: usize) {
+        let (cards, tracks, card_model, track_model, from, small) = {
+            let mut st = self.state.borrow_mut();
+            let Some(section) = st.sections.get(index).cloned() else { return };
+            let Some((card_model, track_model, loaded)) = st.section_models.get_mut(index) else { return };
+            let from = *loaded;
+            let upto = upto.min(section.cards.len());
+            *loaded = upto.max(from);
+            let small = section.layout == "shortcuts" || section.title.eq_ignore_ascii_case("Recently played");
+            let tracks = if from == 0 { section.tracks.clone() } else { Vec::new() };
+            let cards: Vec<(usize, Card)> =
+                (from..upto.max(from)).map(|i| (i, section.cards[i].clone())).collect();
+            (cards, tracks, card_model.clone(), track_model.clone(), from, small)
+        };
+        let _ = from;
+        for (i, card) in cards {
+            let Some(url) = card.image_url else { continue };
+            let model = card_model.clone();
+            self.load_image(&url, if small { 112 } else { 256 }, move |img, _| {
+                if let Some(mut row) = model.row_data(i).filter(|r| r.id == card.id.as_str()) {
+                    row.image = img.clone();
+                    model.set_row_data(i, row);
+                }
+            });
+        }
+        for (i, track) in tracks.iter().enumerate() {
+            self.load_track_cover(&track_model, i, track, 128);
+        }
+    }
+
+    // ------------------------------------------------------------ settings
+
+    fn present_settings(&self) {
+        let app = self.app();
+        let settings = self.ctx.settings.read().unwrap().clone();
+        app.set_quality(settings.quality.into());
+        app.set_low_memory(settings.low_memory);
+        let (tracks, bytes) = self.ctx.audio.usage();
+        app.set_cache_info(
+            format!("{tracks} track{} · {:.1} MB on this Mac", if tracks == 1 { "" } else { "s" }, bytes as f64 / 1_048_576.0)
+                .into(),
+        );
+    }
+
+    fn update_settings(&self, change: impl FnOnce(&mut Settings)) {
+        let json = {
+            let mut settings = self.ctx.settings.write().unwrap();
+            change(&mut settings);
+            serde_json::to_string(&*settings).unwrap_or_default()
+        };
+        if let Err(e) = self.ctx.meta.put_json("settings", &json) {
+            tracing::warn!("could not save settings: {e}");
+        }
+        // A pre-loaded next track may be in the old quality.
+        self.ctx.player.clear_queue();
+        self.state.borrow_mut().prefetched_for = None;
+        self.present_settings();
+    }
+
+    /// Step 1 of the Max-quality login: open TIDAL's login page in the browser.
+    fn pkce_start(self: &Rc<Self>) {
+        self.app().set_pkce_status("Opening TIDAL in your browser…".into());
+        self.spawn(|ctx| async move {
+            let started = TidalService::new().and_then(|mut svc| svc.start_pkce_login().map(|url| (svc, url)));
+            let status = match started {
+                Ok((svc, url)) => {
+                    *ctx.pkce.lock().await = Some(svc);
+                    let _ = open::that(url);
+                    "Sign in, then paste the address of the page you land on.".to_string()
+                }
+                Err(e) => format!("Couldn't start the login: {e}"),
+            };
+            on_ui(move |ui| ui.app().set_pkce_status(status.into()));
+        });
+    }
+
+    /// Step 2: exchange the pasted redirect address for a Hi-Res capable session.
+    fn pkce_finish(self: &Rc<Self>, redirect_url: String) {
+        if redirect_url.is_empty() {
+            self.app().set_pkce_status("Paste the address from your browser first.".into());
+            return;
+        }
+        self.app().set_pkce_status("Finishing login…".into());
+        self.spawn(|ctx| async move {
+            let Some(mut svc) = ctx.pkce.lock().await.take() else {
+                on_ui(|ui| ui.app().set_pkce_status("Press “Open TIDAL login” first.".into()));
+                return;
+            };
+            // The existing session is only replaced once the new one is saved.
+            match svc.finish_pkce_login(&redirect_url).await {
+                Ok(username) => {
+                    *ctx.api.write().unwrap() = svc.handle();
+                    *ctx.svc.lock().await = svc;
+                    // Cached files were fetched at the old quality cap.
+                    let _ = ctx.audio.clear();
+                    on_ui(move |ui| {
+                        let app = ui.app();
+                        app.set_max_login(true);
+                        app.set_username(username.into());
+                        app.set_pkce_status("Max quality is enabled. New plays stream in Hi-Res where available.".into());
+                        ui.present_settings();
+                        if app.get_logged_in() {
+                            ui.sync_library();
+                        } else {
+                            ui.boot(true);
+                        }
+                    });
+                }
+                Err(e) => {
+                    // Keep the attempt so the user can paste again.
+                    *ctx.pkce.lock().await = Some(svc);
+                    on_ui(move |ui| ui.app().set_pkce_status(format!("Login failed: {e}").into()));
+                }
+            }
+        });
     }
 
     fn set_sidebar(self: &Rc<Self>, cards: &[Card]) {
@@ -592,6 +764,12 @@ impl Ui {
             "playlists" => Page::Playlists,
             "albums" => Page::Albums,
             "queue" => Page::Queue,
+            "settings" => Page::Settings,
+            "focus-search" => {
+                let app = self.app();
+                app.set_focus_search(app.get_focus_search() + 1);
+                return;
+            }
             "explore" => Page::Stub { key: key.into(), title: "Explore".into() },
             "feed" => Page::Stub { key: key.into(), title: "Feed".into() },
             "videos" => Page::Stub { key: key.into(), title: "Videos".into() },
@@ -709,6 +887,11 @@ impl Ui {
                     (upcoming, st.context.clone())
                 };
                 self.set_tracks(tracks, &context);
+            }
+            Page::Settings => {
+                app.set_view("settings".into());
+                app.set_nav_key("".into());
+                self.present_settings();
             }
             Page::Stub { key, title } => {
                 app.set_view("stub".into());
@@ -1394,7 +1577,11 @@ impl Ui {
         app.set_grid_cards(ModelRc::default());
         app.set_sidebar_playlists(ModelRc::default());
         self.spawn(|ctx| async move {
-            let _ = ctx.svc.lock().await.logout();
+            let mut svc = ctx.svc.lock().await;
+            if let Err(e) = svc.revoke().await {
+                tracing::warn!("could not revoke the session with TIDAL: {e}");
+            }
+            let _ = svc.logout();
         });
     }
 
@@ -1443,6 +1630,10 @@ impl Ui {
             (4000, "06-album-detail", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.app().invoke_search("grammy".into()))),
             (4000, "07-search", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.navigate_key("settings"))),
+            (1500, "08-settings", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.app().set_settings_tab(1))),
+            (1000, "09-settings-account", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("tracks"))),
         ];
         if play {
@@ -1458,13 +1649,13 @@ impl Ui {
                     }
                 }),
             ));
-            steps.push((14_000, "08-playing", Box::new(|_| {})));
+            steps.push((14_000, "10-playing", Box::new(|_| {})));
             steps.push((200, "", Box::new(|ui| ui.seek(0.5))));
-            steps.push((2500, "09-after-seek", Box::new(|_| {})));
+            steps.push((2500, "11-after-seek", Box::new(|_| {})));
             steps.push((200, "", Box::new(|ui| ui.toggle_now_playing())));
-            steps.push((5000, "10-now-playing", Box::new(|_| {})));
+            steps.push((5000, "12-now-playing", Box::new(|_| {})));
             steps.push((200, "", Box::new(|ui| ui.skip(1, true))));
-            steps.push((12_000, "11-next-track", Box::new(|_| {})));
+            steps.push((12_000, "13-next-track", Box::new(|_| {})));
         }
         let _ = std::fs::create_dir_all(&dir);
         fn run(ui: Rc<Ui>, mut steps: std::vec::IntoIter<Step>, dir: PathBuf) {

@@ -34,4 +34,5 @@ The first launch shows a login screen (TIDAL device-code flow in your browser).
 | `crates/tidal-macos` | Media keys and Now Playing |
 | `crates/tidal-app` | The Slint application (`tide` binary) |
 
-See [Goal.md](Goal.md) for the design goals.
+See [Goal.md](Goal.md) for the design goals and [SECURITY.md](SECURITY.md) for how
+login tokens and local data are handled.

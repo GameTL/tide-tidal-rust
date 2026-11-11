@@ -613,4 +613,26 @@ mod tests {
         assert!((remaining - 0.5).abs() < 0.05, "expected ~0.5s after seek, got {remaining}");
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Hi-Res streams arrive as DASH: an init segment plus fragmented-MP4 FLAC
+    /// segments, concatenated on disk. Point TIDE_DASH_SAMPLE at such a file.
+    #[test]
+    fn decodes_fragmented_mp4_flac_when_sample_provided() {
+        let Some(path) = std::env::var_os("TIDE_DASH_SAMPLE").map(PathBuf::from) else { return };
+        let mut src = AudioSource::open(item(&path, 12.0)).unwrap();
+        let format = src.format();
+        let mut out = Vec::new();
+        while src.read_stereo(format.sample_rate, &mut out).unwrap() {}
+        let secs = out.len() as f64 / 2.0 / format.sample_rate as f64;
+        println!("fmp4: {format:?}, decoded {secs:.2}s");
+        assert!(format.sample_rate >= 44_100 && secs > 1.0);
+        assert!(out.iter().any(|s| s.abs() > 0.01));
+
+        src.seek(Duration::from_secs(6)).unwrap();
+        let mut rest = Vec::new();
+        while src.read_stereo(format.sample_rate, &mut rest).unwrap() {}
+        let remaining = rest.len() as f64 / 2.0 / format.sample_rate as f64;
+        println!("fmp4: {remaining:.2}s left after seeking to 6s");
+        assert!((remaining - (secs - 6.0)).abs() < 0.5);
+    }
 }

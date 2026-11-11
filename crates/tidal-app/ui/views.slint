@@ -1,5 +1,6 @@
 // Main content views.
 import { ScrollView } from "std-widgets.slint";
+import { MaxLogin } from "settings.slint";
 import { App, Theme, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, PillButton, DragArea } from "common.slint";
 
 // ---------------------------------------------------------------- cards
@@ -222,7 +223,26 @@ component SectionHeader inherits Rectangle {
     }
 }
 
+// Reports once (and on paging) that a home section is near the viewport, so
+// artwork is only fetched and decoded for what can actually be seen.
+component ArtRequest inherits Rectangle {
+    in property <int> section-index;
+    in property <int> upto;
+    in property <length> window-height: 1200px;
+    property <bool> near: self.absolute-position.y < window-height + 300px && self.absolute-position.y + self.height > -300px;
+    property <int> reported: 0;
+    Timer {
+        interval: 150ms;
+        running: near && reported < upto;
+        triggered => {
+            reported = upto;
+            App.section-visible(section-index, upto);
+        }
+    }
+}
+
 component Carousel inherits Rectangle {
+    in property <int> section-index;
     in property <SectionData> section;
     property <length> gap: 17px;
     property <int> per-page: max(2, floor((self.width + gap) / (200px + gap)));
@@ -230,6 +250,11 @@ component Carousel inherits Rectangle {
     property <int> offset: 0;
     property <int> max-offset: max(0, section.cards.length - per-page);
     height: 34px + 16px + card-w + 76px;
+    ArtRequest {
+        section-index: root.section-index;
+        upto: min(root.offset, root.max-offset) + root.per-page + 1;
+    }
+
     SectionHeader {
         y: 0;
         title: section.title;
@@ -276,6 +301,11 @@ component RowGrid inherits Rectangle {
     property <int> count: section.layout == "tracks" ? section.tracks.length : section.cards.length;
     property <length> head: tiles ? 0px : 50px;
     height: head + ceil(count / cols) * row-h - (tiles ? 9px : 17px);
+    ArtRequest {
+        section-index: root.section-index;
+        upto: 1000;
+    }
+
     if !tiles: SectionHeader {
         y: 0;
         title: section.title;
@@ -368,6 +398,7 @@ export component HomeView inherits Rectangle {
                     tiles: true;
                 }
                 if section.layout == "cards": Carousel {
+                    section-index: i;
                     section: section;
                 }
                 if section.layout == "rows" || section.layout == "tracks": RowGrid {
@@ -878,8 +909,8 @@ export component LoginView inherits Rectangle {
         HorizontalLayout {
             alignment: center;
             Rectangle {
-                width: 420px;
-                height: 440px;
+                width: 520px;
+                height: 600px;
                 border-radius: 16px;
                 background: #0e0e0e;
                 border-width: 1px;
@@ -942,6 +973,20 @@ export component LoginView inherits Rectangle {
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    Text {
+                        text: "Or use the Max-quality login (unlocks Hi-Res)";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    MaxLogin { }
                 }
             }
         }

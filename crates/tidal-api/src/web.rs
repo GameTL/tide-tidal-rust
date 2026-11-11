@@ -508,11 +508,16 @@ impl ApiHandle {
         Ok(Lyrics { plain: s(&v, "lyrics"), synced: parse_lrc(&s(&v, "subtitles")) })
     }
 
-    /// Resolve the best available stream, falling back from Max to Lossless to High.
-    pub async fn stream(&self, track_id: &str) -> Result<StreamInfo, ApiError> {
+    /// Resolve a stream at `preference` ("max" | "high" | "low"), falling back to lower tiers.
+    pub async fn stream(&self, track_id: &str, preference: &str) -> Result<StreamInfo, ApiError> {
+        let ladder: &[&str] = match preference {
+            "low" => &["HIGH", "LOW"],
+            "high" => &["LOSSLESS", "HIGH", "LOW"],
+            _ => &["HI_RES_LOSSLESS", "LOSSLESS", "HIGH"],
+        };
         let url = format!("{V1}/tracks/{track_id}/playbackinfopostpaywall");
         let mut last_err = ApiError::NoStream(track_id.to_string());
-        for quality in ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH"] {
+        for quality in ladder.iter().copied() {
             // Stereo only: the engine cannot decode Dolby Atmos (E-AC-3) or 360 Reality Audio.
             let params = [
                 ("audioquality", quality),

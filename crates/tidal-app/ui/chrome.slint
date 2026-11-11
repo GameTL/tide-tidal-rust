@@ -298,6 +298,12 @@ export component TopBar inherits Rectangle {
             }
         }
 
+        property <int> focus-request: App.focus-search;
+        changed focus-request => {
+            input.focus();
+            input.select-all();
+        }
+
         if input.text != "": IconButton {
             x: parent.width - 40px;
             icon: @image-url("icons/x.svg");
@@ -351,6 +357,34 @@ export component TopBar inherits Rectangle {
                         color: Theme.text-secondary;
                         font-size: 13px;
                         overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: sta.has-hover ? #2a2a2a : transparent;
+                    sta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            App.navigate("settings");
+                        }
+                    }
+
+                    Text {
+                        x: 10px;
+                        text: "Settings";
+                        color: Theme.text;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        x: parent.width - self.width - 10px;
+                        text: "⌘,";
+                        color: Theme.text-secondary;
+                        font-size: 13px;
                         vertical-alignment: center;
                     }
                 }

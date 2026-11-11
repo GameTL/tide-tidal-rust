@@ -131,6 +131,25 @@ export global App {
     callback open-browser();
     callback logout();
     callback drag-window();
+    callback minimize();
+    // Ask for artwork of home section `index`, cards [0, upto).
+    callback section-visible(int, int);
+
+    // Settings
+    in-out property <int> settings-tab: 0;
+    in property <string> quality: "max"; // max | high | low
+    in property <bool> low-memory: true;
+    in property <string> cache-info: "";
+    in property <bool> max-login: false;
+    in property <string> pkce-status: "";
+    in property <string> app-version: "";
+    // Bumped to move keyboard focus into the search field.
+    in property <int> focus-search: 0;
+    callback set-quality(string);
+    callback set-low-memory(bool);
+    callback clear-cache();
+    callback pkce-start();
+    callback pkce-finish(string);
 }
 
 export component Icon inherits Image {

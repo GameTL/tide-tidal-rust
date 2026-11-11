@@ -127,7 +127,7 @@ impl TidalService {
         if let Some(parent) = self.session_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.session_file, json)?;
+        write_private(&self.session_file, json.as_bytes())?;
         Ok(())
     }
 
@@ -135,6 +135,7 @@ impl TidalService {
         if !self.session_file.exists() {
             return Ok(false);
         }
+        restrict_to_owner(&self.session_file);
         let data = std::fs::read_to_string(&self.session_file)?;
         self.client = TidalClient::from_json(&data).map_err(|e| ApiError::Client(e.to_string()))?;
         if let Err(e) = self.client.refresh_access_token(false).await {
@@ -164,6 +165,11 @@ impl TidalService {
         self.client.session.auth.user_id
     }
 
+    /// True when the session came from the PKCE login, which unlocks Hi-Res (Max) streams.
+    pub fn is_pkce(&self) -> bool {
+        self.client.session.auth.pkce_login
+    }
+
     /// Display name of the logged-in account.
     pub fn username(&self) -> Option<String> {
         let info = serde_json::to_value(self.client.user_info.as_ref()?).ok()?;
@@ -181,6 +187,11 @@ impl TidalService {
 
     pub fn is_authenticated(&self) -> bool {
         self.session_file.exists()
+    }
+
+    /// Ask TIDAL to invalidate the current access token (best effort).
+    pub async fn revoke(&self) -> Result<(), ApiError> {
+        self.client.logout().await.map_err(|e| ApiError::Auth(e.to_string()))
     }
 
     pub fn logout(&mut self) -> Result<(), ApiError> {
@@ -305,6 +316,45 @@ impl TidalService {
             }
         }
         Ok(tracks)
+    }
+}
+
+/// Make an existing file (and its directory) readable by the current user only.
+pub fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write a file only the current user can read (it holds OAuth tokens).
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        // Write to a private temp file and rename, so the tokens are never
+        // world-readable and a crash cannot leave a half-written session.
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
     }
 }
 

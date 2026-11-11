@@ -26,11 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("Starting TIDE...");
-    platform::configure_backend();
-
     let service = TidalService::with_device_auth()?;
     let has_session = service.is_authenticated();
     let ctx = Ctx::new(service)?;
+    platform::configure_backend(ctx.settings.read().unwrap().low_memory);
 
     // Media keys / Control Center arrive on a system thread; hop to the UI thread.
     *ctx.media.lock().unwrap() =
@@ -59,14 +58,14 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         "--help" | "-h" => {
             println!("TIDE - a pure-Rust desktop player for TIDAL (macOS)");
             println!("Usage:");
-            println!("  tide                  Launch the 1:1 Tidal desktop GUI");
-            println!("  tide --login          Start OAuth2 Device Code login (tidal.com/device)");
-            println!("  tide --login-pkce     Start OAuth2 PKCE login flow");
-            println!("  tide --status         Show current login status and cache stats");
-            println!("  tide --search <query> Search Tidal catalog");
-            println!("  tide --play <id>      Play track in MAX Hi-Res quality");
-            println!("  tide --logout         Log out and clear session tokens");
-            println!("  tide --snapshot <dir> [--play]  UI self-test: render each view to PNG");
+            println!("  TIDE                  Launch the 1:1 Tidal desktop GUI");
+            println!("  TIDE --login          Start OAuth2 Device Code login (tidal.com/device)");
+            println!("  TIDE --login-pkce     Start OAuth2 PKCE login flow");
+            println!("  TIDE --status         Show current login status and cache stats");
+            println!("  TIDE --search <query> Search Tidal catalog");
+            println!("  TIDE --play <id>      Play track in MAX Hi-Res quality");
+            println!("  TIDE --logout         Log out and clear session tokens");
+            println!("  TIDE --snapshot <dir> [--play]  UI self-test: render each view to PNG");
         }
         "--status" => {
             let session_path = tidal_api::default_session_path()?;
@@ -82,7 +81,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             if svc.load_session().await.unwrap_or(false) {
                 println!("Auth status:     LOGGED IN");
             } else {
-                println!("Auth status:     NOT LOGGED IN (run `tide --login` to authenticate)");
+                println!("Auth status:     NOT LOGGED IN (run `TIDE --login` to authenticate)");
             }
 
             let meta = MetadataCache::new()?;
@@ -156,13 +155,13 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         "--search" => {
             if args.len() < 3 {
-                eprintln!("Usage: tide --search <query>");
+                eprintln!("Usage: TIDE --search <query>");
                 return Ok(());
             }
             let query = args[2..].join(" ");
             let mut svc = TidalService::with_device_auth()?;
             if !svc.load_session().await.unwrap_or(false) {
-                eprintln!("You are not logged in. Run `tide --login` first.");
+                eprintln!("You are not logged in. Run `TIDE --login` first.");
                 return Ok(());
             }
             let api = svc.handle().ok_or("no credentials")?;
@@ -185,13 +184,13 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         "--play" => {
             if args.len() < 3 {
-                eprintln!("Usage: tide --play <track_id>");
+                eprintln!("Usage: TIDE --play <track_id>");
                 return Ok(());
             }
             let track_id = &args[2];
             let mut svc = TidalService::with_device_auth()?;
             if !svc.load_session().await.unwrap_or(false) {
-                eprintln!("You are not logged in. Run `tide --login` first.");
+                eprintln!("You are not logged in. Run `TIDE --login` first.");
                 return Ok(());
             }
 
@@ -207,7 +206,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 local_path
             } else {
                 println!(" Audio Cache MISS: Fetching MAX Hi-Res stream and caching to local SSD...");
-                let stream_info = api.stream(&track.id).await?;
+                let stream_info = api.stream(&track.id, "max").await?;
                 println!(
                     "Stream quality: {} ({}-bit / {} Hz, {} segment(s))",
                     stream_info.quality, stream_info.bit_depth, stream_info.sample_rate, stream_info.urls.len()
@@ -251,7 +250,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         unknown => {
-            eprintln!("Unknown argument '{}'. Run `tide --help` for usage.", unknown);
+            eprintln!("Unknown argument '{}'. Run `TIDE --help` for usage.", unknown);
         }
     }
     Ok(())
