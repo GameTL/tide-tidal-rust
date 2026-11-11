@@ -24,11 +24,15 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 open = "5.3"
+arboard = { version = "3.7", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSMenu", "NSMenuItem"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString"] }
 
 [build-dependencies]
 slint-build = "1.18.1"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"

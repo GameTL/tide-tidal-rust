@@ -1,4 +1,5 @@
 // Window chrome: sidebar, top bar and the bottom player bar.
+import { TrackMenuButton } from "track-menu.slint";
 import { ScrollView } from "std-widgets.slint";
 import { App, Theme, EditableInput, Icon, IconButton, CircleButton, Cover, CardArt, CardData, ExplicitBadge, Slider, DragArea } from "common.slint";
 
@@ -235,6 +236,7 @@ export component TopBar inherits Rectangle {
         HorizontalLayout {
             padding-left: 4px;
             padding-right: 4px;
+            alignment: center;
             IconButton {
                 icon: @image-url("icons/chevron-left.svg");
                 size: 18px;
@@ -583,6 +585,7 @@ component PlayerLink inherits Rectangle {
     in property <length> max-w: 200px;
     in property <bool> clickable: false;
     callback clicked();
+    callback context-requested(length, length);
     out property <bool> hovered: ta.has-hover;
     property <bool> armed: false;
     width: min(probe.preferred-width, root.max-w);
@@ -618,6 +621,11 @@ component PlayerLink inherits Rectangle {
 
     ta := TouchArea {
         mouse-cursor: root.clickable ? pointer : default;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             root.clicked();
         }
@@ -738,7 +746,21 @@ export component PlayerBar inherits Rectangle {
     height: 96px;
     background: overlay ? transparent : Theme.player-bg;
 
+    function open-track-menu(x: length, y: length) {
+        if (App.has-track) { more.open-at(x, y); }
+    }
+
     // Left: artwork + titles
+    TouchArea {
+        width: root.width * 0.32;
+        enabled: App.has-track;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.open-track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
     if !overlay: Cover {
         x: 16px;
         y: 17px;
@@ -747,6 +769,11 @@ export component PlayerBar inherits Rectangle {
         source: App.np-cover;
         TouchArea {
             mouse-cursor: pointer;
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                    root.open-track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
             clicked => {
                 App.open-now-playing();
             }
@@ -766,6 +793,7 @@ export component PlayerBar inherits Rectangle {
                 alignment: start;
                 spacing: 8px;
                 PlayerLink {
+                    context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.has-track ? App.np-title : "Nothing playing";
                     tip: App.has-track ? App.np-title : "";
                     text-color: Theme.text;
@@ -781,6 +809,7 @@ export component PlayerBar inherits Rectangle {
             }
 
             artist-link := PlayerLink {
+                context-requested(x, y) => { root.open-track-menu(x, y); }
                 text: App.has-track ? App.np-artist : "Pick something to play";
                 clickable: App.np-artist-id != "";
                 max-w: max(80px, root.width * 0.32 - 200px);
@@ -802,6 +831,7 @@ export component PlayerBar inherits Rectangle {
                 }
 
                 PlayerLink {
+                    context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.np-context;
                     tip: "Playing from: " + App.np-context;
                     max-w: max(80px, root.width * 0.32 - 215px);
@@ -809,11 +839,13 @@ export component PlayerBar inherits Rectangle {
             }
         }
 
-        if App.has-track: VerticalLayout {
+        VerticalLayout {
+            visible: App.has-track;
             alignment: center;
             HorizontalLayout {
                 spacing: 0px;
                 IconButton {
+                    context-requested(x, y) => { root.open-track-menu(x, y); }
                     icon: App.np-favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                     size: 17px;
                     tint: Theme.text;
@@ -822,9 +854,8 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
 
-                IconButton {
-                    icon: @image-url("icons/more.svg");
-                    size: 17px;
+                more := TrackMenuButton {
+                    track-id: App.current-id;
                 }
             }
         }

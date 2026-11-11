@@ -7,3 +7,7 @@
 
 # Optional local Nationale fonts from the TIDAL press kit
 /crates/tide-app/fonts/
+
+# Temporary test and verification artifacts
+/tmp/
+

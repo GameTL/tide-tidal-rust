@@ -741,6 +741,25 @@ impl AudioPlayer {
         self.shared.queue.lock().unwrap().clear();
     }
 
+    /// Discard an upcoming track without dropping any remaining samples of
+    /// the current track. The decoder holds the source lock while staging audio.
+    pub fn cancel_upcoming(&self) {
+        let mut source = self.shared.source.lock().unwrap();
+        self.clear_queue();
+        let mut buf = self.shared.buffer.lock().unwrap();
+        if buf.upcoming.take().is_some() {
+            let boundary = buf.switch_at;
+            let remaining = boundary.saturating_sub(buf.consumed) as usize;
+            buf.samples.truncate(remaining);
+            buf.pushed = boundary;
+            buf.switch_at = NONE;
+            *source = None;
+        }
+        if source.is_none() && buf.current.is_some() {
+            buf.end_at = buf.pushed;
+        }
+    }
+
     /// Jump within the current track. Returns false if nothing is loaded.
     pub fn seek(&self, to: Duration) -> bool {
         let mut source = self.shared.source.lock().unwrap();

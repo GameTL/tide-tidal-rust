@@ -57,8 +57,9 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
   - Seamless boundary handover with zero clicks, pops, or audio gaps.
 
 ### D. Full macOS Integration (`tide-macos`)
-- **Media Keys**: Native listener for Play/Pause, Previous, Next via `MPRemoteCommandCenter`.
-- **Now Playing / Control Center**: `MPNowPlayingInfoCenter` updating track title, artist, album art, elapsed playback time, and playback rate.
+- **Media Keys**: Native listener for Play/Pause, Previous, Next, Stop via `MPRemoteCommandCenter`.
+- **Now Playing / Control Center**: `MPNowPlayingInfoCenter` updating track title, artist, album art from local image cache, elapsed playback time, and playback rate (1.0 playing, 0.0 paused) so the system scrubber advances live.
+- **Timeline Scrubbing**: `changePlaybackPositionCommand` enables seeking from the macOS Control Center and Lock Screen Now Playing widget.
 
 ---
 
@@ -97,6 +98,12 @@ tidal-rust/
 - [x] Hi-Res login: PKCE in the default browser is the default login and completes without a paste step where the browser allows it. Not yet verified with a real sign-in (see milestone 8).
 - [x] Offline cache: size limit, play-count-based eviction, "Keep most played offline", and cache hit rate in Settings.
 - [x] Bit-perfect output with a signal path indicator, and the output device handed back at its original sample rate on pause and quit.
+- [x] macOS Now Playing & Control Center: Native pure-Rust `objc2` integration with `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`. Publishes live playback rate (1.0 playing, 0.0 paused) so the system scrubber advances live, elapsed playback time, track metadata, and album artwork loaded directly from the local disk cache into `MPMediaItemArtwork`. Supports media keys (Play, Pause, Toggle, Next, Previous, Stop) and timeline scrubbing via `changePlaybackPositionCommand`.
 - [x] How login tokens and local data are handled is documented in [SECURITY.md](SECURITY.md).
+- [x] Back / forward page transitions. Each page is a pane:
+  - Going back, the current page slides off to the right and the previous page grows from 75% to 100% while fading in from dark. Forward runs the same motion in reverse. Buttons, the menu and ⌘[ / ⌘] run it over 0.3 s with ease-in-out. The top bar, sidebar and player bar never move, and only position, scale and opacity animate.
+  - A two-finger trackpad swipe drives the panes directly, following Apple's conventions: a gesture is claimed only when it starts sideways, release past halfway or a flick completes it, the momentum afterwards is ignored, and the system "Swipe between pages" setting is respected. With "Reduce motion" on, buttons and shortcuts switch pages instantly.
+  - Pages up to two steps away in history are kept in memory as snapshots, along with each history entry's scroll position. Swiping back shows the page as it was left, and the live page comes back at the same scroll position, so no reload jumps to the top.
+  - Esc goes to the home page as a new history entry, so Back returns to where you were. Going to the page already on screen never adds a second history entry.
 
 Explore, Feed, Videos, Profiles, and Save for Later remain navigation placeholders.

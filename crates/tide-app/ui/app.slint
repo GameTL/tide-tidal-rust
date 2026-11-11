@@ -3,6 +3,7 @@ import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage } 
 import { Sidebar, TopBar, PlayerBar } from "chrome.slint";
 import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView } from "views.slint";
 import { SettingsView } from "settings.slint";
+import { TrackMenu } from "track-menu.slint";
 import { Typography } from "@typography";
 
 export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage }
@@ -122,7 +123,15 @@ export component MainWindow inherits Window {
                 activated => { App.navigate("focus-search"); }
             }
             MenuSeparator { }
-            MenuItem { title: "Music"; activated => { App.navigate("home"); } }
+            // Esc returns to the home page, as a new history entry.
+            MenuItem {
+                title: "Music";
+                shortcut: @keys(Escape);
+                activated => {
+                    if (App.track-menu-open) { App.escape-track-menu(); }
+                    else { App.navigate("home"); }
+                }
+            }
             MenuItem { title: "Explore"; activated => { App.navigate("explore"); } }
             MenuItem { title: "Feed"; activated => { App.navigate("feed"); } }
             MenuSeparator { }
@@ -160,6 +169,24 @@ export component MainWindow inherits Window {
             Rectangle {
                 background: Theme.bg;
                 clip: true;
+
+                // Where the page pane sits in the window, for the snapshots
+                // that back/forward transitions are drawn from.
+                property <length> pane-x: self.absolute-position.x;
+                property <length> pane-y: self.absolute-position.y;
+                property <length> pane-w: self.width;
+                property <length> pane-h: self.height;
+                init => {
+                    App.pane-x = self.pane-x;
+                    App.pane-y = self.pane-y;
+                    App.pane-width = self.pane-w;
+                    App.pane-height = self.pane-h;
+                }
+                changed pane-x => { App.pane-x = self.pane-x; }
+                changed pane-y => { App.pane-y = self.pane-y; }
+                changed pane-w => { App.pane-width = self.pane-w; }
+                changed pane-h => { App.pane-height = self.pane-h; }
+
                 Rectangle {
                     y: App.view == "album" || App.view == "artist" ? 0px : 64px;
                     height: parent.height - self.y;
@@ -170,18 +197,71 @@ export component MainWindow inherits Window {
                     if App.view == "settings": SettingsView { }
                 }
 
+                // Back / forward transition. Two panes drawn from page
+                // snapshots: the top one slides sideways with the swipe, the
+                // one underneath grows from 75% and fades in from dark. Only
+                // position, size and opacity change; the bars stay still.
+                if App.nav-active: Rectangle {
+                    background: black;
+                    opacity: App.nav-fade;
+                    // Clicks do not reach the page while it is covered.
+                    TouchArea { }
+
+                    Rectangle {
+                        property <float> grow: 0.75 + 0.25 * App.nav-reveal;
+                        width: parent.width * self.grow;
+                        height: parent.height * self.grow;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        opacity: App.nav-reveal;
+                        background: Theme.bg;
+                        if App.nav-has-under: Image {
+                            width: 100%;
+                            height: 100%;
+                            source: App.nav-under;
+                            image-fit: fill;
+                        }
+                    }
+
+                    // Soft edge shadow so the top pane reads as sitting above.
+                    Rectangle {
+                        x: top-pane.x - self.width;
+                        width: 28px;
+                        opacity: 1 - App.nav-reveal;
+                        background: @linear-gradient(90deg, #00000000 0%, #00000080 100%);
+                    }
+
+                    top-pane := Rectangle {
+                        x: parent.width * App.nav-reveal;
+                        width: parent.width;
+                        background: Theme.bg;
+                        if App.nav-has-over: Image {
+                            width: 100%;
+                            height: 100%;
+                            source: App.nav-over;
+                            image-fit: fill;
+                        }
+                    }
+                }
+
                 TopBar {
                     y: 0;
+                    // Left out of page snapshots: it never moves with a pane.
+                    visible: !App.capturing;
                 }
             }
         }
 
         PlayerBar { }
     }
-    if App.logged-in && App.show-now-playing: NowPlayingView {
+    if App.logged-in && App.show-now-playing && !App.capturing: NowPlayingView {
         PlayerBar {
             y: parent.height - self.height;
             overlay: true;
         }
+    }
+    if App.logged-in && App.track-menu-open && !App.capturing: TrackMenu {
+        width: parent.width;
+        height: parent.height;
     }
 }

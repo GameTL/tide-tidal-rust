@@ -92,6 +92,23 @@ export global App {
     in property <bool> loading: false;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
+    // Back / forward transition (see the pane overlay in app.slint).
+    // nav-reveal: 0 = top pane covers the page, 1 = it has slid off to the right.
+    in property <bool> nav-active: false;
+    in property <float> nav-reveal: 0;
+    in property <float> nav-fade: 1;
+    in property <image> nav-under;
+    in property <bool> nav-has-under: false;
+    in property <image> nav-over;
+    in property <bool> nav-has-over: false;
+    // Vertical scroll offset of the page on screen (0 at the top, negative below).
+    in-out property <length> scroll-y;
+    // True while a page snapshot is being taken.
+    in property <bool> capturing: false;
+    in-out property <length> pane-x;
+    in-out property <length> pane-y;
+    in-out property <length> pane-width;
+    in-out property <length> pane-height;
     in-out property <string> search-text: "";
     in-out property <string> filter-text: "";
     in-out property <string> edit-command;
@@ -160,6 +177,23 @@ export global App {
     in-out property <bool> show-now-playing: false;
     in property <[LyricLine]> lyrics;
     in property <string> lyrics-status: "";
+
+    in-out property <bool> track-menu-open;
+    in-out property <bool> track-menu-share-open;
+    public function escape-track-menu() {
+        if (track-menu-share-open) {
+            track-menu-share-open = false;
+        } else {
+            track-menu-open = false;
+        }
+    }
+
+    in property <TrackData> track-menu-track;
+    in property <length> track-menu-x;
+    in property <length> track-menu-y;
+    callback request-track-menu(string, length, length);
+    callback play-track-next(string);
+    callback copy-track-link(string);
 
     callback navigate(string);
     callback open-card(CardData);
@@ -258,17 +292,25 @@ export component IconButton inherits Rectangle {
     in property <color> hover-tint: Theme.text;
     in property <bool> enabled: true;
     callback clicked();
+    callback context-requested(length, length);
     width: size + 16px;
     height: size + 16px;
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             root.clicked();
         }
     }
 
     Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
         source: root.icon;
         size: root.size;
         tint: !root.enabled ? Theme.text-dim : ta.has-hover ? root.hover-tint : root.tint;
@@ -308,7 +350,7 @@ export component Spinner inherits Rectangle {
     }
 }
 
-// Round transport button: always-visible circular plate that brightens on hover/press; icon or spinner always dead-centre.
+// Round transport button: circular hover/press plate, icon or spinner always dead-centre.
 export component CircleButton inherits Rectangle {
     in property <image> icon;
     in property <length> size: 20px;
@@ -321,7 +363,7 @@ export component CircleButton inherits Rectangle {
     width: diameter;
     height: diameter;
     border-radius: diameter / 2;
-    background: !enabled ? #ffffff0a : ta.pressed ? #ffffff3d : ta.has-hover ? #ffffff2b : #ffffff14;
+    background: !enabled ? transparent : ta.pressed ? #ffffff26 : ta.has-hover ? #ffffff1a : transparent;
     animate background {
         duration: 120ms;
     }

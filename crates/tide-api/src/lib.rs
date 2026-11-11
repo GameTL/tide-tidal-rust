@@ -25,6 +25,27 @@ pub enum ApiError {
     NoStream(String),
 }
 
+/// The request never got an HTTP answer (DNS, connect, TLS, timeout).
+fn is_transport_error(e: &tidlers::TidalError) -> bool {
+    use tidlers::requests::RequestClientError as R;
+    matches!(e, tidlers::TidalError::Request(_) | tidlers::TidalError::RequestClient(R::RequestError(_) | R::Timeout))
+}
+
+/// An error with its causes, since tidlers' own messages stop at "failed to do request".
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrackItem {
     pub id: String,
@@ -114,9 +135,28 @@ impl TidalService {
     }
 
     pub async fn finish_pkce_login(&mut self, redirect_url: &str) -> Result<String, ApiError> {
-        self.client.finish_pkce_login(redirect_url).await.map_err(|e| ApiError::Client(e.to_string()))?;
-        let user = self.client.get_user_info().await.map_err(|e| ApiError::Client(e.to_string()))?;
-        let username = user.attributes.username;
+        // A dropped connection never reaches TIDAL, so the one-time code is still good: retry.
+        let mut attempt = 0;
+        loop {
+            match self.client.finish_pkce_login(redirect_url).await {
+                Ok(()) => break,
+                Err(e) if is_transport_error(&e) && attempt < 3 => {
+                    attempt += 1;
+                    tracing::warn!("PKCE token exchange failed ({}), retry {attempt}/3", error_chain(&e));
+                    tokio::time::sleep(std::time::Duration::from_millis(600 * attempt)).await;
+                }
+                Err(e) => return Err(ApiError::Client(error_chain(&e))),
+            }
+        }
+        // The code is spent now: keep the session even if the profile lookup below fails.
+        self.save_session()?;
+        let username = match self.client.get_user_info().await {
+            Ok(user) => user.attributes.username,
+            Err(e) => {
+                tracing::warn!("logged in, but the profile lookup failed: {}", error_chain(&e));
+                self.client.user_info.as_ref().map(|u| u.username.clone()).unwrap_or_default()
+            }
+        };
         let _ = self.client.refresh_user_info().await;
         self.save_session()?;
         Ok(username)

@@ -4,12 +4,12 @@
 //! runs on tokio with only the `Send` [`Ctx`] and reports back via [`on_ui`].
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use tide_api::{ApiHandle, Card, CatalogDetail, Lyrics, Section, TidalService, TrackItem};
@@ -78,6 +78,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn play_next_preserves_the_current_track_and_shuffled_order() {
+        let track = |id: &str| TrackItem { id: id.into(), ..Default::default() };
+        let mut state = State {
+            queue: ["A", "B", "C", "D"].map(track).to_vec(),
+            order: vec![3, 1, 0, 2],
+            pos: 1,
+            shuffle: true,
+            prefetched_for: Some(1),
+            ..Default::default()
+        };
+        state.insert_next(track("X"));
+        state.insert_next(track("Y"));
+        let play_order: Vec<_> = state.order.iter().map(|&i| state.queue[i].id.as_str()).collect();
+        assert_eq!(play_order, ["D", "B", "Y", "X", "A", "C"]);
+        assert_eq!(play_order[state.pos], "B");
+        assert_eq!(state.prefetched_for, None);
+    }
+
+    #[test]
+    fn same_page_is_recognised_for_history() {
+        let card = |kind: &str, id: &str| Card { kind: kind.into(), id: id.into(), ..Default::default() };
+        assert!(Page::Home.same_as(&Page::Home));
+        assert!(!Page::Home.same_as(&Page::Tracks));
+        assert!(Page::Detail(card("album", "1")).same_as(&Page::Detail(card("album", "1"))));
+        assert!(!Page::Detail(card("album", "1")).same_as(&Page::Detail(card("album", "2"))));
+        assert!(!Page::Detail(card("artist", "1")).same_as(&Page::ArtistTracks(card("artist", "1"))));
+        assert!(!Page::Search("a".into()).same_as(&Page::Search("b".into())));
+    }
+
+    #[test]
+    fn swipe_completes_past_halfway_or_on_a_flick() {
+        assert!(swipe_commits(0.6, 0.0));
+        assert!(swipe_commits(0.1, 900.0));
+        // A short, slow pull and a pull that is being taken back both return.
+        assert!(!swipe_commits(0.3, 100.0));
+        assert!(!swipe_commits(0.7, -800.0));
+        assert!(!swipe_commits(0.0, 2000.0));
+    }
+
+    #[test]
+    fn pane_is_cut_out_of_the_window_snapshot() {
+        let mut window = SharedPixelBuffer::<Rgba8Pixel>::new(8, 6);
+        for (i, px) in window.make_mut_slice().iter_mut().enumerate() {
+            px.r = i as u8;
+        }
+        let pane = crop_pane(&window, (2, 1, 4, 4), false).unwrap();
+        assert_eq!((pane.width(), pane.height()), (4, 4));
+        assert_eq!(pane.as_slice()[0].r, 10);
+        assert_eq!(pane.as_slice()[15].r, 37);
+        let half = crop_pane(&window, (2, 1, 4, 4), true).unwrap();
+        assert_eq!((half.width(), half.height()), (2, 2));
+        assert_eq!(half.as_slice()[3].r, 28);
+        // A pane that reaches past the window is clipped to it.
+        assert_eq!(crop_pane(&window, (6, 4, 10, 10), false).unwrap().width(), 2);
+        assert!(crop_pane(&window, (8, 0, 4, 4), false).is_none());
+    }
+
+    #[test]
     fn loads_display_defaults_from_existing_settings() {
         let meta = MetadataCache::in_memory().unwrap();
         assert!(!Settings::load(&meta).low_memory);
@@ -106,6 +164,8 @@ pub struct Ctx {
     pub media: Mutex<Option<MacMediaControls>>,
     /// Bumped on every explicit track start so stale downloads don't start playing.
     pub play_gen: AtomicU64,
+    /// Serializes replacement of the gapless queue with a prefetch completing off-thread.
+    next_revision: Mutex<u64>,
     img_sem: tokio::sync::Semaphore,
     downloads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -130,6 +190,7 @@ impl Ctx {
             player,
             media: Mutex::new(None),
             play_gen: AtomicU64::new(0),
+            next_revision: Mutex::new(0),
             img_sem: tokio::sync::Semaphore::new(8),
             downloads: Mutex::new(HashMap::new()),
         }))
@@ -212,10 +273,30 @@ enum Page {
     Stub { key: String, title: String },
 }
 
+impl Page {
+    /// Whether both are the same destination, so history need not hold it twice in a row.
+    fn same_as(&self, other: &Page) -> bool {
+        match (self, other) {
+            (Page::Detail(a), Page::Detail(b)) | (Page::ArtistTracks(a), Page::ArtistTracks(b)) => {
+                a.kind == b.kind && a.id == b.id
+            }
+            (Page::Folder { id: a, .. }, Page::Folder { id: b, .. }) => a == b,
+            (Page::Search(a), Page::Search(b)) => a == b,
+            (Page::Stub { key: a, .. }, Page::Stub { key: b, .. }) => a == b,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     history: Vec<Page>,
     hist_pos: usize,
+    /// How far each history entry was scrolled when it was left (0 or negative).
+    hist_scroll: Vec<f32>,
+    /// Snapshots of pages near the current one, by history index. Back and
+    /// forward transitions draw their panes from these.
+    snaps: HashMap<usize, Image>,
     /// Incremented per page change; async page loads check it before applying.
     page_gen: u64,
 
@@ -232,6 +313,7 @@ struct State {
     rows_requested: HashSet<usize>,
     sidebar_cards: Vec<Card>,
 
+    menu_track: Option<TrackItem>,
     queue: Vec<TrackItem>,
     order: Vec<usize>,
     pos: usize,
@@ -257,10 +339,115 @@ struct State {
     hover_artist: String,
 }
 
+impl State {
+    fn insert_next(&mut self, track: TrackItem) {
+        // Keep the backing queue in list order, while inserting immediately
+        // after the current track in the independent shuffled order.
+        let insert_at = self.order[self.pos] + 1;
+        self.queue.insert(insert_at, track);
+        for index in &mut self.order {
+            if *index >= insert_at {
+                *index += 1;
+            }
+        }
+        self.order.insert(self.pos + 1, insert_at);
+        self.prefetched_for = None;
+    }
+}
+
 pub struct Ui {
     win: MainWindow,
     ctx: Arc<Ctx>,
     state: RefCell<State>,
+    nav: RefCell<Nav>,
+    clipboard: RefCell<Option<arboard::Clipboard>>,
+}
+
+/// Snapshots are kept for pages at most this many steps from the current one.
+const SNAP_REACH: usize = 2;
+/// Back / forward from a button or shortcut (the 0.3 s page-motion token).
+const NAV_DURATION: f32 = 0.30;
+/// Cross-fade from the arrived pane's snapshot to the live page.
+const NAV_FADE: f32 = 0.18;
+
+#[derive(Clone, Copy, Default)]
+enum NavPhase {
+    #[default]
+    Idle,
+    /// Following the fingers.
+    Tracking,
+    /// Running to one end: 1 = the page change completes, 0 = it is called off.
+    Settling { from: f32, to: f32, start: Instant, secs: f32, smooth: bool },
+    /// Arrived; the snapshot stays up until the live page has its content.
+    Waiting { since: Instant },
+    Fading { start: Instant },
+}
+
+/// A back / forward page transition in progress.
+#[derive(Default)]
+struct Nav {
+    phase: NavPhase,
+    /// -1 back, +1 forward.
+    delta: isize,
+    /// Progress of the page change, 0..=1.
+    p: f32,
+    /// How far the swipe has pulled the pane, in logical pixels.
+    travel: f32,
+    samples: VecDeque<(Instant, f32)>,
+    /// Snapshot of the page being left.
+    outgoing: Option<Image>,
+    /// Snapshot of the page being shown, when there is one.
+    incoming: Option<Image>,
+    /// The page change is decided but waits for the panes to land: building
+    /// a page mid-flight would make the motion stutter.
+    pending: bool,
+    timer: slint::Timer,
+}
+
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
+}
+
+/// Whether a released swipe completes the page change. `p` is how far the pane
+/// was pulled (0..=1) and `velocity` its speed in px/s towards completion.
+fn swipe_commits(p: f32, velocity: f32) -> bool {
+    // Past halfway and not being pulled back, or a clear flick.
+    (p > 0.5 && velocity > -300.0) || (p > 0.02 && velocity > 600.0)
+}
+
+/// Cut `(x, y, w, h)` out of a window snapshot, at half size when `halve` is set.
+fn crop_pane(buf: &SharedPixelBuffer<Rgba8Pixel>, rect: (u32, u32, u32, u32), halve: bool) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let (x, y) = (rect.0.min(buf.width()), rect.1.min(buf.height()));
+    let (w, h) = (rect.2.min(buf.width() - x), rect.3.min(buf.height() - y));
+    let step = if halve { 2 } else { 1 };
+    let (out_w, out_h) = (w / step, h / step);
+    if out_w == 0 || out_h == 0 {
+        return None;
+    }
+    let src = buf.as_slice();
+    let stride = buf.width() as usize;
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(out_w, out_h);
+    for (row, line) in out.make_mut_slice().chunks_exact_mut(out_w as usize).enumerate() {
+        let start = (y as usize + row * step as usize) * stride + x as usize;
+        if halve {
+            for (col, px) in line.iter_mut().enumerate() {
+                *px = src[start + col * 2];
+            }
+        } else {
+            line.copy_from_slice(&src[start..start + out_w as usize]);
+        }
+    }
+    Some(out)
+}
+
+/// Run `f` with the controller. Only for code already on the UI thread.
+pub fn with_ui<R>(f: impl FnOnce(&Rc<Ui>) -> R) -> Option<R> {
+    let ui = UI.with(|u| u.borrow().clone())?;
+    Some(f(&ui))
 }
 
 thread_local! {
@@ -400,6 +587,8 @@ impl Ui {
             win: win.clone_strong(),
             ctx,
             state: RefCell::new(State { volume_before_mute: 1.0, ..Default::default() }),
+            nav: RefCell::default(),
+            clipboard: RefCell::default(),
         });
         UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
         ui.wire();
@@ -476,6 +665,13 @@ impl Ui {
         });
         bind!(on_filter, |ui, text| ui.apply_filter(&text));
         bind!(on_rows_visible, |ui, first, count| ui.rows_visible(first.max(0) as usize, count.max(0) as usize));
+        bind!(on_request_track_menu, |ui, id, x, y| ui.open_track_menu(&id, x, y));
+        bind!(on_play_track_next, |ui, id| ui.play_track_next(&id));
+        bind!(on_copy_track_link, |ui, id| {
+            if let Err(error) = ui.copy_track_link(&id) {
+                tracing::warn!("Could not copy track link: {error}");
+            }
+        });
         bind!(on_play_track, |ui, id| ui.play_from_page(&id));
         bind!(on_play_section_track, |ui, section, id| ui.play_from_section(section.max(0) as usize, &id));
         bind!(on_play_all, |ui, shuffle| ui.play_all(shuffle));
@@ -1130,25 +1326,306 @@ impl Ui {
         self.show(page, true);
     }
 
+    /// Back / forward from a button, menu item or shortcut.
     fn step_history(self: &Rc<Self>, delta: isize) {
+        if !crate::platform::reduce_motion() && self.nav_begin(delta) {
+            self.nav_settle(true, NAV_DURATION, true);
+        } else {
+            let snap = self.capture_pane();
+            self.step_history_now(delta, snap);
+        }
+    }
+
+    /// Move through history without a transition. `leaving` is a snapshot of
+    /// the page on screen, kept for a later transition back to it.
+    fn step_history_now(self: &Rc<Self>, delta: isize, leaving: Option<Image>) {
         let page = {
             let mut st = self.state.borrow_mut();
             let target = st.hist_pos as isize + delta;
             if target < 0 || target as usize >= st.history.len() {
                 return;
             }
+            let from = st.hist_pos;
+            st.hist_scroll[from] = self.app().get_scroll_y();
+            match leaving {
+                Some(snap) => st.snaps.insert(from, snap),
+                None => st.snaps.remove(&from),
+            };
             st.hist_pos = target as usize;
+            let pos = st.hist_pos;
+            st.snaps.retain(|i, _| i.abs_diff(pos) <= SNAP_REACH);
             st.history[st.hist_pos].clone()
         };
         self.show(page, false);
     }
 
+    // ------------------------------------------------------------ page transitions
+    //
+    // Back and forward move two panes drawn from page snapshots (the overlay
+    // in app.slint). Going back, the current page slides off to the right and
+    // the previous one grows from 75% and fades in from dark underneath;
+    // going forward runs the same motion in reverse. A two-finger swipe drives
+    // the progress directly; buttons and shortcuts run it on a timer.
+
+    /// Snapshot of the page pane as it is on screen, without the top bar.
+    fn capture_pane(&self) -> Option<Image> {
+        let app = self.app();
+        if !app.get_logged_in() {
+            return None;
+        }
+        let window = self.win.window();
+        app.set_capturing(true);
+        let started = Instant::now();
+        let shot = window.take_snapshot();
+        app.set_capturing(false);
+        tracing::debug!("Page snapshot took {:?}", started.elapsed());
+        let buf = shot.ok()?;
+        let scale = window.scale_factor();
+        let px = |v: f32| (v * scale).round().max(0.0) as u32;
+        let rect = (px(app.get_pane_x()), px(app.get_pane_y()), px(app.get_pane_width()), px(app.get_pane_height()));
+        // Low-memory mode keeps the snapshots at a quarter of the pixels.
+        let halve = scale > 1.0 && self.ctx.settings.read().unwrap().low_memory;
+        Some(Image::from_rgba8(crop_pane(&buf, rect, halve)?))
+    }
+
+    /// Put up the two panes for a step through history. False when there is
+    /// nothing to step to or the page cannot be drawn into a pane.
+    fn nav_begin(self: &Rc<Self>, delta: isize) -> bool {
+        let carried = self.nav_finish();
+        let app = self.app();
+        if !app.get_logged_in() || app.get_show_now_playing() {
+            return false;
+        }
+        let target = {
+            let st = self.state.borrow();
+            let target = st.hist_pos as isize + delta;
+            if target < 0 || target as usize >= st.history.len() {
+                return false;
+            }
+            st.snaps.get(&(target as usize)).cloned()
+        };
+        let Some(outgoing) = carried.or_else(|| self.capture_pane()) else {
+            return false;
+        };
+        // The page to the right in history is always the top pane.
+        let (under, over) =
+            if delta < 0 { (target.clone(), Some(outgoing.clone())) } else { (Some(outgoing.clone()), target.clone()) };
+        app.set_nav_has_under(under.is_some());
+        app.set_nav_under(under.unwrap_or_default());
+        app.set_nav_has_over(over.is_some());
+        app.set_nav_over(over.unwrap_or_default());
+        app.set_nav_fade(1.0);
+        {
+            let mut nav = self.nav.borrow_mut();
+            nav.phase = NavPhase::Tracking;
+            nav.delta = delta;
+            nav.travel = 0.0;
+            nav.samples.clear();
+            nav.outgoing = Some(outgoing);
+            nav.incoming = target;
+        }
+        self.nav_set(0.0);
+        app.set_nav_active(true);
+        true
+    }
+
+    fn nav_set(&self, p: f32) {
+        let reveal = {
+            let mut nav = self.nav.borrow_mut();
+            nav.p = p;
+            if nav.delta < 0 { p } else { 1.0 - p }
+        };
+        self.app().set_nav_reveal(reveal);
+    }
+
+    /// Take the panes down; the live page is on screen again.
+    fn nav_clear(&self) {
+        {
+            let mut nav = self.nav.borrow_mut();
+            if matches!(nav.phase, NavPhase::Idle) {
+                return;
+            }
+            nav.timer.stop();
+            nav.phase = NavPhase::Idle;
+            nav.outgoing = None;
+            nav.incoming = None;
+            nav.pending = false;
+        }
+        let app = self.app();
+        app.set_nav_active(false);
+        app.set_nav_under(Image::default());
+        app.set_nav_over(Image::default());
+    }
+
+    /// End a transition at once, wherever it is. If its page change was still
+    /// waiting, make it and return the snapshot of the page now showing: the
+    /// live page has not been drawn yet, so it cannot be captured.
+    fn nav_finish(self: &Rc<Self>) -> Option<Image> {
+        let carried = self.nav_commit_pending();
+        self.nav_clear();
+        carried
+    }
+
+    fn nav_commit_pending(self: &Rc<Self>) -> Option<Image> {
+        let (delta, outgoing, incoming) = {
+            let mut nav = self.nav.borrow_mut();
+            if !std::mem::take(&mut nav.pending) {
+                return None;
+            }
+            (nav.delta, nav.outgoing.take(), nav.incoming.clone())
+        };
+        self.step_history_now(delta, outgoing);
+        incoming
+    }
+
+    /// Run the transition to its end (`commit`) or back to the start.
+    fn nav_settle(self: &Rc<Self>, commit: bool, secs: f32, smooth: bool) {
+        let from = {
+            let mut nav = self.nav.borrow_mut();
+            nav.pending = commit;
+            nav.p
+        };
+        if commit && self.nav.borrow().incoming.is_none() {
+            // Nothing to show for the page yet: load it behind the panes.
+            self.nav_commit_pending();
+        }
+        let mut nav = self.nav.borrow_mut();
+        nav.phase = NavPhase::Settling {
+            from,
+            to: if commit { 1.0 } else { 0.0 },
+            start: Instant::now(),
+            secs: secs.max(0.001),
+            smooth,
+        };
+        let weak = Rc::downgrade(self);
+        nav.timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.nav_tick();
+            }
+        });
+    }
+
+    fn nav_tick(self: &Rc<Self>) {
+        let now = Instant::now();
+        let phase = self.nav.borrow().phase;
+        match phase {
+            NavPhase::Settling { from, to, start, secs, smooth } => {
+                let t = ((now - start).as_secs_f32() / secs).min(1.0);
+                let eased = if smooth { ease_in_out(t) } else { ease_out(t) };
+                self.nav_set(from + (to - from) * eased);
+                if t >= 1.0 {
+                    if to >= 1.0 {
+                        self.nav_commit_pending();
+                        self.nav.borrow_mut().phase = NavPhase::Waiting { since: Instant::now() };
+                    } else {
+                        self.nav_clear();
+                    }
+                }
+            }
+            NavPhase::Waiting { since } => {
+                // A fast page shows no loading state: hold the snapshot until
+                // the content is there, but never for long.
+                let waited = now - since;
+                if waited >= Duration::from_millis(500) || (waited >= Duration::from_millis(48) && !self.app().get_loading()) {
+                    self.nav.borrow_mut().phase = NavPhase::Fading { start: now };
+                }
+            }
+            NavPhase::Fading { start } => {
+                let t = ((now - start).as_secs_f32() / NAV_FADE).min(1.0);
+                self.app().set_nav_fade(1.0 - t);
+                if t >= 1.0 {
+                    self.nav_clear();
+                }
+            }
+            NavPhase::Idle | NavPhase::Tracking => {}
+        }
+    }
+
+    /// A horizontal two-finger swipe started. `back` is a swipe to the right.
+    /// False when there is no page in that direction.
+    pub fn swipe_begin(self: &Rc<Self>, back: bool) -> bool {
+        self.nav_begin(if back { -1 } else { 1 })
+    }
+
+    /// The fingers moved `dx` logical pixels (positive to the right).
+    pub fn swipe_move(&self, dx: f32) {
+        let width = self.app().get_pane_width().max(1.0);
+        let p = {
+            let mut nav = self.nav.borrow_mut();
+            if !matches!(nav.phase, NavPhase::Tracking) {
+                return;
+            }
+            // Back pulls the pane right, forward pulls it left.
+            nav.travel = (nav.travel - nav.delta as f32 * dx).clamp(0.0, width);
+            let now = Instant::now();
+            let travel = nav.travel;
+            nav.samples.push_back((now, travel));
+            while nav.samples.front().is_some_and(|(t, _)| now - *t > Duration::from_millis(120)) {
+                nav.samples.pop_front();
+            }
+            nav.travel / width
+        };
+        self.nav_set(p);
+    }
+
+    /// The fingers lifted: finish the page change or put the page back.
+    pub fn swipe_end(self: &Rc<Self>, cancelled: bool) {
+        let (p, velocity) = {
+            let nav = self.nav.borrow();
+            if !matches!(nav.phase, NavPhase::Tracking) {
+                return;
+            }
+            let velocity = match (nav.samples.front(), nav.samples.back()) {
+                // Fingers that rested before lifting carry no speed.
+                (Some((t0, x0)), Some((t1, x1))) if *t1 > *t0 && t1.elapsed() < Duration::from_millis(100) => {
+                    (x1 - x0) / (*t1 - *t0).as_secs_f32()
+                }
+                _ => 0.0,
+            };
+            (nav.p, velocity)
+        };
+        let commit = !cancelled && swipe_commits(p, velocity);
+        let remaining = if commit { 1.0 - p } else { p };
+        // Carries on from the fingers' speed, so it only eases out.
+        self.nav_settle(commit, 0.14 + 0.20 * remaining, false);
+    }
+
     fn show(self: &Rc<Self>, page: Page, push: bool) {
+        self.app().set_track_menu_open(false);
+        // Going to the page already on screen shows it afresh, without a
+        // second history entry for it.
+        let push = push && {
+            let mut st = self.state.borrow_mut();
+            let pos = st.hist_pos;
+            let repeat = st.history.get(pos).is_some_and(|current| current.same_as(&page));
+            if repeat {
+                st.hist_scroll[pos] = 0.0;
+            }
+            !repeat
+        };
+        let scrolled = self.app().get_scroll_y();
+        // A new page ends any transition; the page being left keeps a
+        // snapshot so going back to it can be drawn.
+        let leaving = if push {
+            self.nav_finish().or_else(|| self.capture_pane())
+        } else {
+            None
+        };
         let page_gen = {
             let mut st = self.state.borrow_mut();
             if push {
                 let keep = if st.history.is_empty() { 0 } else { st.hist_pos + 1 };
+                let from = st.hist_pos;
+                st.snaps.retain(|i, _| *i < from && from - *i < SNAP_REACH);
+                if let (Some(snap), true) = (leaving, keep > 0) {
+                    st.snaps.insert(from, snap);
+                }
                 st.history.truncate(keep);
+                st.hist_scroll.truncate(keep);
+                if let Some(left) = st.hist_scroll.get_mut(from) {
+                    *left = scrolled;
+                }
+                st.hist_scroll.push(0.0);
                 st.history.push(page.clone());
                 st.hist_pos = st.history.len() - 1;
             }
@@ -1159,6 +1636,12 @@ impl Ui {
         };
         let app = self.app();
         app.set_page_title("".into());
+        // A page reached through history comes back where it was left.
+        let scroll = {
+            let st = self.state.borrow();
+            st.hist_scroll.get(st.hist_pos).copied().unwrap_or(0.0)
+        };
+        app.set_scroll_y(scroll);
         app.set_page_revision(page_gen as i32);
         {
             let st = self.state.borrow();
@@ -1566,6 +2049,93 @@ impl Ui {
         });
     }
 
+    // ------------------------------------------------------------ track menu
+
+    fn open_track_menu(self: &Rc<Self>, id: &str, x: f32, y: f32) {
+        let app = self.app();
+        if app.get_track_menu_open() || !app.get_logged_in() {
+            return;
+        }
+        let track = {
+            let st = self.state.borrow();
+            st.page_tracks.iter()
+                .chain(st.queue.iter())
+                .chain(st.sections.iter().flat_map(|section| section.tracks.iter()))
+                .find(|track| track.id == id)
+                .cloned()
+        };
+        let Some(track) = track else { return };
+        let mut row = track_row(&track, self.state.borrow().fav_ids.contains(id));
+        if app.get_current_id() == id {
+            row.cover = app.get_np_cover();
+        }
+        self.state.borrow_mut().menu_track = Some(track);
+        let cover_url = row.cover_url.clone();
+        app.set_track_menu_track(row);
+        app.set_track_menu_x(x);
+        app.set_track_menu_y(y);
+        app.set_track_menu_open(true);
+        if !cover_url.is_empty() {
+            let id = id.to_owned();
+            let weak = Rc::downgrade(self);
+            self.load_image(&sized_cover(&cover_url, 128), 128, move |image, _| {
+                let Some(ui) = weak.upgrade() else { return };
+                let app = ui.app();
+                let mut row = app.get_track_menu_track();
+                if app.get_track_menu_open() && row.id == id {
+                    row.cover = image.clone();
+                    app.set_track_menu_track(row);
+                }
+            });
+        }
+    }
+
+    fn copy_track_link(&self, id: &str) -> Result<(), arboard::Error> {
+        let mut clipboard = self.clipboard.borrow_mut();
+        if clipboard.is_none() {
+            *clipboard = Some(arboard::Clipboard::new()?);
+        }
+        if let Some(clipboard) = clipboard.as_mut() {
+            clipboard.set_text(format!("https://tidal.com/track/{id}"))?;
+        }
+        Ok(())
+    }
+
+    fn play_track_next(self: &Rc<Self>, id: &str) {
+        let track = self.state.borrow().menu_track.as_ref().filter(|track| track.id == id).cloned();
+        let Some(track) = track else { return };
+        if self.current_track().is_none() {
+            self.play_queue(vec![track], 0, "", None);
+            self.refresh_queue_page();
+            return;
+        }
+
+        // A stale prefetch can be downloading, waiting in the audio queue, or
+        // already decoded. Cancel all three before changing the playback order.
+        {
+            let mut revision = self.ctx.next_revision.lock().unwrap();
+            *revision = revision.wrapping_add(1);
+            self.ctx.player.cancel_upcoming();
+        }
+        if !self.state.borrow().loading_track {
+            self.sync_gapless_transition();
+        }
+        self.state.borrow_mut().insert_next(track);
+        self.refresh_queue_page();
+    }
+
+    fn refresh_queue_page(self: &Rc<Self>) {
+        if self.app().get_view() != "queue" {
+            return;
+        }
+        let (tracks, context) = {
+            let st = self.state.borrow();
+            let upcoming = st.order.iter().skip(st.pos).map(|&i| st.queue[i].clone()).collect();
+            (upcoming, st.context.clone())
+        };
+        self.set_tracks(tracks, &context);
+    }
+
     // ------------------------------------------------------------ playback
 
     fn play_from_page(self: &Rc<Self>, id: &str) {
@@ -1659,15 +2229,28 @@ impl Ui {
         app.set_total(fmt_time(track.duration_secs as u64).into());
         app.set_elapsed("0:00".into());
         app.set_progress(0.0);
-        if let Some(url) = &track.cover_url {
+        let cover = track.cover_url.as_deref().map(|u| sized_cover(u, 640));
+        let cached_cover = cover
+            .as_deref()
+            .map(|u| self.ctx.images.file_path(&url_key(u, 0)))
+            .filter(|p| p.exists());
+
+        if let Some(cover_url) = cover.clone() {
             let id = track.id.clone();
             let weak = Rc::downgrade(self);
-            self.load_image(&sized_cover(url, 640), 640, move |img, tint| {
+            let cover_url_for_cache = cover_url.clone();
+            self.load_image(&cover_url, 640, move |img, tint| {
                 let Some(ui) = weak.upgrade() else { return };
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_cover_large(img.clone());
                     ui.app().set_np_tint(tint);
+                    let path = ui.ctx.images.file_path(&url_key(&cover_url_for_cache, 0));
+                    if path.exists() {
+                        ui.ctx.with_media(|m| {
+                            let _ = m.set_artwork_file(&path);
+                        });
+                    }
                 }
             });
         } else {
@@ -1677,14 +2260,13 @@ impl Ui {
         if app.get_show_now_playing() {
             self.load_lyrics();
         }
-        let cover = track.cover_url.as_deref().map(|u| sized_cover(u, 640));
         self.ctx.with_media(|m| {
             let _ = m.set_metadata(
                 &track.title,
                 &track.artist,
                 &track.album,
                 Some(Duration::from_secs(track.duration_secs as u64)),
-                cover.as_deref(),
+                cached_cover.as_deref().and_then(|p| p.to_str()).or(cover.as_deref()),
             );
         });
     }
@@ -1831,6 +2413,9 @@ impl Ui {
             None => {
                 self.ctx.player.pause();
                 self.app().set_playing(false);
+                self.ctx.with_media(|m| {
+                    let _ = m.set_playback_state(false, Some(Duration::ZERO));
+                });
             }
         }
     }
@@ -1856,6 +2441,13 @@ impl Ui {
                 let _ = m.set_playback_state(playing, Some(to));
             });
         }
+    }
+
+    fn seek_to(self: &Rc<Self>, to: Duration) {
+        let Some(track) = self.current_track() else { return };
+        let total = track.duration_secs as f32;
+        let fraction = if total > 0.0 { to.as_secs_f32() / total } else { 0.0 };
+        self.seek(fraction);
     }
 
     fn set_volume(&self, volume: f32) {
@@ -1946,24 +2538,7 @@ impl Ui {
             self.present_signal();
         }
 
-        // The engine moved on to the pre-loaded track by itself (gapless).
-        let serial = player.track_serial();
-        if serial != self.state.borrow().last_serial {
-            let next = self.following(true);
-            {
-                let mut st = self.state.borrow_mut();
-                st.last_serial = serial;
-                st.prefetched_for = None;
-                if let Some(next) = next {
-                    st.pos = next;
-                }
-            }
-            self.present_current();
-            self.present_format();
-            if let Some(track) = self.current_track() {
-                let _ = self.ctx.meta.record_play(&track.id);
-            }
-        }
+        self.sync_gapless_transition();
 
         if player.is_finished() {
             self.skip(1, false);
@@ -1985,9 +2560,35 @@ impl Ui {
         }
     }
 
+    fn sync_gapless_transition(self: &Rc<Self>) {
+        // The engine moved on to the pre-loaded track by itself (gapless).
+        let serial = self.ctx.player.track_serial();
+        if serial != self.state.borrow().last_serial {
+            let next = self.following(true);
+            {
+                let mut st = self.state.borrow_mut();
+                st.last_serial = serial;
+                st.prefetched_for = None;
+                if let Some(next) = next {
+                    st.pos = next;
+                }
+            }
+            self.present_current();
+            self.present_format();
+            self.ctx.with_media(|m| {
+                let _ = m.set_playback_state(self.ctx.player.is_playing(), Some(self.ctx.player.elapsed()));
+            });
+            if let Some(track) = self.current_track() {
+                let _ = self.ctx.meta.record_play(&track.id);
+            }
+        }
+    }
+
     /// Download and decode-queue the next track so the hand-over is gapless.
     fn prefetch_next(self: &Rc<Self>) {
         let generation = self.ctx.play_gen.load(Ordering::SeqCst);
+        let revision = *self.ctx.next_revision.lock().unwrap();
+        let serial = self.ctx.player.track_serial();
         let next = {
             let mut st = self.state.borrow_mut();
             if st.prefetched_for == Some(generation) {
@@ -2003,6 +2604,13 @@ impl Ui {
         self.spawn(|ctx| async move {
             match ctx.resolve_audio(&track.id).await {
                 Ok(path) if ctx.play_gen.load(Ordering::SeqCst) == generation => {
+                    let revision_guard = ctx.next_revision.lock().unwrap();
+                    if *revision_guard != revision
+                        || ctx.play_gen.load(Ordering::SeqCst) != generation
+                        || ctx.player.track_serial() != serial
+                    {
+                        return;
+                    }
                     let _queued_gapless = ctx.player.enqueue_next(TrackQueueItem {
                         id: track.id.clone(),
                         title: track.title.clone(),
@@ -2010,6 +2618,7 @@ impl Ui {
                         file_path: path,
                         duration: Duration::from_secs(track.duration_secs as u64),
                     });
+                    drop(revision_guard);
                     let _ = ctx.meta.upsert_track(&track);
                 }
                 Ok(_) => {}
@@ -2023,6 +2632,12 @@ impl Ui {
             MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => self.toggle_play(),
             MediaControlEvent::Next => self.skip(1, true),
             MediaControlEvent::Previous => self.previous(),
+            MediaControlEvent::Stop => {
+                if self.ctx.player.is_playing() {
+                    self.toggle_play();
+                }
+            }
+            MediaControlEvent::SetPosition(pos) => self.seek_to(pos.0),
             _ => {}
         }
     }
@@ -2039,11 +2654,13 @@ impl Ui {
         let model = {
             let mut st = self.state.borrow_mut();
             if favorite {
-                st.fav_ids.insert(id.to_string());
-                let known = st.page_tracks.iter().chain(st.queue.iter()).find(|t| t.id == id).cloned();
-                if let Some(mut track) = known {
-                    track.date_added = Some("Today".into());
-                    st.favorites.insert(0, track);
+                if st.fav_ids.insert(id.to_string()) {
+                    let known = st.menu_track.iter().chain(st.page_tracks.iter()).chain(st.queue.iter())
+                        .find(|t| t.id == id).cloned();
+                    if let Some(mut track) = known {
+                        track.date_added = Some("Today".into());
+                        st.favorites.insert(0, track);
+                    }
                 }
             } else {
                 st.fav_ids.remove(id);
@@ -2060,6 +2677,10 @@ impl Ui {
             }
         }
         self.refresh_now_playing_favorite();
+        if self.app().get_view() == "tracks" && self.app().get_nav_key() == "tracks" {
+            let filter = self.app().get_filter_text();
+            self.apply_filter(&filter);
+        }
     }
 
     fn toggle_favorite(self: &Rc<Self>, id: &str) {
@@ -2207,6 +2828,7 @@ impl Ui {
     }
 
     fn logout(self: &Rc<Self>) {
+        self.app().set_track_menu_open(false);
         self.ctx.play_gen.fetch_add(1, Ordering::SeqCst);
         self.ctx.player.pause();
         self.ctx.player.clear_queue();
@@ -2292,6 +2914,22 @@ impl Ui {
                 }
             })),
             (1000, "06b-artist-tracks", Box::new(|_| {})),
+            // Back / forward panes: caught mid-flight, held by a swipe, and settled.
+            (200, "", Box::new(|ui| ui.app().set_scroll_y(-600.0))),
+            (300, "", Box::new(|ui| ui.app().invoke_back())),
+            (150, "06c-back-midway", Box::new(|_| {})),
+            (1500, "06d-back-arrived", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.app().invoke_forward())),
+            (150, "06e-forward-midway", Box::new(|_| {})),
+            // Should report scroll=-600: the page comes back where it was left.
+            (1500, "06e2-forward-arrived", Box::new(|_| {})),
+            (200, "06f-swipe-held", Box::new(|ui| {
+                if ui.swipe_begin(true) {
+                    ui.swipe_move(ui.app().get_pane_width() * 0.4);
+                }
+            })),
+            (200, "", Box::new(|ui| ui.swipe_end(true))),
+            (800, "06g-swipe-called-off", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.app().invoke_search("grammy".into()))),
             (4000, "07-search", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("settings"))),
@@ -2342,8 +2980,9 @@ impl Ui {
                             );
                             let app = ui.app();
                             println!(
-                                "snapshot {name}: {saved:?} view={} tracks={} cards={} sections={} playing={} elapsed={} quality={} signal={:?} output={:?}",
+                                "snapshot {name}: {saved:?} view={} scroll={} tracks={} cards={} sections={} playing={} elapsed={} quality={} signal={:?} output={:?}",
                                 app.get_view(),
+                                app.get_scroll_y(),
                                 app.get_tracks().row_count(),
                                 app.get_grid_cards().row_count(),
                                 app.get_sections().row_count(),

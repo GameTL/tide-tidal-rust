@@ -48,18 +48,22 @@ fn macos_scroll_filter() -> impl FnMut(&slint::Window, &WindowEvent) -> EventRes
     use slint::winit_030::winit::event::MouseScrollDelta;
 
     let mut cursor = None;
+    let mut swipe = SwipeTracker::default();
     move |window, event| {
         match *event {
             // Winit reports the scroll event's location as CursorMoved before MouseWheel.
             WindowEvent::CursorMoved { position, .. } => cursor = Some(position),
-            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(delta), .. } => {
+            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(delta), phase, .. } => {
+                let scale = f64::from(window.scale_factor());
+                let delta = delta.to_logical::<f32>(scale);
+                if swipe.handle(scroll_phase(phase), delta.x, delta.y) {
+                    return EventResult::PreventDefault;
+                }
                 let Some(position) = cursor else {
                     return EventResult::Propagate;
                 };
                 if delta.x != 0.0 || delta.y != 0.0 {
-                    let scale = f64::from(window.scale_factor());
                     let position = position.to_logical::<f32>(scale);
-                    let delta = delta.to_logical::<f32>(scale);
                     // macOS already sends the momentum deltas. Apply each directly so
                     // Slint doesn't start a second coast when the gesture ends.
                     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
@@ -74,6 +78,144 @@ fn macos_scroll_filter() -> impl FnMut(&slint::Window, &WindowEvent) -> EventRes
         }
         // Discrete mouse wheels and all non-scroll input keep Slint's normal handling.
         EventResult::Propagate
+    }
+}
+
+/// Where a trackpad scroll event sits in its gesture.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollPhase {
+    /// Fingers touched down.
+    Began,
+    /// Fingers moving on the trackpad.
+    Changed,
+    /// Fingers lifted (`true` when the system called the gesture off).
+    Ended(bool),
+    /// The coast after the fingers lifted.
+    Momentum,
+    MomentumEnded,
+}
+
+/// Winit folds finger and momentum phases into one value, so read them from
+/// the AppKit event being handled; fall back to Winit's when there is none.
+#[cfg(target_os = "macos")]
+fn scroll_phase(winit_phase: slint::winit_030::winit::event::TouchPhase) -> ScrollPhase {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventPhase, NSEventType};
+    use slint::winit_030::winit::event::TouchPhase;
+
+    let event = MainThreadMarker::new().and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent());
+    // Phases only exist on scroll events; asking any other event raises.
+    if let Some(event) = event.filter(|e| e.r#type() == NSEventType::ScrollWheel) {
+        let (phase, momentum) = (event.phase(), event.momentumPhase());
+        return if momentum.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+            ScrollPhase::MomentumEnded
+        } else if !momentum.is_empty() {
+            ScrollPhase::Momentum
+        } else if phase.intersects(NSEventPhase::Began | NSEventPhase::MayBegin) {
+            ScrollPhase::Began
+        } else if phase.contains(NSEventPhase::Cancelled) {
+            ScrollPhase::Ended(true)
+        } else if phase.contains(NSEventPhase::Ended) {
+            ScrollPhase::Ended(false)
+        } else {
+            ScrollPhase::Changed
+        };
+    }
+    match winit_phase {
+        TouchPhase::Started => ScrollPhase::Began,
+        TouchPhase::Moved => ScrollPhase::Changed,
+        TouchPhase::Ended => ScrollPhase::Ended(false),
+        TouchPhase::Cancelled => ScrollPhase::Ended(true),
+    }
+}
+
+/// Turns two-finger horizontal scrolling into back / forward swipes, the way
+/// AppKit's own page swiping behaves: the gesture is claimed only when it
+/// starts out sideways, it then follows the fingers until they lift, and the
+/// coast that follows is swallowed.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+enum SwipeTracker {
+    #[default]
+    Idle,
+    /// Fingers are down; not yet clear which way the gesture goes.
+    Deciding { dx: f32, dy: f32 },
+    /// This gesture drives a page transition.
+    Swiping,
+    /// The swipe is over; its momentum must not scroll the page.
+    Coasting,
+}
+
+#[cfg(target_os = "macos")]
+impl SwipeTracker {
+    /// Movement before the gesture's direction is judged, in logical pixels.
+    const SLOP: f32 = 8.0;
+
+    /// True when the event belongs to a swipe and must not scroll anything.
+    fn handle(&mut self, phase: ScrollPhase, dx: f32, dy: f32) -> bool {
+        use crate::controller::with_ui;
+
+        match phase {
+            ScrollPhase::Began => {
+                *self = Self::Deciding { dx: 0.0, dy: 0.0 };
+                false
+            }
+            ScrollPhase::Changed => match self {
+                Self::Deciding { dx: sum_x, dy: sum_y } => {
+                    *sum_x += dx;
+                    *sum_y += dy;
+                    let (x, y) = (*sum_x, *sum_y);
+                    if x.abs() + y.abs() < Self::SLOP {
+                        return false;
+                    }
+                    // Mostly sideways, with a page in that direction: content
+                    // moving right uncovers the previous page.
+                    let sideways = x.abs() > 2.0 * y.abs();
+                    if sideways && swipe_between_pages() && with_ui(|ui| ui.swipe_begin(x > 0.0)) == Some(true) {
+                        with_ui(|ui| ui.swipe_move(x));
+                        *self = Self::Swiping;
+                        true
+                    } else {
+                        *self = Self::Idle;
+                        false
+                    }
+                }
+                Self::Swiping => {
+                    with_ui(|ui| ui.swipe_move(dx));
+                    true
+                }
+                _ => false,
+            },
+            ScrollPhase::Ended(cancelled) => {
+                let swiping = matches!(self, Self::Swiping);
+                if swiping {
+                    with_ui(|ui| ui.swipe_end(cancelled));
+                }
+                *self = if swiping { Self::Coasting } else { Self::Idle };
+                swiping
+            }
+            ScrollPhase::Momentum => matches!(self, Self::Coasting),
+            ScrollPhase::MomentumEnded => matches!(std::mem::take(self), Self::Coasting),
+        }
+    }
+}
+
+/// The "Swipe between pages" trackpad setting.
+#[cfg(target_os = "macos")]
+fn swipe_between_pages() -> bool {
+    objc2_app_kit::NSEvent::isSwipeTrackingFromScrollEventsEnabled()
+}
+
+/// The "Reduce motion" accessibility setting.
+pub fn reduce_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 

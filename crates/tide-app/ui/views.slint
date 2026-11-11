@@ -1,5 +1,6 @@
 // Main content views.
 import { ScrollView } from "std-widgets.slint";
+import { TrackMenuButton } from "track-menu.slint";
 import { MaxLogin } from "settings.slint";
 import { App, Theme, EditableInput, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, PillButton, DragArea } from "common.slint";
 
@@ -105,6 +106,11 @@ component RowTrack inherits Rectangle {
     background: ta.has-hover ? #111111 : transparent;
     ta := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                more.open-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             root.play();
         }
@@ -148,11 +154,9 @@ component RowTrack inherits Rectangle {
         }
     }
 
-    Icon {
+    more := TrackMenuButton {
         x: root.width - 44px;
-        source: @image-url("icons/more.svg");
-        size: 20px;
-        tint: Theme.text-secondary;
+        track-id: track.id;
     }
 }
 
@@ -357,6 +361,7 @@ component Spinner inherits Rectangle {
 export component HomeView inherits Rectangle {
     property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
     ScrollView {
+        content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
@@ -441,6 +446,7 @@ component Cell inherits Text {
 component LinkedCell inherits Cell {
     in property <bool> link-enabled;
     callback activated();
+    callback context-requested(length, length);
 
     font-weight: Theme.demibold;
 
@@ -458,6 +464,11 @@ component LinkedCell inherits Cell {
         width: max(0px, min(root.width, root.preferred-width));
         enabled: root.link-enabled;
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => { root.activated(); }
     }
 }
@@ -479,6 +490,11 @@ component TrackRow inherits Rectangle {
     border-radius: 6px;
     background: ta.has-hover ? #121212 : transparent;
     ta := TouchArea {
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                more.open-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         double-clicked => {
             App.play-track(track.id);
         }
@@ -512,6 +528,7 @@ component TrackRow inherits Rectangle {
             icon: active && App.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
             size: 15px;
             tint: Theme.text;
+            context-requested(x, y) => { more.open-at(x, y); }
             clicked => {
                 if (active) {
                     App.toggle-play();
@@ -543,6 +560,7 @@ component TrackRow inherits Rectangle {
         width: (album-page ? x-time : x-album) - x-artist - 24px;
         text: track.artist;
         link-enabled: !track.artist-id.is-empty;
+        context-requested(x, y) => { more.open-at(x, y); }
         activated => { App.open-track-artist(track); }
     }
 
@@ -551,6 +569,7 @@ component TrackRow inherits Rectangle {
         width: (show-date ? x-date : x-time) - x-album - 20px;
         text: track.album;
         link-enabled: !track.album-id.is-empty;
+        context-requested(x, y) => { more.open-at(x, y); }
         activated => { App.open-track-album(track); }
     }
 
@@ -568,11 +587,9 @@ component TrackRow inherits Rectangle {
         x: x-bpm;
         text: track.bpm;
     }
-    Icon {
-        x: root.width - 66px;
-        source: @image-url("icons/plus.svg");
-        size: 18px;
-        tint: Theme.text-secondary;
+    more := TrackMenuButton {
+        x: root.width - 76px;
+        track-id: track.id;
     }
 
     IconButton {
@@ -580,6 +597,7 @@ component TrackRow inherits Rectangle {
         icon: track.favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
         size: 17px;
         tint: Theme.text;
+        context-requested(x, y) => { more.open-at(x, y); }
         clicked => {
             App.toggle-favorite(track.id);
         }
@@ -688,8 +706,6 @@ export component TracksView inherits Rectangle {
     // Hand-rolled virtualisation so the header scrolls with the rows.
     property <int> first: max(0, floor((-sv.content-y - header-h) / row-h));
     property <int> visible-rows: ceil(self.height / row-h) + 2;
-    property <int> page-revision: App.page-revision;
-    changed page-revision => { sv.content-y = 0px; }
     changed first => {
         App.rows-visible(first, visible-rows);
     }
@@ -697,6 +713,7 @@ export component TracksView inherits Rectangle {
         App.rows-visible(first, visible-rows);
     }
     sv := ScrollView {
+        content-y <=> App.scroll-y;
         content-width: root.width;
         content-height: artist-page ? artist-content.y + artist-content.preferred-height + 32px
             : header-h + row-count * row-h + 48px;
@@ -1052,6 +1069,7 @@ export component GridView inherits Rectangle {
     property <length> card-w: (w - (cols - 1) * gap) / cols;
     property <length> cell-h: card-w + 76px + 64px;
     ScrollView {
+        content-y <=> App.scroll-y;
         content-width: root.width;
         content-height: 82px + ceil(App.grid-cards.length / cols) * cell-h + 24px;
         HorizontalLayout {
