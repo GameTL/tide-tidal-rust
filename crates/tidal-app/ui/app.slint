@@ -1,0 +1,725 @@
+import { Button, Slider, ScrollView, LineEdit } from "std-widgets.slint";
+
+export struct TrackData {
+    id: string,
+    title: string,
+    artist: string,
+    album: string,
+    duration: string,
+    quality: string,
+    is_cached: bool,
+}
+
+export component MainWindow inherits Window {
+    title: "TIDAL";
+    min-width: 1000px;
+    min-height: 650px;
+    default-font-family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    background: #121212;
+
+    in-out property <bool> is_logged_in: false;
+    in-out property <string> username: "Not logged in";
+    in-out property <string> user_code: "";
+    in-out property <string> verification_url: "";
+    in-out property <string> auth_status: "";
+
+    in-out property <string> current_nav: "tracks"; // "home", "search", "tracks", "history"
+    in-out property <string> search_text: "";
+    in-out property <[TrackData]> tracks: [];
+
+    in-out property <string> now_playing_title: "No track playing";
+    in-out property <string> now_playing_artist: "Select a track to play";
+    in-out property <string> now_playing_album: "";
+    in-out property <string> now_playing_quality: "MAX";
+    in-out property <string> now_playing_elapsed: "0:00";
+    in-out property <string> now_playing_total: "0:00";
+    in-out property <float> now_playing_progress: 0.0;
+    in-out property <bool> is_playing: false;
+    in-out property <float> volume: 1.0;
+    in-out property <bool> is_current_cached: false;
+
+    callback play_track(string);
+    callback toggle_play();
+    callback next_track();
+    callback prev_track();
+    callback seek(float);
+    callback volume_changed(float);
+    callback search_submitted(string);
+    callback start_device_login();
+    callback open_browser_login();
+    callback logout();
+    callback switch_tab(string);
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // Top navigation & search bar
+        Rectangle {
+            height: 52px;
+            background: #121212;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 16px;
+                alignment: space-between;
+
+                // App Brand
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text {
+                        text: "T I D A L";
+                        color: #ffffff;
+                        font-size: 16px;
+                        font-weight: 800;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 1px;
+                        height: 20px;
+                        background: #333333;
+                    }
+                    // Search Bar
+                    Rectangle {
+                        width: 320px;
+                        height: 34px;
+                        background: #242424;
+                        border-radius: 17px;
+                        clip: true;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "🔍";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            search_input := TextInput {
+                                text <=> root.search_text;
+                                color: #ffffff;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                accepted => {
+                                    root.search_submitted(self.text);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // User / Account Area
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    if root.is_logged_in: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.username;
+                            color: #a0a0a0;
+                            font-size: 13px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            width: 60px;
+                            height: 28px;
+                            clicked => { root.logout(); }
+                            Rectangle {
+                                background: #282828;
+                                border-radius: 14px;
+                                Text {
+                                    text: "Logout";
+                                    color: #dddddd;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    if !root.is_logged_in: TouchArea {
+                        width: 80px;
+                        height: 32px;
+                        clicked => { root.start_device_login(); }
+                        Rectangle {
+                            background: #00ffff;
+                            border-radius: 16px;
+                            Text {
+                                text: "Log In";
+                                color: #000000;
+                                font-size: 12px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Center Content Area (Sidebar + Viewport)
+        HorizontalLayout {
+            spacing: 0px;
+
+            // Left Sidebar
+            Rectangle {
+                width: 220px;
+                background: #0d0d0d;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    // Navigation items
+                    Text {
+                        text: "MAIN";
+                        color: #666666;
+                        font-size: 11px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                    }
+
+                    TouchArea {
+                        height: 36px;
+                        clicked => { root.switch_tab("home"); }
+                        Rectangle {
+                            background: root.current_nav == "home" ? #242424 : transparent;
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 10px;
+                                Text { text: "🏠"; font-size: 14px; vertical-alignment: center; }
+                                Text {
+                                    text: "Home";
+                                    color: root.current_nav == "home" ? #ffffff : #a0a0a0;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    TouchArea {
+                        height: 36px;
+                        clicked => { root.switch_tab("search"); }
+                        Rectangle {
+                            background: root.current_nav == "search" ? #242424 : transparent;
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 10px;
+                                Text { text: "🔍"; font-size: 14px; vertical-alignment: center; }
+                                Text {
+                                    text: "Explore";
+                                    color: root.current_nav == "search" ? #ffffff : #a0a0a0;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 12px; }
+
+                    Text {
+                        text: "MY COLLECTION";
+                        color: #666666;
+                        font-size: 11px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                    }
+
+                    TouchArea {
+                        height: 36px;
+                        clicked => { root.switch_tab("tracks"); }
+                        Rectangle {
+                            background: root.current_nav == "tracks" ? #242424 : transparent;
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 10px;
+                                Text { text: "🎵"; font-size: 14px; vertical-alignment: center; }
+                                Text {
+                                    text: "Favorite Tracks";
+                                    color: root.current_nav == "tracks" ? #ffffff : #a0a0a0;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    TouchArea {
+                        height: 36px;
+                        clicked => { root.switch_tab("history"); }
+                        Rectangle {
+                            background: root.current_nav == "history" ? #242424 : transparent;
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                spacing: 10px;
+                                Text { text: "🕒"; font-size: 14px; vertical-alignment: center; }
+                                Text {
+                                    text: "Recently Played";
+                                    color: root.current_nav == "history" ? #ffffff : #a0a0a0;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Main Content Area
+            Rectangle {
+                background: #121212;
+
+                if !root.is_logged_in: Rectangle {
+                    // Login Prompt
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 20px;
+                        padding: 40px;
+
+                        Text {
+                            text: "Log in to Tidal";
+                            color: #ffffff;
+                            font-size: 24px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Connect with your Tidal HiFi/HiRes subscription to unlock MAX audio quality.";
+                            color: #a0a0a0;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+
+                        if root.user_code != "": VerticalLayout {
+                            alignment: center;
+                            spacing: 14px;
+
+                            Rectangle {
+                                width: 280px;
+                                height: 60px;
+                                background: #1f1f1f;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: #00ffff;
+
+                                Text {
+                                    text: root.user_code;
+                                    color: #00ffff;
+                                    font-size: 28px;
+                                    font-weight: 800;
+                                    letter-spacing: 6px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Text {
+                                text: "Enter this code at " + root.verification_url;
+                                color: #cccccc;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                            }
+
+                            TouchArea {
+                                width: 220px;
+                                height: 42px;
+                                clicked => { root.open_browser_login(); }
+                                Rectangle {
+                                    background: #00ffff;
+                                    border-radius: 21px;
+                                    Text {
+                                        text: "Open Browser & Authorize";
+                                        color: #000000;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: root.auth_status;
+                                color: #ffd700;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        if root.user_code == "": TouchArea {
+                            width: 200px;
+                            height: 44px;
+                            clicked => { root.start_device_login(); }
+                            Rectangle {
+                                background: #00ffff;
+                                border-radius: 22px;
+                                Text {
+                                    text: "Start Device Login";
+                                    color: #000000;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.is_logged_in: VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+
+                    // View Header
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: root.current_nav == "tracks" ? "Favorite Tracks" :
+                                  root.current_nav == "search" ? "Search Results" :
+                                  root.current_nav == "history" ? "Recently Played" : "Home";
+                            color: #ffffff;
+                            font-size: 22px;
+                            font-weight: 800;
+                        }
+                        Text {
+                            text: root.tracks.length + " tracks";
+                            color: #777777;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Track Table Header
+                    Rectangle {
+                        height: 32px;
+                        background: #181818;
+                        border-radius: 4px;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Text { width: 36px; text: "#"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                            Text { horizontal-stretch: 2; text: "TITLE"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                            Text { horizontal-stretch: 2; text: "ARTIST"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                            Text { horizontal-stretch: 2; text: "ALBUM"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                            Text { width: 80px; text: "QUALITY"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                            Text { width: 60px; text: "TIME"; color: #777777; font-size: 11px; font-weight: 700; vertical-alignment: center; horizontal-alignment: right; }
+                        }
+                    }
+
+                    // Track Rows List
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 4px;
+                            alignment: start;
+
+                            for track[idx] in root.tracks: TouchArea {
+                                height: 44px;
+                                clicked => { root.play_track(track.id); }
+
+                                Rectangle {
+                                    background: parent.has-hover ? #222222 : #151515;
+                                    border-radius: 4px;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+
+                                        Text {
+                                            width: 36px;
+                                            text: (idx + 1);
+                                            color: #777777;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        HorizontalLayout {
+                                            horizontal-stretch: 2;
+                                            spacing: 8px;
+                                            Text {
+                                                text: track.title;
+                                                color: #ffffff;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            if track.is_cached: Text {
+                                                text: "💾";
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        Text {
+                                            horizontal-stretch: 2;
+                                            text: track.artist;
+                                            color: #a0a0a0;
+                                            font-size: 13px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            horizontal-stretch: 2;
+                                            text: track.album;
+                                            color: #888888;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+
+                                        Rectangle {
+                                            width: 80px;
+                                            HorizontalLayout {
+                                                alignment: start;
+                                                Rectangle {
+                                                    height: 18px;
+                                                    border-radius: 3px;
+                                                    background: track.quality == "HI_RES" || track.quality == "MAX" ? #00ffff : #333333;
+                                                    HorizontalLayout {
+                                                        padding-left: 5px;
+                                                        padding-right: 5px;
+                                                        Text {
+                                                            text: track.quality == "HI_RES" || track.quality == "MAX" ? "MAX" : "FLAC";
+                                                            color: track.quality == "HI_RES" || track.quality == "MAX" ? #000000 : #ffffff;
+                                                            font-size: 9px;
+                                                            font-weight: 800;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            width: 60px;
+                                            text: track.duration;
+                                            color: #888888;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bottom Now Playing Transport Bar
+        Rectangle {
+            height: 80px;
+            background: #181818;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                alignment: space-between;
+
+                // Left: Track Info
+                HorizontalLayout {
+                    width: 260px;
+                    spacing: 12px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        background: #242424;
+                        border-radius: 4px;
+                        Text {
+                            text: "🎵";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: root.now_playing_title;
+                            color: #ffffff;
+                            font-size: 13px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.now_playing_artist;
+                            color: #a0a0a0;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+
+                    if root.is_current_cached: Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        background: #00ffff;
+                        border-radius: 9px;
+                        Text {
+                            text: "✓";
+                            color: #000000;
+                            font-size: 10px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Center: Transport & Scrubber
+                VerticalLayout {
+                    width: 460px;
+                    alignment: center;
+                    spacing: 6px;
+
+                    // Buttons
+                    HorizontalLayout {
+                        spacing: 20px;
+                        alignment: center;
+
+                        TouchArea {
+                            width: 28px;
+                            height: 28px;
+                            clicked => { root.prev_track(); }
+                            Text {
+                                text: "⏮";
+                                color: #cccccc;
+                                font-size: 16px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            width: 36px;
+                            height: 36px;
+                            clicked => { root.toggle_play(); }
+                            Rectangle {
+                                background: #ffffff;
+                                border-radius: 18px;
+                                Text {
+                                    text: root.is_playing ? "⏸" : "▶";
+                                    color: #000000;
+                                    font-size: 16px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            width: 28px;
+                            height: 28px;
+                            clicked => { root.next_track(); }
+                            Text {
+                                text: "⏭";
+                                color: #cccccc;
+                                font-size: 16px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Scrubber Bar
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: center;
+
+                        Text {
+                            text: root.now_playing_elapsed;
+                            color: #888888;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0.0;
+                            maximum: 1.0;
+                            value <=> root.now_playing_progress;
+                            changed(val) => {
+                                root.seek(val);
+                            }
+                        }
+
+                        Text {
+                            text: root.now_playing_total;
+                            color: #888888;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Right: Quality & Volume
+                HorizontalLayout {
+                    width: 240px;
+                    spacing: 14px;
+                    alignment: end;
+
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: root.now_playing_quality == "MAX" || root.now_playing_quality == "HI_RES" ? #00ffff : #333333;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: root.now_playing_quality == "MAX" || root.now_playing_quality == "HI_RES" ? "MAX Hi-Res" : "FLAC";
+                                color: root.now_playing_quality == "MAX" || root.now_playing_quality == "HI_RES" ? #000000 : #ffffff;
+                                font-size: 10px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "🔊";
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+
+                    Slider {
+                        width: 80px;
+                        minimum: 0.0;
+                        maximum: 1.0;
+                        value <=> root.volume;
+                        changed(val) => {
+                            root.volume_changed(val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

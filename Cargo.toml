@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/tidal-api",
+    "crates/tidal-cache",
+    "crates/tidal-audio",
+    "crates/tidal-macos",
+    "crates/tidal-app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Tinapat Game Limsila <limsila.limsila@gmail.com>"]
+
+[workspace.dependencies]
+tokio = { version = "1.44", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "2.0"
+dirs = "6.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+symphonia = { version = "0.5.4", features = ["all"] }
+cpal = "0.18"
+rusqlite = { version = "0.34", features = ["bundled"] }
+tidlers = "0.5.0"
+slint = "1.18.1"
+objc2 = "0.6"
