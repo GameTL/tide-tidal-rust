@@ -207,6 +207,8 @@ export global App {
     in property <[SignalStage]> signal-stages;
     in property <bool> rate-matching: true;
     callback set-rate-matching(bool);
+    in property <bool> restore-sample-rate: true;
+    callback set-restore-sample-rate(bool);
     pure public function signal-color(quality: string) -> color {
         return quality == "max" ? Theme.max : quality == "lossless" ? Theme.lossless : quality == "high" ? #4ade80 : quality == "low" ? #ffffff : #8c8c8c;
     }

@@ -406,6 +406,8 @@ struct Shared {
     device_rate: AtomicU32,
     /// Switch the device to each track's native rate when the output allows it.
     rate_matching: AtomicBool,
+    /// Put the device back at the rate it had before TIDE changed it, on pause and quit.
+    restore_sample_rate: AtomicBool,
     output: Mutex<OutputInfo>,
     /// (device id, rate) the output had before TIDE first touched it, so it
     /// can be handed back the way it was found.
@@ -681,6 +683,7 @@ impl AudioPlayer {
             serial: AtomicU64::new(0),
             device_rate: AtomicU32::new(48_000),
             rate_matching: AtomicBool::new(true),
+            restore_sample_rate: AtomicBool::new(true),
             output: Mutex::new(OutputInfo::default()),
             original: Mutex::new(None),
             released: AtomicBool::new(false),
@@ -759,6 +762,25 @@ impl AudioPlayer {
         self.shared.rate_matching.load(Ordering::Relaxed)
     }
 
+    /// When off, pause and quit leave the device at the track's sample rate.
+    /// While paused, turning it on hands the device back, and turning it off
+    /// takes the track's rate again.
+    pub fn set_restore_sample_rate(&self, enabled: bool) {
+        self.shared.restore_sample_rate.store(enabled, Ordering::Relaxed);
+        if self.is_playing() {
+            return;
+        }
+        if enabled {
+            let _ = self.release_output();
+        } else if self.is_released() {
+            self.rematch_current();
+        }
+    }
+
+    pub fn restore_sample_rate(&self) -> bool {
+        self.shared.restore_sample_rate.load(Ordering::Relaxed)
+    }
+
     /// Re-open the output for the current track's rate and resume at the same position.
     fn rematch_current(&self) {
         let position = self.elapsed();
@@ -783,7 +805,7 @@ impl AudioPlayer {
     /// is kept; [`resume`](Self::resume) re-clocks the device again.
     /// Returns true if the device rate was restored.
     pub fn release_output(&self) -> bool {
-        if self.is_playing() {
+        if self.is_playing() || !self.restore_sample_rate() {
             return false;
         }
         let Some(original) = self.rate_to_restore() else { return false };

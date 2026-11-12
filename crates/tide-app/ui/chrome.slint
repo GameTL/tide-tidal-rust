@@ -806,13 +806,16 @@ component SignalPathPanel inherits Rectangle {
                 color: Theme.text;
                 font-size: 17px;
                 font-weight: 700;
+                vertical-alignment: center;
             }
 
+            // Centred like the sparkle: the row can be taller than the text.
             Text {
                 text: App.signal-title;
                 color: App.signal-color(App.signal-quality);
                 font-size: 17px;
                 font-weight: 500;
+                vertical-alignment: center;
             }
 
             VerticalLayout {
@@ -892,6 +895,42 @@ component SignalPathPanel inherits Rectangle {
             color: Theme.text-secondary;
             font-size: 12.5px;
             wrap: word-wrap;
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #2a2a2e;
+        }
+
+        HorizontalLayout {
+            alignment: space-between;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: "Bit-perfect playback";
+                    color: Theme.text;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "Match output sample rate";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                Toggle {
+                    on: App.rate-matching;
+                    toggled(v) => {
+                        App.set-rate-matching(v);
+                    }
+                }
+            }
         }
     }
 }
@@ -1380,7 +1419,7 @@ export component PlayerBar inherits Rectangle {
         x: root.width - 20px - 360px;
         y: -(self.height + 10px);
         width: 360px;
-        height: 150px + App.signal-stages.length * 58px;
+        height: 214px + App.signal-stages.length * 58px;
         SignalPathPanel { }
     }
 

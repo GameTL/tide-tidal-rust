@@ -51,18 +51,25 @@ pub struct Settings {
     pub keep_most_played: bool,
     /// Switch the output device to each track's sample rate (bit-perfect).
     pub rate_matching: bool,
+    /// Hand the device back its original sample rate on pause and quit.
+    #[serde(default = "default_true")]
+    pub restore_sample_rate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             quality: "max".into(),
-            low_memory: false,
             show_collection: true,
             show_audio_metadata: true,
             cache_max_gb: 20.0,
             keep_most_played: true,
             rate_matching: true,
+            restore_sample_rate: true,
         }
     }
 }
@@ -123,29 +130,32 @@ mod tests {
         for (i, px) in window.make_mut_slice().iter_mut().enumerate() {
             px.r = i as u8;
         }
-        let pane = crop_pane(&window, (2, 1, 4, 4), false).unwrap();
+        let pane = crop_pane(&window, (2, 1, 4, 4)).unwrap();
         assert_eq!((pane.width(), pane.height()), (4, 4));
         assert_eq!(pane.as_slice()[0].r, 10);
         assert_eq!(pane.as_slice()[15].r, 37);
-        let half = crop_pane(&window, (2, 1, 4, 4), true).unwrap();
-        assert_eq!((half.width(), half.height()), (2, 2));
-        assert_eq!(half.as_slice()[3].r, 28);
         // A pane that reaches past the window is clipped to it.
-        assert_eq!(crop_pane(&window, (6, 4, 10, 10), false).unwrap().width(), 2);
-        assert!(crop_pane(&window, (8, 0, 4, 4), false).is_none());
+        assert_eq!(crop_pane(&window, (6, 4, 10, 10)).unwrap().width(), 2);
+        assert!(crop_pane(&window, (8, 0, 4, 4)).is_none());
     }
 
     #[test]
     fn loads_display_defaults_from_existing_settings() {
         let meta = MetadataCache::in_memory().unwrap();
-        assert!(!Settings::load(&meta).low_memory);
-        meta.put_json("settings", r#"{"quality":"high","low_memory":true}"#).unwrap();
+        assert!(Settings::load(&meta).rate_matching);
+        assert!(Settings::load(&meta).restore_sample_rate);
+        meta.put_json("settings", r#"{"quality":"high","rate_matching":false}"#).unwrap();
 
         let settings = Settings::load(&meta);
         assert_eq!(settings.quality, "high");
-        assert!(settings.low_memory);
+        assert!(!settings.rate_matching);
+        // Missing field stays on, so older settings files keep handing the device back.
+        assert!(settings.restore_sample_rate);
         assert!(settings.show_collection);
         assert!(settings.show_audio_metadata);
+
+        meta.put_json("settings", r#"{"restore_sample_rate":false}"#).unwrap();
+        assert!(!Settings::load(&meta).restore_sample_rate);
     }
 }
 
@@ -178,6 +188,7 @@ impl Ctx {
         audio.set_max_bytes(gb_to_bytes(settings.cache_max_gb));
         let player = AudioPlayer::new()?;
         player.set_rate_matching(settings.rate_matching);
+        player.set_restore_sample_rate(settings.restore_sample_rate);
         Ok(Arc::new(Self {
             settings: RwLock::new(settings),
             pkce: tokio::sync::Mutex::new(None),
@@ -822,6 +833,13 @@ impl Ui {
                 on_ui(|ui| ui.present_signal());
             });
         });
+        bind!(on_set_restore_sample_rate, |ui, on| {
+            ui.update_settings(|s| s.restore_sample_rate = on);
+            ui.spawn(|ctx| async move {
+                let _ = tokio::task::spawn_blocking(move || ctx.player.set_restore_sample_rate(on)).await;
+                on_ui(|ui| ui.present_signal());
+            });
+        });
         bind!(on_set_keep_most_played, |ui, on| ui.update_settings(|s| s.keep_most_played = on));
         bind!(on_pkce_finish, |ui, url| ui.pkce_finish(url.trim().to_string()));
     }
@@ -1122,11 +1140,11 @@ impl Ui {
         let app = self.app();
         let settings = self.ctx.settings.read().unwrap().clone();
         app.set_quality(settings.quality.into());
-        app.set_low_memory(settings.low_memory);
         app.set_show_collection(settings.show_collection);
         app.set_show_audio_metadata(settings.show_audio_metadata);
         app.set_keep_most_played(settings.keep_most_played);
         app.set_rate_matching(settings.rate_matching);
+        app.set_restore_sample_rate(settings.restore_sample_rate);
         app.set_cache_max(format!("{}", settings.cache_max_gb).into());
         let (tracks, bytes) = self.ctx.audio.usage();
         let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -2483,10 +2501,16 @@ impl Ui {
         let output = player.output_info();
         app.set_output_info(format!("{} · {} · {}", output.name, output.kind.label(), khz(output.sample_rate)).into());
         let Some(format) = player.format_info().filter(|_| app.get_has_track()) else {
+            if let Ok(mut st) = self.state.try_borrow_mut() {
+                st.shown_bitrate = 0;
+            }
             app.set_signal_quality("".into());
             return;
         };
         let volume = if app.get_muted() { 0.0 } else { app.get_volume() };
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.shown_bitrate = format.bitrate_kbps;
+        }
         let path = signal_path(format, &output, volume, player.rate_matching(), player.is_released());
         app.set_signal_quality(path.quality.key().into());
         app.set_signal_title(path.quality.title().into());
@@ -2661,12 +2685,17 @@ impl Ui {
 
     fn set_volume(&self, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
-        self.state.borrow_mut().muted = false;
+        {
+            let mut st = self.state.borrow_mut();
+            st.muted = false;
+            st.volume_before_mute = volume;
+        }
         self.ctx.player.set_volume(volume);
         let app = self.app();
         app.set_volume(volume);
         app.set_muted(false);
         self.present_signal();
+        self.persist_cursor();
     }
 
     fn toggle_mute(&self) {
@@ -2682,10 +2711,11 @@ impl Ui {
         app.set_muted(st.muted);
         drop(st);
         self.present_signal();
+        self.persist_cursor();
     }
 
     fn toggle_shuffle(self: &Rc<Self>) {
-        let shuffle = {
+        let (shuffle, order) = {
             let mut st = self.state.borrow_mut();
             st.shuffle = !st.shuffle;
             let current = st.order.get(st.pos).copied().unwrap_or(0);
@@ -2724,14 +2754,20 @@ impl Ui {
         let player = &self.ctx.player;
 
         // Follow the system output (headphones plugged in, Bluetooth connected, ...).
-        let (check_output, idle_ticks) = {
+        let (check_output, save_tick, idle_ticks) = {
             let mut st = self.state.borrow_mut();
             st.tick_count = st.tick_count.wrapping_add(1);
             st.idle_ticks = if player.is_playing() { 0 } else { st.idle_ticks.saturating_add(1) };
-            (st.tick_count % 8 == 0, st.idle_ticks)
+            (st.tick_count % 8 == 0, st.tick_count % 20 == 0, st.idle_ticks)
         };
         if check_output && player.sync_output() {
             self.present_signal();
+        }
+        if check_output {
+            let bitrate = player.format_info().map_or(0, |f| f.bitrate_kbps);
+            if bitrate != self.state.borrow().shown_bitrate {
+                self.present_signal();
+            }
         }
         // Paused for a few seconds: give the device back at its original sample
         // rate so other apps are not left with a re-clocked output.

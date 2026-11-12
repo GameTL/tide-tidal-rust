@@ -1,6 +1,6 @@
 // Settings page (⌘,).
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput } from "common.slint";
+import { App, Theme, EditableInput, Toggle } from "common.slint";
 
 component Card inherits Rectangle {
     border-radius: 12px;
@@ -333,13 +333,25 @@ export component SettingsView inherits Rectangle {
 
                     Row {
                         title: "Match output sample rate";
-                        detail: "Switches the output device to each track's sample rate for bit-perfect playback. Never used for Bluetooth or AirPlay. The device gets its original rate back when you pause or quit.";
-                        divider: false;
+                        detail: "Switches the output device to each track's sample rate for bit-perfect playback. Never used for Bluetooth or AirPlay.";
                         Toggle {
                             x: parent.width - self.width;
                             on: App.rate-matching;
                             toggled(v) => {
                                 App.set-rate-matching(v);
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Restore original sample rate";
+                        detail: "Gives the device back the sample rate it had before TIDE changed it, after a pause and when TIDE quits. Turn off to leave it at the track's rate.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.restore-sample-rate;
+                            toggled(v) => {
+                                App.set-restore-sample-rate(v);
                             }
                         }
                     }
@@ -385,18 +397,6 @@ export component SettingsView inherits Rectangle {
                 }
 
                 Card {
-                    Row {
-                        title: "Low-memory rendering";
-                        detail: "Draws the window on the CPU, roughly halving memory use. Turn off for GPU rendering (smoother scrolling, more memory). Takes effect after restarting TIDE.";
-                        Toggle {
-                            x: parent.width - self.width;
-                            on: App.low-memory;
-                            toggled(v) => {
-                                App.set-low-memory(v);
-                            }
-                        }
-                    }
-
                     Row {
                         title: "Offline audio cache";
                         detail: App.cache-info;

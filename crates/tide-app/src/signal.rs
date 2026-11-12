@@ -71,10 +71,17 @@ pub fn signal_path(
     let mut stages = vec![Stage {
         kind: "source",
         title: "Source".into(),
-        detail: if lossy_source {
-            format!("AAC {}", khz(format.sample_rate))
-        } else {
-            format!("FLAC {}-bit {}", format.bits_per_sample, khz(format.sample_rate))
+        detail: {
+            let base = if lossy_source {
+                format!("AAC {}", khz(format.sample_rate))
+            } else {
+                format!("FLAC {}-bit {}", format.bits_per_sample, khz(format.sample_rate))
+            };
+            if format.bitrate_kbps > 0 {
+                format!("{base} · {}kbps", format.bitrate_kbps)
+            } else {
+                base
+            }
         },
         quality: if lossy_source {
             Quality::Low
@@ -152,7 +159,7 @@ mod tests {
         OutputInfo { id: "x".into(), name: "DAC".into(), kind, sample_rate: rate, supported_rates: vec![44_100, 48_000, 96_000] }
     }
 
-    const HIRES: FormatInfo = FormatInfo { bits_per_sample: 24, sample_rate: 96_000 };
+    const HIRES: FormatInfo = FormatInfo { bits_per_sample: 24, sample_rate: 96_000, bitrate_kbps: 0 };
 
     #[test]
     fn matched_rate_and_full_volume_is_bit_perfect() {
@@ -165,7 +172,7 @@ mod tests {
 
     #[test]
     fn cd_quality_is_lossless_not_hires() {
-        let cd = FormatInfo { bits_per_sample: 16, sample_rate: 44_100 };
+        let cd = FormatInfo { bits_per_sample: 16, sample_rate: 44_100, bitrate_kbps: 0 };
         let path = signal_path(cd, &out(OutputKind::Usb, 44_100), 1.0, true, false);
         assert_eq!(path.quality, Quality::Lossless);
         assert_eq!(path.quality.key(), "lossless");
@@ -188,7 +195,7 @@ mod tests {
         assert_eq!(bluetooth.quality, Quality::Low);
         assert!(bluetooth.note.contains("Bluetooth"));
 
-        let aac = FormatInfo { bits_per_sample: 0, sample_rate: 44_100 };
+        let aac = FormatInfo { bits_per_sample: 0, sample_rate: 44_100, bitrate_kbps: 0 };
         assert_eq!(signal_path(aac, &out(OutputKind::Usb, 44_100), 1.0, true, false).quality, Quality::Low);
     }
 }
