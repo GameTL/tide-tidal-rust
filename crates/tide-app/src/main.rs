@@ -1,3 +1,4 @@
+mod alerts;
 mod controller;
 mod signal;
 mod platform;
@@ -17,7 +18,15 @@ slint::include_modules!();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    {
+        use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
+            // The debug panel's log tail; errors also surface as the in-app alert.
+            .with(alerts::AlertLayer.with_filter(alerts::panel_filter()))
+            .init();
+    }
 
     let args: Vec<String> = std::env::args().collect();
     // `--snapshot <dir> [--play]` runs the GUI through a scripted tour and saves PNGs.
@@ -31,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let has_session = service.is_authenticated();
     let ctx = Ctx::new(service)?;
     restore_output_on_exit(&ctx);
-    platform::configure_backend(ctx.settings.read().unwrap().low_memory);
+    platform::configure_backend();
 
     // Media keys / Control Center arrive on a system thread; hop to the UI thread.
     *ctx.media.lock().unwrap() =

@@ -8,15 +8,13 @@ use crate::MainWindow;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
 
 /// Must run before the first window is created.
-pub fn configure_backend(low_memory: bool) {
+pub fn configure_backend() {
     #[cfg(target_os = "macos")]
     {
         use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
         let mut selector = slint::BackendSelector::new().backend_name("winit".into());
-        // The software renderer needs no GPU window surfaces (~120 MB less on a
-        // Retina display); TIDE_RENDERER=femtovg|software overrides the setting.
-        let renderer = std::env::var("TIDE_RENDERER")
-            .unwrap_or_else(|_| if low_memory { "software" } else { "femtovg" }.to_string());
+        // Default to GPU (femtovg); TIDE_RENDERER=femtovg|software overrides it.
+        let renderer = std::env::var("TIDE_RENDERER").unwrap_or_else(|_| "femtovg".to_string());
         selector = selector.renderer_name(renderer);
         let selected = selector
             .with_winit_window_attributes_hook(|attrs| {
