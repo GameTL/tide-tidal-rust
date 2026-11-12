@@ -613,7 +613,7 @@ impl AudioCache {
     }
 
     pub fn file_path(&self, track_id: &str, quality: &str) -> PathBuf {
-        let safe_quality = quality.replace(' ', "_").replace('/', "_");
+        let safe_quality = quality.replace([' ', '/'], "_");
         self.base_dir.join(format!("{}_{}.audio", track_id, safe_quality))
     }
 
@@ -888,7 +888,7 @@ impl ImageCache {
     }
 
     pub fn file_path(&self, id: &str) -> PathBuf {
-        let safe_id = id.replace('/', "_").replace(':', "_");
+        let safe_id = id.replace(['/', ':'], "_");
         self.base_dir.join(format!("{}.jpg", safe_id))
     }
 
@@ -939,7 +939,7 @@ mod tests {
             ..Default::default()
         };
 
-        cache.save_favorites(&[track.clone()]).unwrap();
+        cache.save_favorites(std::slice::from_ref(&track)).unwrap();
         let favs = cache.get_favorites().unwrap();
         assert_eq!(favs.len(), 1);
         assert_eq!(favs[0].id, "1001");

@@ -24,7 +24,7 @@ async fn test_services_initialization() {
         ..Default::default()
     };
 
-    meta.save_favorites(&[track.clone()]).unwrap();
+    meta.save_favorites(std::slice::from_ref(&track)).unwrap();
     let favs = meta.get_favorites().unwrap();
     assert_eq!(favs.len(), 1);
     assert_eq!(favs[0].title, "Test Hi-Res Song");

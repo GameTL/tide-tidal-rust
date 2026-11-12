@@ -165,11 +165,11 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let mut total_bytes = 0u64;
             if let Ok(entries) = std::fs::read_dir(audio_dir) {
                 for entry in entries.flatten() {
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.is_file() {
-                            audio_count += 1;
-                            total_bytes += meta.len();
-                        }
+                    if let Ok(meta) = entry.metadata()
+                        && meta.is_file()
+                    {
+                        audio_count += 1;
+                        total_bytes += meta.len();
                     }
                 }
             }

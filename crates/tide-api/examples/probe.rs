@@ -10,7 +10,7 @@ fn shape(v: &Value, depth: usize, out: &mut String, indent: usize) {
                     Value::Object(_) if depth > 0 => { out.push_str(&format!("{pad}{k}:\n")); shape(x, depth - 1, out, indent + 2); }
                     Value::Array(a) => {
                         out.push_str(&format!("{pad}{k}: [{}]\n", a.len()));
-                        if depth > 0 { if let Some(f) = a.first() { shape(f, depth - 1, out, indent + 2); } }
+                        if depth > 0 && let Some(f) = a.first() { shape(f, depth - 1, out, indent + 2); }
                     }
                     Value::String(s) => out.push_str(&format!("{pad}{k}: \"{}\"\n", s.chars().take(50).collect::<String>())),
                     other => out.push_str(&format!("{pad}{k}: {}\n", other.to_string().chars().take(50).collect::<String>())),

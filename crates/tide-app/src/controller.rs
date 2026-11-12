@@ -284,11 +284,9 @@ impl Ctx {
             }
             return Ok(path);
         }
-        if for_playback {
-            if let Some(path) = self.audio.get_playable(track_id, &cache_key) {
-                tracing::info!(track_id, %cache_key, "Using in-progress partial cache for playback");
-                return Ok(path);
-            }
+        if for_playback && let Some(path) = self.audio.get_playable(track_id, &cache_key) {
+            tracing::info!(track_id, %cache_key, "Using in-progress partial cache for playback");
+            return Ok(path);
         }
         let t_api = std::time::Instant::now();
         let api = self.api().ok_or("offline and not cached")?;
@@ -392,10 +390,10 @@ impl Ctx {
     }
 
     fn with_media(&self, f: impl FnOnce(&mut MacMediaControls)) {
-        if let Ok(mut guard) = self.media.lock() {
-            if let Some(media) = guard.as_mut() {
-                f(media);
-            }
+        if let Ok(mut guard) = self.media.lock()
+            && let Some(media) = guard.as_mut()
+        {
+            f(media);
         }
     }
 }
@@ -432,6 +430,9 @@ impl Page {
     }
 }
 
+type SectionModel = (Rc<VecModel<CardData>>, Rc<VecModel<TrackData>>, usize);
+type ImageWaiters = HashMap<String, Vec<Box<dyn FnOnce(&Image, Color)>>>;
+
 #[derive(Default)]
 struct State {
     history: Vec<Page>,
@@ -448,7 +449,7 @@ struct State {
     fav_ids: HashSet<String>,
     sections: Vec<Section>,
     /// Per home section: card model, track model, and how many cards have artwork requested.
-    section_models: Vec<(Rc<VecModel<CardData>>, Rc<VecModel<TrackData>>, usize)>,
+    section_models: Vec<SectionModel>,
 
     /// Tracks behind the table on screen (after filtering) and its model.
     page_tracks: Vec<TrackItem>,
@@ -490,7 +491,7 @@ struct State {
     lyric_idx: Option<usize>,
 
     images: HashMap<String, (Image, Color)>,
-    image_waiters: HashMap<String, Vec<Box<dyn FnOnce(&Image, Color)>>>,
+    image_waiters: ImageWaiters,
     /// Artist whose hover card (bio + picture) is loaded or loading.
     hover_artist: String,
 }
@@ -953,12 +954,12 @@ impl Ui {
         bind!(on_np_artist_hovered, |ui| ui.load_artist_hover_card());
         bind!(on_toggle_follow_artist, |ui| ui.toggle_follow_artist());
         bind!(on_open_now_playing_artist, |ui| {
-            if let Some(track) = ui.current_track() {
-                if let Some(id) = track.artist_id {
-                    ui.open_card(CardData {
-                        kind: "artist".into(), id: id.into(), title: track.artist.into(), ..Default::default()
-                    });
-                }
+            if let Some(track) = ui.current_track()
+                && let Some(id) = track.artist_id
+            {
+                ui.open_card(CardData {
+                    kind: "artist".into(), id: id.into(), title: track.artist.into(), ..Default::default()
+                });
             }
         });
         bind!(on_search, |ui, q| {
@@ -2715,11 +2716,11 @@ impl Ui {
             if let Some(api) = ctx.api() {
                 match fetch(api).await {
                     Ok(data) => {
-                        if let Ok(json) = serde_json::to_string(&data) {
-                            if cached.as_deref() != Some(&json) {
-                                let _ = ctx.meta.put_json(&key, &json);
-                                changed = Some(data);
-                            }
+                        if let Ok(json) = serde_json::to_string(&data)
+                            && cached.as_deref() != Some(&json)
+                        {
+                            let _ = ctx.meta.put_json(&key, &json);
+                            changed = Some(data);
                         }
                     }
                     Err(e) => tracing::warn!("catalog load failed for {key}: {e}"),
@@ -2965,10 +2966,10 @@ impl Ui {
             let st = self.state.borrow();
             st.sections.get(section).map(|s| (s.tracks.clone(), s.title.clone()))
         };
-        if let Some((tracks, title)) = found {
-            if let Some(index) = tracks.iter().position(|t| t.id == id) {
-                self.play_queue(tracks, index, &title, None);
-            }
+        if let Some((tracks, title)) = found
+            && let Some(index) = tracks.iter().position(|t| t.id == id)
+        {
+            self.play_queue(tracks, index, &title, None);
         }
     }
 
@@ -3086,7 +3087,7 @@ impl Ui {
         app.set_np_context(context.into());
         app.set_np_explicit(track.explicit);
         app.set_np_favorite(favorite);
-        app.set_duration_secs(track.duration_secs.max(0) as i32);
+        app.set_duration_secs(track.duration_secs as i32);
         app.set_total(fmt_time(track.duration_secs as u64).into());
         app.set_elapsed("0:00".into());
         app.set_progress(0.0);
@@ -3453,7 +3454,7 @@ impl Ui {
             let mut st = self.state.borrow_mut();
             st.tick_count = st.tick_count.wrapping_add(1);
             st.idle_ticks = if player.is_playing() { 0 } else { st.idle_ticks.saturating_add(1) };
-            (st.tick_count % 8 == 0, st.tick_count % 20 == 0, st.idle_ticks)
+            (st.tick_count.is_multiple_of(8), st.tick_count.is_multiple_of(20), st.idle_ticks)
         };
         if check_output && player.sync_output() {
             self.present_signal();
