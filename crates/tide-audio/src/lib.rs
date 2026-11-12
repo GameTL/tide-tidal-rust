@@ -7,10 +7,11 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
@@ -18,11 +19,42 @@ use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use thiserror::Error;
+
+/// Open cache file while DASH segments are still being appended.
+/// Reports `is_seekable() == false` and `byte_len() == None` so Symphonia's ISO-MP4
+/// demuxer streams incrementally across appended `moof`+`mdat` fragments without
+/// requiring a fixed end-of-file length up front (`IsoMp4Reader::try_new` returns
+/// `SeekErrorKind::Unseekable` when `is_seekable() && byte_len().is_none()`).
+struct GrowingFile {
+    file: File,
+}
+
+impl Read for GrowingFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for GrowingFile {
+    fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "growing cache file is stream-only"))
+    }
+}
+
+impl MediaSource for GrowingFile {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum AudioError {
@@ -59,6 +91,9 @@ pub struct TrackQueueItem {
 pub struct FormatInfo {
     pub bits_per_sample: u32,
     pub sample_rate: u32,
+    /// Average bitrate of the source file in kbps, measured from its size on
+    /// disk and the track duration. 0 while unknown (file still downloading).
+    pub bitrate_kbps: u32,
 }
 
 /// How the output device is connected, which decides whether TIDE may
@@ -135,12 +170,22 @@ struct AudioSource {
     // Linear resampler state (only used when the device cannot run at the source rate).
     resample_pos: f64,
     last_frame: [f32; 2],
+    /// Cache file still growing while segments download in the background.
+    growing: bool,
+    eof_wait: Option<Instant>,
+    /// Source frames already decoded — used to resume after reopening a finalized cache file.
+    frames_decoded: u64,
 }
 
 impl AudioSource {
     fn open(item: TrackQueueItem) -> Result<Self, AudioError> {
+        let growing = item.file_path.extension().and_then(|s| s.to_str()) == Some("tmp");
         let file = File::open(&item.file_path)?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mss = if growing {
+            MediaSourceStream::new(Box::new(GrowingFile { file }), Default::default())
+        } else {
+            MediaSourceStream::new(Box::new(file), Default::default())
+        };
         let probed = symphonia::default::get_probe()
             .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())
             .map_err(|e| AudioError::Decoder(e.to_string()))?;
@@ -166,20 +211,70 @@ impl AudioSource {
             sample_buf: None,
             resample_pos: 0.0,
             last_frame: [0.0; 2],
+            growing,
+            eof_wait: None,
+            frames_decoded: 0,
         })
     }
 
     fn format(&self) -> FormatInfo {
-        FormatInfo { bits_per_sample: self.bits_per_sample, sample_rate: self.sample_rate }
+        FormatInfo { bits_per_sample: self.bits_per_sample, sample_rate: self.sample_rate, bitrate_kbps: 0 }
+    }
+
+    /// Progressive head hit EOF after the `.tmp` was renamed to `.audio`. Reopen the
+    /// finished file and seek to where we left off so the track does not end early.
+    fn try_reopen_finalized(&mut self) -> Result<bool, AudioError> {
+        let complete = self.item.file_path.with_extension("audio");
+        if !complete.exists() {
+            return Ok(false);
+        }
+        let pos = Duration::from_secs_f64(self.frames_decoded as f64 / self.sample_rate.max(1) as f64);
+        let mut item = self.item.clone();
+        item.file_path = complete;
+        let decoded = self.frames_decoded;
+        let mut fresh = Self::open(item)?;
+        if pos > Duration::from_millis(20) {
+            fresh.seek(pos)?;
+        }
+        fresh.frames_decoded = decoded;
+        tracing::info!(?pos, title = %fresh.item.title, "Reopened finalized audio after progressive head");
+        *self = fresh;
+        Ok(true)
     }
 
     /// Decode one packet into interleaved stereo at `out_rate`. Returns false at end of stream.
     fn read_stereo(&mut self, out_rate: u32, out: &mut Vec<f32>) -> Result<bool, AudioError> {
-        let packet = match self.reader.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
-            Err(SymphoniaError::ResetRequired) => return Ok(false),
-            Err(e) => return Err(AudioError::Decoder(e.to_string())),
+        const GROWING_EOF_GRACE: Duration = Duration::from_secs(120);
+        let packet = loop {
+            match self.reader.next_packet() {
+                Ok(packet) => {
+                    self.eof_wait = None;
+                    break packet;
+                }
+                Err(SymphoniaError::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if !self.growing {
+                        return Ok(false);
+                    }
+                    if self.try_reopen_finalized()? {
+                        continue;
+                    }
+                    let start = *self.eof_wait.get_or_insert_with(Instant::now);
+                    if start.elapsed() > GROWING_EOF_GRACE {
+                        self.eof_wait = None;
+                        self.growing = false;
+                        return Ok(false);
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+                Err(SymphoniaError::ResetRequired) => {
+                    if self.growing && self.try_reopen_finalized()? {
+                        continue;
+                    }
+                    return Ok(false);
+                }
+                Err(e) => return Err(AudioError::Decoder(e.to_string())),
+            }
         };
         if packet.track_id() != self.track_id {
             return Ok(true);
@@ -229,18 +324,52 @@ impl AudioSource {
                 self.last_frame = frame(frames - 1);
             }
         }
+        self.frames_decoded = self.frames_decoded.saturating_add(frames as u64);
         Ok(true)
     }
 
     fn seek(&mut self, to: Duration) -> Result<(), AudioError> {
+        if self.growing {
+            let complete = self.item.file_path.with_extension("audio");
+            let reopen_path = if complete.exists() { complete } else { self.item.file_path.clone() };
+            let mut item = self.item.clone();
+            item.file_path = reopen_path;
+            let mut fresh = Self::open(item)?;
+            fresh
+                .reader
+                .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(to.as_secs_f64()), track_id: Some(fresh.track_id) })
+                .map_err(|e| AudioError::Decoder(e.to_string()))?;
+            fresh.decoder.reset();
+            fresh.frames_decoded = (to.as_secs_f64() * fresh.sample_rate.max(1) as f64).round() as u64;
+            *self = fresh;
+            return Ok(());
+        }
         self.reader
             .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(to.as_secs_f64()), track_id: Some(self.track_id) })
             .map_err(|e| AudioError::Decoder(e.to_string()))?;
         self.decoder.reset();
         self.resample_pos = 0.0;
         self.last_frame = [0.0; 2];
+        self.frames_decoded = (to.as_secs_f64() * self.sample_rate.max(1) as f64).round() as u64;
+        self.eof_wait = None;
         Ok(())
     }
+}
+
+/// Average bitrate of a fully downloaded track: file size over duration.
+/// A `.tmp` file still growing is measured once its finished `.audio` sibling exists.
+fn average_bitrate_kbps(item: &TrackQueueItem) -> Option<u32> {
+    let secs = item.duration.as_secs_f64();
+    if secs < 1.0 {
+        return None;
+    }
+    let path = if item.file_path.extension().and_then(|s| s.to_str()) == Some("tmp") {
+        item.file_path.with_extension("audio")
+    } else {
+        item.file_path.clone()
+    };
+    let bytes = std::fs::metadata(path).ok()?.len();
+    Some((bytes as f64 * 8.0 / secs / 1000.0).round() as u32)
 }
 
 struct Playing {
@@ -696,14 +825,33 @@ impl AudioPlayer {
 
     /// Stop whatever is playing and start `item` from the beginning.
     pub fn play_track(&self, item: TrackQueueItem) -> Result<(), AudioError> {
-        let opened = AudioSource::open(item)?;
+        self.play_track_at(item, Duration::ZERO)
+    }
+
+    /// Stop whatever is playing and start `item` at `start_at`.
+    pub fn play_track_at(&self, item: TrackQueueItem, start_at: Duration) -> Result<(), AudioError> {
+        let mut opened = AudioSource::open(item)?;
+        let actual_start = if start_at.is_zero() {
+            Duration::ZERO
+        } else {
+            match opened.seek(start_at) {
+                Ok(()) => start_at,
+                Err(e) => {
+                    tracing::warn!(?start_at, "Initial seek failed; starting from beginning: {e}");
+                    opened = AudioSource::open(opened.item)?;
+                    Duration::ZERO
+                }
+            }
+        };
         self.shared.playing.store(false, Ordering::Relaxed);
         self.match_device_rate(opened.sample_rate);
+        let rate = self.shared.device_rate.load(Ordering::Relaxed) as f64;
+        let frames_played = (actual_start.as_secs_f64() * rate) as u64;
 
         let mut source = self.shared.source.lock().unwrap();
         self.shared.queue.lock().unwrap().clear();
         let mut buf = self.shared.buffer.lock().unwrap();
-        self.reset_buffer(&mut buf, 0);
+        self.reset_buffer(&mut buf, frames_played);
         buf.current = Some(Playing { item: opened.item.clone(), format: opened.format() });
         *source = Some(opened);
         drop(buf);
@@ -834,7 +982,13 @@ impl AudioPlayer {
     }
 
     pub fn format_info(&self) -> Option<FormatInfo> {
-        self.shared.buffer.lock().unwrap().current.as_ref().map(|c| c.format)
+        let (mut format, item) = {
+            let buf = self.shared.buffer.lock().unwrap();
+            let current = buf.current.as_ref()?;
+            (current.format, current.item.clone())
+        };
+        format.bitrate_kbps = average_bitrate_kbps(&item).unwrap_or(0);
+        Some(format)
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -900,7 +1054,7 @@ mod tests {
 
         for (out_rate, expected_frames) in [(44_100u32, 44_100f64), (48_000, 48_000.0), (22_050, 22_050.0)] {
             let mut src = AudioSource::open(item(&path, 1.0)).unwrap();
-            assert_eq!(src.format(), FormatInfo { bits_per_sample: 16, sample_rate: 44_100 });
+            assert_eq!(src.format(), FormatInfo { bits_per_sample: 16, sample_rate: 44_100, bitrate_kbps: 0 });
             let mut out = Vec::new();
             while src.read_stereo(out_rate, &mut out).unwrap() {}
             let frames = (out.len() / 2) as f64;
@@ -945,6 +1099,271 @@ mod tests {
         let remaining = rest.len() as f64 / 2.0 / format.sample_rate as f64;
         println!("fmp4: {remaining:.2}s left after seeking to 6s");
         assert!((remaining - (secs - 6.0)).abs() < 0.5);
+    }
+
+    #[test]
+    fn tmp_extension_marks_source_as_growing() {
+        let path = std::env::temp_dir().join("tidal_audio_growing.tmp");
+        write_wav(&path, 44_100, 0.25);
+        let src = AudioSource::open(item(&path, 0.25)).unwrap();
+        assert!(src.growing);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn growing_file_is_stream_only_and_audio_source_seeks_by_reopening() {
+        let path = std::env::temp_dir().join("tidal_audio_grow_src.tmp");
+        write_wav(&path, 44_100, 1.0);
+        let mut src = GrowingFile { file: File::open(&path).unwrap() };
+        assert!(!MediaSource::is_seekable(&src));
+        assert!(MediaSource::byte_len(&src).is_none());
+        assert!(src.seek(SeekFrom::Start(0)).is_err());
+
+        // AudioSource opened on .tmp can seek forward and backward within written bytes by reopening.
+        let mut audio = AudioSource::open(item(&path, 1.0)).unwrap();
+        audio.seek(Duration::from_millis(500)).unwrap();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            assert!(audio.read_stereo(44_100, &mut out).unwrap());
+        }
+        assert!(!out.is_empty());
+        audio.seek(Duration::from_millis(100)).unwrap();
+        out.clear();
+        for _ in 0..4 {
+            assert!(audio.read_stereo(44_100, &mut out).unwrap());
+        }
+        assert!(!out.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn seek_on_tmp_upgrades_to_finalized_audio() {
+        let dir = std::env::temp_dir().join(format!("tide_seek_upgrade_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join("track.tmp");
+        write_wav(&tmp, 44_100, 2.0);
+        let mut src = AudioSource::open(item(&tmp, 2.0)).unwrap();
+        assert!(src.growing);
+
+        let finalized = tmp.with_extension("audio");
+        std::fs::rename(&tmp, &finalized).unwrap();
+        src.seek(Duration::from_millis(1500)).unwrap();
+        assert!(!src.growing);
+        let mut out = Vec::new();
+        while src.read_stereo(44_100, &mut out).unwrap() {}
+        let remaining = out.len() as f64 / 2.0 / 44_100.0;
+        assert!((remaining - 0.5).abs() < 0.05, "expected ~0.5s after seek, got {remaining}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reopen_finalized_resumes_without_doubling_length() {
+        let dir = std::env::temp_dir().join(format!("tide_grow_eof_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join("track.tmp");
+        write_wav(&tmp, 44_100, 1.0);
+        std::fs::copy(&tmp, tmp.with_extension("audio")).unwrap();
+
+        let mut src = AudioSource::open(item(&tmp, 1.0)).unwrap();
+        assert!(src.growing);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            assert!(src.read_stereo(44_100, &mut out).unwrap());
+        }
+        let mid = out.len();
+        assert!(mid > 0);
+        assert!(src.try_reopen_finalized().unwrap());
+        assert!(!src.growing);
+        while src.read_stereo(44_100, &mut out).unwrap() {}
+        let frames = out.len() / 2;
+        assert!(
+            (frames as i32 - 44_100).abs() <= 800,
+            "expected ~1s after reopen-at-position, got {frames} frames (mid samples {mid})"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn progressive_fmp4_tmp_opens_streams_appended_fragments_and_seeks() {
+        let dir = std::env::temp_dir().join(format!("tide_mp4_tmp_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join("track.tmp");
+        let (head, tail_frag) = minimal_fmp4_head_and_tail();
+        std::fs::write(&tmp, &head).unwrap();
+
+        // 1. Opening progressive ISO-MP4 .tmp must succeed (not fail with SeekErrorKind::Unseekable).
+        let mut src = AudioSource::open(item(&tmp, 0.3)).expect("progressive fMP4 .tmp must open");
+        assert!(src.growing);
+
+        // 2. Decode first 8 frames (two 4-sample fragments initially on disk).
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            assert!(src.read_stereo(48_000, &mut out).unwrap());
+        }
+        assert_eq!(out.len() / 2, 8);
+
+        // 3. Append a 3rd fragment while open -> reader continues seamlessly past initial file length.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
+            f.write_all(&tail_frag).unwrap();
+        }
+        for _ in 0..4 {
+            assert!(src.read_stereo(48_000, &mut out).unwrap());
+        }
+        assert_eq!(out.len() / 2, 12);
+
+        // 4. Seeking backward within already-written bytes on active .tmp must succeed.
+        src.seek(Duration::ZERO).expect("seek backward within downloaded bytes");
+        let mut after_seek = Vec::new();
+        for _ in 0..12 {
+            assert!(src.read_stereo(48_000, &mut after_seek).unwrap());
+        }
+        assert_eq!(after_seek, out);
+
+        // 5. Seeking past downloaded bytes fails cleanly without corrupting current playback.
+        assert!(src.seek(Duration::from_secs(10)).is_err());
+        let mut after_failed_seek = Vec::new();
+        src.seek(Duration::ZERO).unwrap();
+        for _ in 0..4 {
+            assert!(src.read_stereo(48_000, &mut after_failed_seek).unwrap());
+        }
+        assert_eq!(after_failed_seek.len() / 2, 4);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Minimal valid fragmented ISO-MP4 (`ftyp` + `moov`/`mvex` + `moof`/`mdat` fragments)
+    /// carrying 16-bit mono 48 kHz PCM (`sowt`) so Symphonia's `IsoMp4Reader` runs its exact
+    /// `try_new`, `next_packet`, and `seek` code paths in deterministic unit tests.
+    fn minimal_fmp4_head_and_tail() -> (Vec<u8>, Vec<u8>) {
+        fn atom(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let len = (8 + payload.len()) as u32;
+            let mut v = Vec::with_capacity(len as usize);
+            v.extend_from_slice(&len.to_be_bytes());
+            v.extend_from_slice(fourcc);
+            v.extend_from_slice(payload);
+            v
+        }
+        fn full_atom(fourcc: &[u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
+            let mut p = Vec::with_capacity(4 + body.len());
+            p.push(version);
+            p.extend_from_slice(&flags.to_be_bytes()[1..4]);
+            p.extend_from_slice(body);
+            atom(fourcc, &p)
+        }
+
+        let ftyp = atom(b"ftyp", b"isom\x00\x00\x02\x00isomiso6mp41");
+
+        let mut mvhd_b = vec![0u8; 96];
+        mvhd_b[8..12].copy_from_slice(&48_000u32.to_be_bytes());
+        mvhd_b[16..20].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        mvhd_b[20..22].copy_from_slice(&0x0100u16.to_be_bytes());
+        mvhd_b[32..36].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        mvhd_b[48..52].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        mvhd_b[64..68].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        mvhd_b[92..96].copy_from_slice(&2u32.to_be_bytes());
+        let mvhd = full_atom(b"mvhd", 0, 0, &mvhd_b);
+
+        let mut tkhd_b = vec![0u8; 80];
+        tkhd_b[8..12].copy_from_slice(&1u32.to_be_bytes());
+        tkhd_b[28..30].copy_from_slice(&0x0100u16.to_be_bytes());
+        tkhd_b[36..40].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        tkhd_b[52..56].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        tkhd_b[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        let tkhd = full_atom(b"tkhd", 0, 3, &tkhd_b);
+
+        let mut mdhd_b = vec![0u8; 20];
+        mdhd_b[8..12].copy_from_slice(&48_000u32.to_be_bytes());
+        let mdhd = full_atom(b"mdhd", 0, 0, &mdhd_b);
+
+        let mut hdlr_b = vec![0u8; 21];
+        hdlr_b[4..8].copy_from_slice(b"soun");
+        let hdlr = full_atom(b"hdlr", 0, 0, &hdlr_b);
+        let smhd = full_atom(b"smhd", 0, 0, &[0u8; 4]);
+
+        let url = full_atom(b"url ", 0, 1, &[]);
+        let mut dref_b = Vec::new();
+        dref_b.extend_from_slice(&1u32.to_be_bytes());
+        dref_b.extend_from_slice(&url);
+        let dref = full_atom(b"dref", 0, 0, &dref_b);
+        let dinf = atom(b"dinf", &dref);
+
+        let mut sowt_b = vec![0u8; 28];
+        sowt_b[6..8].copy_from_slice(&1u16.to_be_bytes());
+        sowt_b[16..18].copy_from_slice(&1u16.to_be_bytes());
+        sowt_b[18..20].copy_from_slice(&16u16.to_be_bytes());
+        sowt_b[24..28].copy_from_slice(&(48_000u32 << 16).to_be_bytes());
+        let sowt = atom(b"sowt", &sowt_b);
+        let mut stsd_b = Vec::new();
+        stsd_b.extend_from_slice(&1u32.to_be_bytes());
+        stsd_b.extend_from_slice(&sowt);
+        let stsd = full_atom(b"stsd", 0, 0, &stsd_b);
+
+        let stts = full_atom(b"stts", 0, 0, &0u32.to_be_bytes());
+        let stsc = full_atom(b"stsc", 0, 0, &0u32.to_be_bytes());
+        let stsz = full_atom(b"stsz", 0, 0, &[0u8; 8]);
+        let stco = full_atom(b"stco", 0, 0, &0u32.to_be_bytes());
+        let stbl = atom(b"stbl", &[stsd, stts, stsc, stsz, stco].concat());
+        let minf = atom(b"minf", &[smhd, dinf, stbl].concat());
+        let mdia = atom(b"mdia", &[mdhd, hdlr, minf].concat());
+        let trak = atom(b"trak", &[tkhd, mdia].concat());
+
+        // mvex -> trex: each PCM sample is 1 frame (duration = 1, size = 2 bytes)
+        let mut trex_b = Vec::with_capacity(20);
+        trex_b.extend_from_slice(&1u32.to_be_bytes());
+        trex_b.extend_from_slice(&1u32.to_be_bytes());
+        trex_b.extend_from_slice(&1u32.to_be_bytes());
+        trex_b.extend_from_slice(&2u32.to_be_bytes());
+        trex_b.extend_from_slice(&0u32.to_be_bytes());
+        let trex = full_atom(b"trex", 0, 0, &trex_b);
+        let mvex = atom(b"mvex", &trex);
+        let moov = atom(b"moov", &[mvhd, trak, mvex].concat());
+
+        let make_fragment = |seq: u32, decode_time: u64| -> Vec<u8> {
+            let samples = 4usize; // 4 PCM samples per fragment
+            let mut pcm = Vec::with_capacity(samples * 2);
+            for i in 0..samples {
+                let s = (i as i16 + 1) * 4000;
+                pcm.extend_from_slice(&s.to_le_bytes());
+            }
+            let mfhd = full_atom(b"mfhd", 0, 0, &seq.to_be_bytes());
+            let tfhd = full_atom(b"tfhd", 0, 0x020000, &1u32.to_be_bytes());
+            let tfdt = full_atom(b"tfdt", 1, 0, &decode_time.to_be_bytes());
+            let mut trun_b = Vec::with_capacity(8);
+            trun_b.extend_from_slice(&(samples as u32).to_be_bytes());
+            trun_b.extend_from_slice(&96i32.to_be_bytes());
+            let trun = full_atom(b"trun", 0, 0x000001, &trun_b);
+            let traf = atom(b"traf", &[tfhd, tfdt, trun].concat());
+            let moof = atom(b"moof", &[mfhd, traf].concat());
+            assert_eq!(moof.len(), 88);
+            let mdat = atom(b"mdat", &pcm);
+            [moof, mdat].concat()
+        };
+
+        let head = [ftyp, moov, make_fragment(1, 0), make_fragment(2, 4)].concat();
+        let tail = make_fragment(3, 8);
+        (head, tail)
+    }
+
+    #[test]
+    fn opens_real_progressive_dash_tmp() {
+        let real = PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library/Caches/tidal-rust/audio/180829094_MAX.tmp");
+        if !real.exists() {
+            return;
+        }
+        let mut src = AudioSource::open(item(&real, 12.0)).expect("real progressive DASH .tmp must open");
+        assert!(src.growing);
+        let mut out = Vec::new();
+        assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
+        assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
+        assert!(!out.is_empty());
+        // Seek backward to 0s within downloaded bytes of the real FLAC-in-fMP4 .tmp!
+        src.seek(Duration::ZERO).expect("seeking within downloaded bytes of real DASH .tmp must succeed");
+        out.clear();
+        assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
+        assert!(!out.is_empty());
     }
 
     #[test]

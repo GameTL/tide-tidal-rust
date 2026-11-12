@@ -217,7 +217,317 @@ export component Sidebar inherits Rectangle {
     Rectangle {
         x: parent.width - 1px;
         width: 1px;
-        background: #111111;
+        background: #141414;
+    }
+}
+
+// Dev panel under the computer button: chunk download grid, recent errors and
+// the verbose log. A plain overlay, not a popup, so the rest of the window
+// stays clickable. Scrolls when it is taller than the space below the top bar.
+export component DebugPanel inherits Rectangle {
+    in property <length> limit: 600px;
+    width: 420px;
+    height: min(root.limit, panel-layout.preferred-height);
+    clip: true;
+    background: #141414;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #2a2a2a;
+    // Clicks on the panel stay on the panel.
+    TouchArea { }
+
+    Flickable {
+    content-height: panel-layout.preferred-height;
+    panel-layout := VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Text {
+            text: "Debug · chunks";
+            color: Theme.text;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: App.debug-title == "" ? "Nothing playing" : App.debug-title;
+            color: Theme.text-secondary;
+            font-size: 12px;
+            overflow: elide;
+        }
+
+        Text {
+            text: App.debug-status;
+            color: App.debug-active ? #f5b942 : #3dd68c;
+            font-size: 12px;
+        }
+
+        Text {
+            text: App.debug-stats;
+            color: Theme.text-secondary;
+            font-size: 12px;
+        }
+
+        Rectangle {
+            width: 100%;
+            height: chunk-grid.height;
+            chunk-grid := Rectangle {
+                property <int> cols: 16;
+                property <length> cell-w: 20px;
+                property <length> cell-h: 16px;
+                width: parent.width;
+                height: max(cell-h, Math.ceil(max(App.debug-blocks.length, 1) * 1.0 / cols) * cell-h);
+                for block[i] in App.debug-blocks: Rectangle {
+                    x: Math.mod(i, chunk-grid.cols) * chunk-grid.cell-w;
+                    y: Math.floor(i / chunk-grid.cols) * chunk-grid.cell-h;
+                    width: chunk-grid.cell-w - 4px;
+                    height: chunk-grid.cell-h - 4px;
+                    border-radius: 2px;
+                    background: block == 2 ? #3dd68c : block == 1 ? #f5b942 : #2c2c2c;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 14px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #2c2c2c; }
+            }
+            Text { text: "Queued"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #f5b942; }
+            }
+            Text { text: "Downloading"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #3dd68c; }
+            }
+            Text { text: "Received"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+        }
+
+        if App.debug-errors.length > 0: Rectangle {
+            height: 1px;
+            background: #2a2a2a;
+        }
+
+        if App.debug-errors.length > 0: Text {
+            text: "Recent errors";
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        for entry in App.debug-errors: VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: entry.time + " · " + entry.source;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Text {
+                text: entry.message;
+                color: #ff7a7a;
+                font-size: 12px;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 48px;
+            }
+
+            if entry.fields != "": Text {
+                text: entry.fields;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #2a2a2a;
+        }
+
+        Text {
+            text: "Log";
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        if App.debug-logs.length == 0: Text {
+            text: "Nothing logged yet";
+            color: Theme.text-secondary;
+            font-size: 11px;
+        }
+        VerticalLayout {
+            spacing: 3px;
+            for line in App.debug-logs: Text {
+                text: line.time + "  " + line.level + "  " + line.text;
+                color: line.level == "ERROR" ? #ff7a7a : line.level == "WARN" ? #f5b942 : line.level == "DEBUG" ? #7c7c7c : #b8b8b8;
+                font-family: "Menlo";
+                font-size: 10px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    }
+}
+
+// Asks for the name of a new playlist or folder (`App.create-kind`).
+export component CreateDialog inherits Rectangle {
+    background: #000000b0;
+    // Clicking outside the card cancels.
+    TouchArea {
+        clicked => {
+            App.create-kind = "";
+        }
+    }
+
+    function submit() {
+        if (name.text != "") {
+            App.create-in-collection(App.create-kind, name.text);
+            App.create-kind = "";
+        }
+    }
+
+    Rectangle {
+        width: 420px;
+        height: 214px;
+        border-radius: 14px;
+        background: #1c1c1c;
+        border-width: 1px;
+        border-color: #2a2a2a;
+        TouchArea { }
+
+        Text {
+            x: 24px;
+            y: 22px;
+            text: App.create-kind == "folder" ? "Create folder" : "Create playlist";
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: Theme.bold;
+        }
+
+        Rectangle {
+            x: 24px;
+            y: 70px;
+            width: parent.width - 48px;
+            height: 44px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: name.has-focus ? #4a4a4a : Theme.border;
+            if name.text == "": Text {
+                x: 14px;
+                text: App.create-kind == "folder" ? "Folder name" : "Playlist name";
+                color: #aeafb2;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            name := EditableInput {
+                x: 14px;
+                width: parent.width - 28px;
+                height: 20px;
+                color: Theme.text;
+                font-size: 15px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                accepted => {
+                    root.submit();
+                }
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 24px - 110px - 12px - 110px;
+            y: 146px;
+            width: 110px;
+            height: 44px;
+            border-radius: 22px;
+            background: cancel.has-hover ? #2a2a2a : #222222;
+            cancel := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    App.create-kind = "";
+                }
+            }
+
+            Text {
+                text: "Cancel";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: Theme.demibold;
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 24px - 110px;
+            y: 146px;
+            width: 110px;
+            height: 44px;
+            border-radius: 22px;
+            background: name.text == "" ? #5a5a5a : create.has-hover ? #e6e6e6 : white;
+            create := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.submit();
+                }
+            }
+
+            Text {
+                text: "Create";
+                color: black;
+                font-size: 15px;
+                font-weight: Theme.demibold;
+            }
+        }
+    }
+
+    init => {
+        name.focus();
+    }
+}
+
+
+// The single error alert. Shows `App.alert-text`; a new error replaces it.
+export component ErrorAlert inherits Rectangle {
+    width: 520px;
+    height: alert-layout.preferred-height;
+    background: App.alert-error ? #2a1416 : #1c1c1c;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: App.alert-error ? #6b2a2e : #3a3a3a;
+    TouchArea { }
+
+    alert-layout := HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 4px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 8px;
+        Text {
+            text: App.alert-text;
+            color: App.alert-error ? #ffb4b4 : Theme.text;
+            font-size: 13px;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: 52px;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: @image-url("icons/x.svg");
+                size: 13px;
+                tint: App.alert-error ? #ffb4b4 : Theme.text-secondary;
+                clicked => {
+                    App.alert-text = "";
+                }
+            }
+        }
     }
 }
 
@@ -316,10 +626,36 @@ export component TopBar inherits Rectangle {
         }
     }
 
+    // Dev chunk monitor
+    debug-btn := Rectangle {
+        x: parent.width - 56px - self.width;
+        y: (parent.height - self.height) / 2;
+        width: 35px;
+        height: 35px;
+        border-radius: 17.5px;
+        background: App.debug-open || dta.has-hover ? #333333 : #2a2a2a;
+        border-width: App.debug-open || App.debug-active ? 1px : 0px;
+        border-color: #f5b942;
+        dta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                App.debug-open = !App.debug-open;
+            }
+        }
+
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("icons/computer.svg");
+            size: 16px;
+            tint: App.debug-open || App.debug-active ? #f5b942 : Theme.text;
+        }
+    }
+
     // Profile
     profile := Rectangle {
         x: parent.width - 13px - self.width;
-        y: 15px;
+        y: (parent.height - self.height) / 2;
         width: 35px;
         height: 35px;
         border-radius: 17.5px;

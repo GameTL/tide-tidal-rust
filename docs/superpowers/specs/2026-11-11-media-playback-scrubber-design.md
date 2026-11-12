@@ -45,9 +45,8 @@ Replaces the timeline `Slider` and flanking `Text` elements in `PlayerBar` (both
 - Verify `fmt_time` in Rust and `App.format-time` in Slint produce identical `m:ss` strings (`0:00`, `0:05`, `3:08`, `62:03`).
 
 ### Progressive Download Seeking (`crates/tide-audio/src/lib.rs`)
-Currently, tracks started progressively open `.tmp` via `GrowingFile` (which returns `Unsupported` on `Seek::seek` and `is_seekable() == false`). Even if `.tmp` has already finished downloading and been renamed to `.audio`, `AudioSource::seek` fails until playback hits natural EOF.
-- **Upgrade finalized files on seek**: At the start of `AudioSource::seek(to)`, if `self.growing` and `self.item.file_path.with_extension("audio").exists()`, reopen the `.audio` file as a normal seekable `AudioSource` before executing `reader.seek(...)`.
-- **Seek within downloaded bytes on active `.tmp`**: Implement `Seek` and `is_seekable() -> true` on `GrowingFile` delegating to `self.file.seek(pos)` (with `byte_len()` querying `self.file.metadata().ok().map(|m| m.len())`) while keeping the `UnexpectedEof` progressive wait loop in `read_stereo`. If seeking past the currently downloaded byte range fails in the demuxer, `AudioSource::seek` returns `Err` cleanly without crashing or corrupting current playback.
+Currently, tracks started progressively open `.tmp` via `GrowingFile` (which returns `Unsupported` on `Seek::seek` and `is_seekable() == false` + `byte_len() == None`, required so Symphonia's `IsoMp4Reader::try_new` streams appended `moof`+`mdat` fragments incrementally rather than rejecting `is_seekable() && byte_len().is_none()` with `SeekErrorKind::Unseekable`). Even if `.tmp` has already finished downloading and been renamed to `.audio`, `AudioSource::seek` fails until playback hits natural EOF.
+- **Upgrade finalized files & seek active `.tmp` by reopening**: In `AudioSource::seek(to)`, when `self.growing` is true, pick `.audio` if it now exists on disk, otherwise reopen the active `.tmp` from byte `0` as a fresh `AudioSource`, then forward-seek on that fresh reader before swapping `*self = fresh`. If seeking past the currently downloaded byte range hits `UnexpectedEof`, `AudioSource::seek` returns `Err` cleanly without mutating or corrupting the currently playing `AudioSource`.
 
 ---
 

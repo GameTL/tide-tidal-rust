@@ -66,11 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The context whose output device must be handed back when the process ends.
 static EXIT_CTX: std::sync::OnceLock<std::sync::Arc<Ctx>> = std::sync::OnceLock::new();
 
-/// Stop playback and put the output device back at the sample rate it had
-/// before TIDE changed it. Safe to call more than once.
+/// Stop playback, flush the live timestamp, and put the output device back at
+/// the sample rate it had before TIDE changed it. Safe to call more than once.
 fn release_output_now() {
     if let Some(ctx) = EXIT_CTX.get() {
         ctx.player.pause();
+        if ctx.player.current_id().is_some() {
+            ctx.meta.update_playback_elapsed(ctx.player.elapsed().as_millis() as u64);
+        }
         if ctx.player.release_output() {
             tracing::info!("Restored the output device's original sample rate");
         }

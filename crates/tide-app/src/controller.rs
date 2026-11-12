@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use tide_api::{ApiHandle, Card, CatalogDetail, Lyrics, Section, TidalService, TrackItem};
 use tide_audio::{AudioPlayer, TrackQueueItem};
-use tide_cache::{AudioCache, ImageCache, MetadataCache};
+use tide_cache::{AudioCache, ImageCache, MetadataCache, PlaybackCursor, SavedPlayback};
 use tide_macos::{MacMediaControls, MediaControlEvent};
 
 use crate::signal::{khz, signal_path};
-use crate::{App, CardData, LyricLine, MainWindow, SectionData, SignalStage, TrackData};
+use crate::{App, CardData, CreditLine, LyricLine, MainWindow, SectionData, SignalStage, TrackData};
 
 /// Cache key for "best quality the account can stream".
 pub const QUALITY_KEY: &str = "MAX";
@@ -216,13 +216,96 @@ impl Ctx {
         if for_playback {
             let _ = self.meta.record_cache_lookup(track_id, cached.is_some());
         }
+        let debug_gen = self.play_gen.load(Ordering::SeqCst);
         if let Some(path) = cached {
+            tracing::info!(track_id, %cache_key, "Audio cache HIT: instant start from local SSD");
+            if for_playback {
+                show_chunks(debug_gen, "Cached on SSD".into(), "local file · 0 ms".into(), Vec::new(), false);
+            }
             return Ok(path);
         }
+        if for_playback {
+            if let Some(path) = self.audio.get_playable(track_id, &cache_key) {
+                tracing::info!(track_id, %cache_key, "Using in-progress partial cache for playback");
+                return Ok(path);
+            }
+        }
+        let t_api = std::time::Instant::now();
         let api = self.api().ok_or("offline and not cached")?;
         let stream = api.stream(track_id, &quality).await.map_err(|e| e.to_string())?;
-        tracing::info!(track_id, quality = %stream.quality, bits = stream.bit_depth, rate = stream.sample_rate, "resolved stream");
-        let path = self.audio.fetch_or_cache(track_id, &cache_key, &stream.urls).await.map_err(|e| e.to_string())?;
+        let api_ms = t_api.elapsed().as_millis();
+        tracing::info!(
+            track_id,
+            quality = %stream.quality,
+            bits = stream.bit_depth,
+            rate = stream.sample_rate,
+            segments = stream.urls.len(),
+            api_ms,
+            "Resolved stream manifest from Tidal API"
+        );
+        let n = stream.urls.len();
+        let blocks = Arc::new(Mutex::new(vec![0i32; n]));
+        let tier = stream.quality.clone();
+        if for_playback {
+            show_chunks(
+                debug_gen,
+                format!("Downloading · {tier}"),
+                format!("0/{n} · api {api_ms} ms"),
+                vec![0; n],
+                true,
+            );
+        }
+        let t_dl = std::time::Instant::now();
+        let report_blocks = blocks.clone();
+        let report_tier = tier.clone();
+        let on_chunk: std::sync::Arc<dyn Fn(usize, u8, u64) + Send + Sync> = if for_playback {
+            std::sync::Arc::new(move |idx: usize, state: u8, bytes: u64| {
+                let snapshot = {
+                    let mut g = report_blocks.lock().unwrap();
+                    if let Some(slot) = g.get_mut(idx) {
+                        *slot = i32::from(state);
+                    }
+                    g.clone()
+                };
+                let done = snapshot.iter().filter(|s| **s == 2).count();
+                let total = snapshot.len();
+                let mb = bytes as f64 / (1024.0 * 1024.0);
+                let active = done < total;
+                let status = if active {
+                    format!("Streaming · {report_tier}")
+                } else {
+                    format!("Cached · {report_tier}")
+                };
+                show_chunks(debug_gen, status, format!("{done}/{total} · {mb:.1} MB"), snapshot, active);
+            })
+        } else {
+            std::sync::Arc::new(|_, _, _| {})
+        };
+        let path = self
+            .audio
+            .fetch_or_cache_with(track_id, &cache_key, &stream.urls, for_playback, on_chunk)
+            .await
+            .map_err(|e| e.to_string());
+        let dl_ms = t_dl.elapsed().as_millis();
+        let path = match path {
+            Ok(path) => path,
+            Err(e) => {
+                if for_playback {
+                    show_chunks(debug_gen, format!("Failed · {e}"), format!("{dl_ms} ms"), blocks.lock().unwrap().clone(), false);
+                }
+                return Err(e);
+            }
+        };
+        tracing::info!(track_id, dl_ms, streaming = path.extension().and_then(|s| s.to_str()) == Some("tmp"), "Audio ready for player");
+        if for_playback && path.extension().and_then(|s| s.to_str()) != Some("tmp") {
+            show_chunks(
+                debug_gen,
+                format!("Ready · {tier}"),
+                format!("{n} segments · {dl_ms} ms"),
+                blocks.lock().unwrap().clone(),
+                false,
+            );
+        }
         self.trim_audio_cache(&[track_id.to_string()]);
         Ok(path)
     }
@@ -452,6 +535,22 @@ pub fn with_ui<R>(f: impl FnOnce(&Rc<Ui>) -> R) -> Option<R> {
 
 thread_local! {
     static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) };
+}
+
+/// Push the dev chunk grid. `blocks`: 0 queued, 1 in flight, 2 received.
+/// `generation` must match the current `play_gen` or the update is dropped (prevents
+/// prefetch / superseded downloads from stacking on the panel).
+fn show_chunks(generation: u64, status: String, stats: String, blocks: Vec<i32>, active: bool) {
+    on_ui(move |ui| {
+        if ui.ctx.play_gen.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let app = ui.app();
+        app.set_debug_status(status.into());
+        app.set_debug_stats(stats.into());
+        app.set_debug_active(active);
+        app.set_debug_blocks(ModelRc::new(VecModel::from(blocks)));
+    });
 }
 
 /// Run `f` on the UI thread with the controller.
@@ -774,6 +873,49 @@ impl Ui {
         }
         if let Some(cards) = load::<Vec<Card>>(&self.ctx.meta, "cards:playlists") {
             self.set_sidebar(&cards);
+        }
+        self.restore_playback();
+    }
+
+    fn restore_playback(self: &Rc<Self>) {
+        let Ok(Some(saved)) = self.ctx.meta.load_playback_state() else { return };
+        let app = self.app();
+        self.ctx.player.set_volume(if saved.muted { 0.0 } else { saved.volume });
+        app.set_volume(saved.volume);
+        app.set_muted(saved.muted);
+        app.set_shuffle(saved.shuffle);
+        app.set_repeat_mode(saved.repeat_mode);
+
+        let elapsed = Duration::from_millis(saved.elapsed_ms);
+        let has_queue = !saved.queue.is_empty() && !saved.order.is_empty();
+        {
+            let mut st = self.state.borrow_mut();
+            st.volume_before_mute = saved.volume;
+            st.muted = saved.muted;
+            st.shuffle = saved.shuffle;
+            st.repeat = saved.repeat_mode;
+            if has_queue {
+                st.queue = saved.queue;
+                st.order = saved.order;
+                st.pos = saved.pos;
+                st.context = saved.context;
+                st.pending_seek = (!elapsed.is_zero()).then_some(elapsed);
+            }
+        }
+        self.present_signal();
+        if !has_queue {
+            return;
+        }
+        self.present_current();
+        if let Some(track) = self.current_track() {
+            let total_secs = track.duration_secs.max(1) as f32;
+            let clamped = elapsed.min(Duration::from_secs(track.duration_secs as u64));
+            let fraction = (clamped.as_secs_f32() / total_secs).clamp(0.0, 1.0);
+            app.set_elapsed(fmt_time(clamped.as_secs()).into());
+            app.set_progress(fraction);
+            self.ctx.with_media(|m| {
+                let _ = m.set_playback_state(false, Some(clamped));
+            });
         }
     }
 
@@ -2182,9 +2324,57 @@ impl Ui {
             st.pos = if st.shuffle { 0 } else { index };
             st.queue = tracks;
             st.context = context.to_string();
+            st.pending_seek = None;
         }
         self.app().set_shuffle(self.state.borrow().shuffle);
+        self.persist_queue();
         self.start_current();
+    }
+
+    fn effective_elapsed(&self) -> Duration {
+        let st = self.state.borrow();
+        if let Some(pending) = st.pending_seek {
+            pending
+        } else {
+            self.ctx.player.elapsed()
+        }
+    }
+
+    fn current_cursor(&self) -> PlaybackCursor {
+        let st = self.state.borrow();
+        let volume = if st.muted { st.volume_before_mute } else { self.app().get_volume() };
+        let elapsed = st.pending_seek.unwrap_or_else(|| self.ctx.player.elapsed());
+        PlaybackCursor {
+            pos: st.pos,
+            elapsed_ms: elapsed.as_millis() as u64,
+            shuffle: st.shuffle,
+            repeat_mode: st.repeat,
+            volume,
+            muted: st.muted,
+        }
+    }
+
+    fn persist_queue(&self) {
+        let cursor = self.current_cursor();
+        let saved = {
+            let st = self.state.borrow();
+            SavedPlayback {
+                queue: st.queue.clone(),
+                order: st.order.clone(),
+                pos: cursor.pos,
+                elapsed_ms: cursor.elapsed_ms,
+                context: st.context.clone(),
+                shuffle: cursor.shuffle,
+                repeat_mode: cursor.repeat_mode,
+                volume: cursor.volume,
+                muted: cursor.muted,
+            }
+        };
+        let _ = self.ctx.meta.save_playback_queue(&saved);
+    }
+
+    fn persist_cursor(&self) {
+        let _ = self.ctx.meta.update_playback_cursor(self.current_cursor());
     }
 
     fn current_track(&self) -> Option<TrackItem> {
@@ -2324,11 +2514,25 @@ impl Ui {
             let mut st = self.state.borrow_mut();
             st.loading_track = true;
             st.prefetched_for = None;
+            st.pending_seek = None;
         }
         self.present_current();
         let app = self.app();
+        if !start_at.is_zero() {
+            let total_secs = track.duration_secs.max(1) as f32;
+            let clamped = start_at.min(Duration::from_secs(track.duration_secs as u64));
+            app.set_elapsed(fmt_time(clamped.as_secs()).into());
+            app.set_progress((clamped.as_secs_f32() / total_secs).clamp(0.0, 1.0));
+        }
         app.set_playing(false);
         app.set_buffering(true);
+        app.set_debug_title(track.title.as_str().into());
+        app.set_debug_status("Resolving".into());
+        app.set_debug_stats("".into());
+        app.set_debug_active(true);
+        app.set_debug_blocks(ModelRc::new(VecModel::from(Vec::<i32>::new())));
+        let t_buffering_start = std::time::Instant::now();
+        tracing::info!(track_id = %track.id, title = %track.title, ?start_at, "Buffering started");
 
         self.spawn(|ctx| async move {
             let result = match ctx.resolve_audio(&track.id).await {
@@ -2341,9 +2545,14 @@ impl Ui {
                         duration: Duration::from_secs(track.duration_secs as u64),
                     };
                     let player_ctx = ctx.clone();
-                    tokio::task::spawn_blocking(move || player_ctx.player.play_track(item).map_err(|e| e.to_string()))
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
+                    let t_play = std::time::Instant::now();
+                    let play_res = tokio::task::spawn_blocking(move || {
+                        player_ctx.player.play_track_at(item, start_at).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    tracing::info!(track_id = %track.id, setup_ms = t_play.elapsed().as_millis(), "Audio player initialized");
+                    play_res
                 }
                 Ok(_) => return, // superseded by a newer request
                 Err(e) => Err(e),

@@ -44,6 +44,24 @@ export struct LyricLine {
     active: bool,
 }
 
+export struct ErrorEntry {
+    time: string,
+    source: string, // log target, e.g. tide_audio
+    message: string,
+    fields: string, // remaining log fields, `key=value …`
+}
+
+export struct LogEntry {
+    time: string,
+    level: string, // ERROR | WARN | INFO | DEBUG
+    text: string,
+}
+
+export struct CreditLine {
+    role: string,
+    names: string,
+}
+
 export global Theme {
     out property <color> bg: #000000;
     out property <color> surface: #141414;
@@ -151,9 +169,34 @@ export global App {
     in property <bool> np-favorite: false;
     in property <bool> playing: false;
     in property <bool> buffering: false;
+    // Dev chunk monitor (computer button, top right)
+    in property <bool> debug-active: false;
+    in property <string> debug-title: "";
+    in property <string> debug-status: "Idle";
+    in property <string> debug-stats: "";
+    in property <[int]> debug-blocks;
+    in-out property <bool> debug-open: false;
+    // Latest errors, newest first.
+    in property <[ErrorEntry]> debug-errors;
+    // Verbose log tail, newest first.
+    in property <[LogEntry]> debug-logs;
+    // The one error alert on screen; empty when there is none. A new error
+    // replaces it and bumps the serial.
+    in-out property <string> alert-text: "";
+    // False for a plain confirmation ("Added to playlist").
+    in property <bool> alert-error: true;
+    in property <int> alert-serial: 0;
     in property <float> progress: 0.0;
+    in property <int> duration-secs: 0;
+    in-out property <bool> show-remaining: false;
     in property <string> elapsed: "0:00";
     in property <string> total: "0:00";
+    pure public function format-time(secs: int) -> string {
+        if secs <= 0 {
+            return "0:00";
+        }
+        return Math.floor(secs / 60) + ":" + (Math.mod(secs, 60) < 10 ? "0" : "") + Math.mod(secs, 60);
+    }
     in property <string> quality-label: "";
     in property <string> quality-tier: "max"; // max | lossless | high
     in property <string> output-info: "";
