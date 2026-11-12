@@ -1,0 +1,107 @@
+---
+interface Release {
+  version: string;
+  tag: string;
+  publishedAt: string | null;
+  macUniversalUrl: string | null;
+  linuxUrl: string | null;
+  windowsUrl: string | null;
+}
+
+interface Props {
+  releases: Release[];
+}
+
+const { releases } = Astro.props;
+const recent = releases.slice(0, 3);
+const older = releases.slice(3);
+---
+<section class="section" id="download">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Downloads</h2>
+      <p>
+        macOS universal zip first. Linux and Windows are planned. Builds are unsigned —
+        on first launch, right-click TIDE.app → Open.
+      </p>
+    </div>
+
+    <div class="os-block">
+      <h3>macOS</h3>
+      {recent.length === 0 ? (
+        <p class="empty">No published releases yet. Check GitHub Releases after the first cut.</p>
+      ) : (
+        <div class="version-list">
+          {recent.map((r) => (
+            <div class="version-row">
+              <div>
+                <strong>v{r.version}</strong>
+                {r.publishedAt && (
+                  <div class="note" style="margin:0.2rem 0 0">
+                    {new Date(r.publishedAt).toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })}
+                  </div>
+                )}
+              </div>
+              {r.macUniversalUrl ? (
+                <a class="pill active" href={r.macUniversalUrl}>Universal zip</a>
+              ) : (
+                <span class="pill">Unavailable</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+
+    <div class="os-block">
+      <h3>Linux</h3>
+      <div class="version-row">
+        <strong>Planning</strong>
+        <span class="planning">No builds yet</span>
+      </div>
+    </div>
+
+    <div class="os-block">
+      <h3>Windows</h3>
+      <div class="version-row">
+        <strong>Planning</strong>
+        <span class="planning">No builds yet</span>
+      </div>
+    </div>
+
+    {older.length > 0 && (
+      <div class="os-block">
+        <h3>Older versions</h3>
+        <div class="older">
+          {older.map((r) => (
+            <article class="card">
+              <h4>v{r.version}</h4>
+              <div class="os-boxes">
+                <div class="os-box">
+                  <span>macOS</span>
+                  {r.macUniversalUrl ? (
+                    <a href={r.macUniversalUrl}>Universal zip</a>
+                  ) : (
+                    <span class="planning">—</span>
+                  )}
+                </div>
+                <div class="os-box">
+                  <span>Linux</span>
+                  <span class="planning">Planning</span>
+                </div>
+                <div class="os-box">
+                  <span>Windows</span>
+                  <span class="planning">Planning</span>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+</section>

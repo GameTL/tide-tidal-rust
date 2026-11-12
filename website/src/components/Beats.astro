@@ -1,0 +1,48 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+<section class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Local-first. Honest about the signal path.</h2>
+      <p>No Electron shell. No telemetry. Just your subscription and a lean native player.</p>
+    </div>
+
+    <div class="beats">
+      <div class="beat-card">
+        <h3>Bit-perfect when the output allows</h3>
+        <p>
+          Match the device sample rate to the track so nothing is resampled when the
+          hardware can do it. TIDE does not take exclusive access of the device —
+          other apps can still play sound. Bluetooth and virtual devices stay at their
+          own rate because those links re-clock anyway.
+        </p>
+      </div>
+      <figure class="beat-shot">
+        <img
+          src={`${base}screenshots/bit-perfect.png`}
+          alt="TIDE signal path showing bit-perfect playback without exclusive device access"
+          width="1200"
+          height="900"
+        />
+      </figure>
+
+      <div class="beat-card">
+        <h3>RAM that stays out of the way</h3>
+        <p>
+          Typically under about 100&nbsp;MB resident while playing, versus
+          multi-hundred-megabyte Electron clients. Refresh-rate-first GPU UI without
+          shipping a browser.
+        </p>
+      </div>
+      <div class="beat-card">
+        <h3>I don’t want your data</h3>
+        <p>
+          Session tokens and library cache live on your Mac. Play counts stay local.
+          There is no analytics, crash reporter, or update phoning home — TIDE only
+          talks to TIDAL’s own endpoints for music.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>

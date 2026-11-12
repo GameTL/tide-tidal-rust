@@ -6,6 +6,9 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 > TIDE is an unofficial, independent project. It is not affiliated with,
 > endorsed by, or supported by TIDAL. You need your own TIDAL subscription.
 
+**Site:** [gametl.github.io/tide-tidal-rust](https://gametl.github.io/tide-tidal-rust/)  
+**Releases:** merge a release PR (`staging` → `main`) to publish a universal macOS zip and refresh the download page.
+
 ## Features
 
 - Home feed, favourite tracks, playlists (with folders), mixes, artist pages, album details, and catalog search
