@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
 import Hero from '../components/Hero.astro';
 import Beats from '../components/Beats.astro';
 import Download from '../components/Download.astro';
@@ -19,8 +20,9 @@ const releases = (releasesData.releases ?? []) as Release[];
 const latestMacUrl = releases.find((r) => r.macUniversalUrl)?.macUniversalUrl ?? null;
 ---
 <Layout>
+  <Nav />
   <Hero latestMacUrl={latestMacUrl} />
   <Beats />
   <Download releases={releases} />
-  <Footer />
+  <Footer latestMacUrl={latestMacUrl} />
 </Layout>

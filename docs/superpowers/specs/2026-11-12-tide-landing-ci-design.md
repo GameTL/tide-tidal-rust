@@ -6,7 +6,7 @@ Repo: `GameTL/tide-tidal-rust`
 
 ## Goal
 
-Ship a T3-codes-inspired dark landing page for **TIDE**, and a 3dfabth-style release pipeline where merging a release PR into **`main`** publishes a macOS universal binary and updates the website download list. Public URL for v1: **`https://gametl.github.io/tide-tidal-rust/`**.
+Ship a T3-codes-inspired dark landing page for **TIDE**, and a 3dfabth-style release pipeline where merging a release PR into `main` publishes a macOS universal binary and updates the website download list. Public URL for v1: `https://gametl.github.io/tide-tidal-rust/`.
 
 ## Decisions (locked)
 
@@ -73,12 +73,12 @@ Single Astro landing page under `website/`, deployed as GitHub Pages with base p
 
 ## 3. CI / release pipeline
 
-Adapted from `3dfabth-full` (`.github/workflows/{ci,release-pr,release,deploy-staging}.yml`), with **`main` instead of `prod`**, Rust/macOS artifacts instead of Go/Cloudflare deploy.
+Adapted from `3dfabth-full` (`.github/workflows/{ci,release-pr,release,deploy-staging}.yml`), with `main` **instead of** `prod`, Rust/macOS artifacts instead of Go/Cloudflare deploy.
 
 ### Branches
 
-- **`staging`**: default integration branch (already default today).
-- **`main`**: production; create from `staging` at bootstrap if missing. Pages deploy and GitHub Releases come from here.
+- `staging`: default integration branch (already default today).
+- `main`: production; create from `staging` at bootstrap if missing. Pages deploy and GitHub Releases come from here.
 
 ### Workflows
 

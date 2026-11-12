@@ -13,95 +13,68 @@ interface Props {
 }
 
 const { releases } = Astro.props;
-const recent = releases.slice(0, 3);
-const older = releases.slice(3);
+const github = 'https://github.com/GameTL/tide-tidal-rust';
+const fmt = (d: string | null) =>
+  d
+    ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+    : '';
 ---
-<section class="section" id="download">
-  <div class="wrap">
-    <div class="section-head">
+<section class="sec" id="download">
+  <div class="container">
+    <div class="sec-head">
       <h2>Downloads</h2>
       <p>
-        macOS universal zip first. Linux and Windows are planned. Builds are unsigned —
-        on first launch, right-click TIDE.app → Open.
+        Builds are unsigned for now. On first launch, right-click TIDE.app and choose
+        Open.
       </p>
     </div>
 
-    <div class="os-block">
-      <h3>macOS</h3>
-      {recent.length === 0 ? (
-        <p class="empty">No published releases yet. Check GitHub Releases after the first cut.</p>
-      ) : (
-        <div class="version-list">
-          {recent.map((r) => (
-            <div class="version-row">
-              <div>
-                <strong>v{r.version}</strong>
-                {r.publishedAt && (
-                  <div class="note" style="margin:0.2rem 0 0">
-                    {new Date(r.publishedAt).toLocaleDateString('en-US', {
-                      year: 'numeric',
-                      month: 'short',
-                      day: 'numeric',
-                    })}
-                  </div>
-                )}
-              </div>
-              {r.macUniversalUrl ? (
-                <a class="pill active" href={r.macUniversalUrl}>Universal zip</a>
-              ) : (
-                <span class="pill">Unavailable</span>
-              )}
-            </div>
-          ))}
+    <div class="platforms">
+      <div class="tile platform">
+        <div class="platform-head">
+          <span>macOS</span>
+          <span class="pill-ok">Available</span>
         </div>
+        <p class="muted">Universal zip for Apple Silicon and Intel.</p>
+      </div>
+      <div class="tile platform dim">
+        <div class="platform-head">
+          <span>Linux</span>
+          <span class="pill-soon">Planned</span>
+        </div>
+        <p class="muted">No builds yet.</p>
+      </div>
+      <div class="tile platform dim">
+        <div class="platform-head">
+          <span>Windows</span>
+          <span class="pill-soon">Planned</span>
+        </div>
+        <p class="muted">No builds yet.</p>
+      </div>
+    </div>
+
+    <div class="tile releases">
+      {releases.length === 0 ? (
+        <div class="release-row">
+          <span class="muted">No releases published yet.</span>
+          <a class="text-link" href={`${github}/releases`}>GitHub Releases ↗</a>
+        </div>
+      ) : (
+        releases.map((r, i) => (
+          <div class="release-row">
+            <div class="release-ver">
+              <code>v{r.version}</code>
+              {i === 0 && <span class="pill-ok">Latest</span>}
+              <span class="muted">{fmt(r.publishedAt)}</span>
+            </div>
+            {r.macUniversalUrl ? (
+              <a class="text-link" href={r.macUniversalUrl}>macOS universal zip ↓</a>
+            ) : (
+              <span class="muted">Unavailable</span>
+            )}
+          </div>
+        ))
       )}
     </div>
-
-    <div class="os-block">
-      <h3>Linux</h3>
-      <div class="version-row">
-        <strong>Planning</strong>
-        <span class="planning">No builds yet</span>
-      </div>
-    </div>
-
-    <div class="os-block">
-      <h3>Windows</h3>
-      <div class="version-row">
-        <strong>Planning</strong>
-        <span class="planning">No builds yet</span>
-      </div>
-    </div>
-
-    {older.length > 0 && (
-      <div class="os-block">
-        <h3>Older versions</h3>
-        <div class="older">
-          {older.map((r) => (
-            <article class="card">
-              <h4>v{r.version}</h4>
-              <div class="os-boxes">
-                <div class="os-box">
-                  <span>macOS</span>
-                  {r.macUniversalUrl ? (
-                    <a href={r.macUniversalUrl}>Universal zip</a>
-                  ) : (
-                    <span class="planning">—</span>
-                  )}
-                </div>
-                <div class="os-box">
-                  <span>Linux</span>
-                  <span class="planning">Planning</span>
-                </div>
-                <div class="os-box">
-                  <span>Windows</span>
-                  <span class="planning">Planning</span>
-                </div>
-              </div>
-            </article>
-          ))}
-        </div>
-      </div>
-    )}
   </div>
 </section>

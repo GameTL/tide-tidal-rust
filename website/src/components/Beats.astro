@@ -1,48 +1,105 @@
 ---
 const base = import.meta.env.BASE_URL;
 ---
-<section class="section">
-  <div class="wrap">
-    <div class="section-head">
-      <h2>Local-first. Honest about the signal path.</h2>
-      <p>No Electron shell. No telemetry. Just your subscription and a lean native player.</p>
+<section class="sec">
+  <div class="container">
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-num">&lt;100<small>MB</small></span>
+        <span class="stat-label">Resident memory while playing</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">0</span>
+        <span class="stat-label">Analytics, crash reporters, or update pings</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num">100<small>%</small></span>
+        <span class="stat-label">Rust. No Electron, no bundled browser</span>
+      </div>
     </div>
+  </div>
+</section>
 
-    <div class="beats">
-      <div class="beat-card">
-        <h3>Bit-perfect when the output allows</h3>
-        <p>
-          Match the device sample rate to the track so nothing is resampled when the
-          hardware can do it. TIDE does not take exclusive access of the device —
-          other apps can still play sound. Bluetooth and virtual devices stay at their
-          own rate because those links re-clock anyway.
-        </p>
-      </div>
-      <figure class="beat-shot">
-        <img
-          src={`${base}screenshots/bit-perfect.png`}
-          alt="TIDE signal path showing bit-perfect playback without exclusive device access"
-          width="1200"
-          height="900"
-        />
-      </figure>
+<section class="sec">
+  <div class="container split">
+    <div class="split-copy">
+      <h2>Bit-perfect, when the output allows.</h2>
+      <p>
+        TIDE matches the device sample rate to the track, so nothing gets resampled
+        when your hardware can play it natively. It does this without grabbing
+        exclusive access, so other apps can still make sound.
+      </p>
+      <ul class="tiers">
+        <li><span class="dot q-max"></span><strong class="q-max">MAX</strong> Up to 24-bit / 192 kHz FLAC</li>
+        <li><span class="dot q-high"></span><strong class="q-high">HIGH</strong> 16-bit / 44.1 kHz lossless FLAC</li>
+        <li><span class="dot q-low"></span><strong class="q-low">LOW</strong> AAC, for slow connections</li>
+      </ul>
+      <p class="fine">
+        Tap the quality pill in the player bar to see the signal path from source to
+        device, and why playback is or isn’t bit-perfect.
+      </p>
+    </div>
+    <figure class="signal-shot">
+      <img
+        src={`${base}screenshots/bit-perfect.png`}
+        alt="TIDE signal path popup: a 24-bit 48 kHz FLAC source, sample rate conversion to 44.1 kHz, and MacBook Pro speakers, with the bit-perfect playback toggle"
+        width="967"
+        height="1226"
+        loading="lazy"
+      />
+    </figure>
+  </div>
+</section>
 
-      <div class="beat-card">
-        <h3>RAM that stays out of the way</h3>
-        <p>
-          Typically under about 100&nbsp;MB resident while playing, versus
-          multi-hundred-megabyte Electron clients. Refresh-rate-first GPU UI without
-          shipping a browser.
-        </p>
+<section class="sec">
+  <div class="container split split-rev">
+    <div class="tile net">
+      <div class="term-bar">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>outbound connections</span>
       </div>
-      <div class="beat-card">
-        <h3>I don’t want your data</h3>
-        <p>
-          Session tokens and library cache live on your Mac. Play counts stay local.
-          There is no analytics, crash reporter, or update phoning home — TIDE only
-          talks to TIDAL’s own endpoints for music.
-        </p>
+      <div class="net-body">
+        <div class="net-row"><span class="on">●</span><code>api.tidal.com</code><span class="muted">catalog &amp; playback</span></div>
+        <div class="net-row"><span class="on">●</span><code>resources.tidal.com</code><span class="muted">artwork</span></div>
+        <div class="net-row off"><span>○</span><code>analytics</code><span>none</span></div>
+        <div class="net-row off"><span>○</span><code>crash reports</code><span>none</span></div>
+        <div class="net-row off"><span>○</span><code>update checks</code><span>none</span></div>
       </div>
+    </div>
+    <div class="split-copy">
+      <h2>I don’t want your data.</h2>
+      <p>
+        Session tokens and the library cache live on your Mac. Play counts stay local.
+        TIDE only talks to TIDAL’s own endpoints for music, and nothing else.
+      </p>
+      <ul class="checks">
+        <li>No account other than your TIDAL login</li>
+        <li>No telemetry, ever</li>
+        <li>Open source, so you can check</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="container split">
+    <div class="split-copy">
+      <h2>Light enough to forget it’s running.</h2>
+      <p>
+        A GPU-drawn native UI that follows your display’s refresh rate, without
+        shipping a browser to render a play button.
+      </p>
+    </div>
+    <div class="tile ram">
+      <div class="ram-row">
+        <div class="ram-label"><span>TIDE</span><span>under 100 MB</span></div>
+        <div class="ram-track"><span class="ram-bar tide" style="width: 8%"></span></div>
+      </div>
+      <div class="ram-row">
+        <div class="ram-label"><span class="muted">Official desktop client (Electron)</span><span class="muted">500 MB – 1.2 GB</span></div>
+        <div class="ram-track"><span class="ram-bar electron" style="width: 100%"></span></div>
+      </div>
+      <p class="ram-note">Resident memory while playing.</p>
     </div>
   </div>
 </section>
