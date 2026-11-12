@@ -20,6 +20,12 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
     - Left: Album cover art thumbnail, track title, artist name, favorite heart toggle.
     - Center: Transport controls (Shuffle, Previous, Play/Pause, Next, Repeat), interactive timeline scrubber with elapsed and total time.
     - Right: Audio Quality badge (`MAX` / `HI-RES` / `LOSSLESS` / `HIGH`), Volume slider with mute button, Queue drawer toggle, Output device selector.
+  - Quality colours. One colour per quality tier, used wherever a tier is shown or chosen:
+    - **Low: white** (`#ffffff`, `Theme.text`).
+    - **High: blue** (`#33ffee`, `Theme.lossless`).
+    - **Max: gold** (`#ffd432`, `Theme.max`).
+    - Settings → Audio quality: the selected row's radio dot is in its tier's colour, and the row carries a faint wash of the same hue (grey for Low) from its lower-left corner. Unselected radios stay neutral grey.
+    - Player-bar quality pill: text and glow follow the stream that is playing. Gold for hi-res, white for lossy, and for 16-bit lossless the green the official client uses there (`#19d8a7`). The sparkle keeps its own signal-path colour.
   - Login screen: one button starts TIDAL's PKCE login in the default browser, which is the only login that unlocks Hi-Res. TIDE finishes the login by itself: it asks scriptable browsers (Safari, Chromium family) for the redirect address, and in other browsers (Firefox, Zen) picks it up from the clipboard once copied, with a paste box as a last resort. It never reads browser profiles or history. The device-code login stays as a fallback and is limited by TIDAL to 16-bit / 44.1 kHz.
 
 ### B. Fast Local-First Cache (Zero Phone-Home)

@@ -32,7 +32,7 @@ component Row inherits Rectangle {
 
         if root.detail != "": Text {
             text: root.detail;
-            color: #c8c8c8;
+            color: #b2b2b6;
             font-size: 13px;
             wrap: word-wrap;
         }
@@ -46,40 +46,34 @@ component Row inherits Rectangle {
     @children
 }
 
-component Toggle inherits Rectangle {
-    in property <bool> on;
-    callback toggled(bool);
-    width: 46px;
-    height: 28px;
-    border-radius: 14px;
-    background: on ? white : #2a2a2a;
-    TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.toggled(!root.on);
-        }
-    }
-
-    Rectangle {
-        x: on ? 21px : 3px;
-        width: 22px;
-        height: 22px;
-        border-radius: 11px;
-        background: black;
-        animate x {
-            duration: 120ms;
-        }
-    }
-}
-
 component QualityRow inherits Rectangle {
     in property <string> key;
     in property <string> title;
     in property <string> detail;
     in property <bool> divider: true;
+    in property <bool> first: false;
     property <bool> selected: App.quality == key;
+    // Tier colours (Goal.md, "Quality colours"): Low white, High blue, Max gold.
+    property <color> tier-color: key == "max" ? Theme.max : key == "high" ? Theme.lossless : Theme.text;
     height: 82px;
-    background: selected ? @linear-gradient(90deg, #2a230a 0%, #0e0e10 45%) : transparent;
+    // Faint wash in the tier colour, as in the official client: strongest in the
+    // row's lower-left corner, gone by mid-card and by the top of the row. Two
+    // linear fades stand in for an off-centre ellipse, which Slint cannot draw.
+    // It starts at the card's edge (inside the 1px border), so it follows the
+    // card's corners on the first and last row.
+    if selected: Rectangle {
+        x: -17px;
+        y: 0px;
+        width: (parent.width + 36px) * 0.46;
+        height: parent.height - (root.divider ? 0px : 1px);
+        border-top-left-radius: root.first ? 11px : 0px;
+        border-bottom-left-radius: root.divider ? 0px : 11px;
+        background: @linear-gradient(90deg, (key == "max" ? #26221a : key == "high" ? #122422 : #1c1c1e) 0%, #0e0e10 100%);
+        Rectangle {
+            border-top-left-radius: parent.border-top-left-radius;
+            background: @linear-gradient(180deg, #0e0e10 0%, #0e0e1000 100%);
+        }
+    }
     TouchArea {
         mouse-cursor: pointer;
         clicked => {
@@ -97,14 +91,14 @@ component QualityRow inherits Rectangle {
             width: 10px;
             height: 10px;
             border-radius: 5px;
-            background: Theme.max;
+            background: root.tier-color;
         }
     }
 
     VerticalLayout {
         x: 48px;
         alignment: center;
-        spacing: 6px;
+        spacing: 8px;
         Text {
             text: root.title;
             color: Theme.text;
@@ -114,7 +108,7 @@ component QualityRow inherits Rectangle {
 
         Text {
             text: root.detail;
-            color: #c8c8c8;
+            color: #b2b2b6;
             font-size: 13px;
         }
     }
@@ -126,12 +120,21 @@ component QualityRow inherits Rectangle {
     }
 }
 
-component SectionTitle inherits Text {
-    color: Theme.text;
-    font-size: 17px;
-    font-weight: 600;
-    height: 62px;
-    vertical-alignment: bottom;
+// Indented to the card's text column and set a little further above the card,
+// as in the official client.
+component SectionTitle inherits Rectangle {
+    in property <string> text;
+    height: 67px;
+    Text {
+        x: 18px;
+        y: 0px;
+        height: 62px;
+        text: root.text;
+        color: Theme.text;
+        font-size: 17px;
+        font-weight: 600;
+        vertical-alignment: bottom;
+    }
 }
 
 component SmallButton inherits Rectangle {
@@ -299,6 +302,7 @@ export component SettingsView inherits Rectangle {
                 Card {
                     QualityRow {
                         key: "low";
+                        first: true;
                         title: "Low";
                         detail: "AAC 320 kbps. Balance audio quality and data consumption";
                     }
