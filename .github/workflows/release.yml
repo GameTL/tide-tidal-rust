@@ -1,0 +1,250 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump for this manual release'
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+      version:
+        description: 'Force exact version (e.g. 0.3.2 or v0.3.2). Overrides bump.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  resolve-version:
+    name: Resolve release version
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      next: ${{ steps.version.outputs.next }}
+      last: ${{ steps.last_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Determine last tag
+        id: last_tag
+        run: |
+          set -euo pipefail
+          last=$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            last="v0.0.0"
+          fi
+          echo "tag=$last" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve bump
+        id: bump
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_BUMP: ${{ github.event.inputs.bump }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            bump="${INPUT_BUMP:-patch}"
+          else
+            labels=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" --jq '[.[].name]' || echo '[]')
+            bump="patch"
+            if echo "$labels" | jq -e 'index("release:major")' >/dev/null; then
+              bump="major"
+            elif echo "$labels" | jq -e 'index("release:minor")' >/dev/null; then
+              bump="minor"
+            elif echo "$labels" | jq -e 'index("release:patch")' >/dev/null; then
+              bump="patch"
+            fi
+          fi
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          LAST: ${{ steps.last_tag.outputs.tag }}
+          BUMP: ${{ steps.bump.outputs.bump }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          forced="${INPUT_VERSION:-}"
+          if [ -z "$forced" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+            if echo "${PR_TITLE:-}" | grep -qE '^Release v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              forced=$(echo "$PR_TITLE" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            fi
+          fi
+          if [ -n "$forced" ]; then
+            v="${forced#v}"
+            next="v${v}"
+            echo "next=$next" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          v="${LAST#v}"
+          IFS='.' read -r major minor patch <<< "$v"
+          case "$BUMP" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+          esac
+          echo "next=v${major}.${minor}.${patch}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build universal zip
+    needs: resolve-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bump workspace version in tree
+        env:
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+        run: |
+          set -euo pipefail
+          v="${NEXT#v}"
+          # Keep Cargo.toml workspace.package.version in sync for Info.plist.
+          perl -i -pe "s/^version = \"\\d+\\.\\d+\\.\\d+\"/version = \"$v\"/" Cargo.toml
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null || cargo generate-lockfile
+
+      - name: Package universal zip
+        id: pack
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-macos-zip.sh
+          zip_path=$(sh scripts/package-macos-zip.sh release --universal)
+          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
+          cp "$zip_path" "$GITHUB_WORKSPACE/TIDE-release.zip"
+          echo "asset=$GITHUB_WORKSPACE/TIDE-release.zip" >> "$GITHUB_OUTPUT"
+          basename "$zip_path" > "$GITHUB_WORKSPACE/zip-basename.txt"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: |
+            TIDE-release.zip
+            zip-basename.txt
+          if-no-files-found: error
+
+  tag-and-release:
+    name: Tag and publish
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    outputs:
+      next: ${{ needs.resolve-version.outputs.next }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Download zip
+        uses: actions/download-artifact@v4
+        with:
+          name: release-macos-universal
+          path: dist
+
+      - name: Create tag
+        env:
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$NEXT" >/dev/null 2>&1; then
+            echo "Tag $NEXT already exists"
+          else
+            git tag -a "$NEXT" -m "Release $NEXT"
+            git push origin "$NEXT"
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+          LAST: ${{ needs.resolve-version.outputs.last }}
+        run: |
+          set -euo pipefail
+          name=$(cat dist/zip-basename.txt)
+          mv dist/TIDE-release.zip "dist/$name"
+          if git rev-parse "$LAST" >/dev/null 2>&1 && [ "$LAST" != "v0.0.0" ]; then
+            notes=$(git log "$LAST".."$NEXT" --pretty='- %s (%h)' --no-merges || true)
+          else
+            notes=$(git log "$NEXT" --pretty='- %s (%h)' --no-merges || true)
+          fi
+          if gh release view "$NEXT" >/dev/null 2>&1; then
+            gh release upload "$NEXT" "dist/$name" --clobber
+          else
+            gh release create "$NEXT" \
+              --title "$NEXT" \
+              --target main \
+              --notes "$notes" \
+              "dist/$name"
+          fi
+
+  deploy-site:
+    name: Update website + Pages
+    needs: [resolve-version, tag-and-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Write releases.json from GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          chmod +x scripts/write-releases-json.sh
+          sh scripts/write-releases-json.sh website/src/data/releases.json
+
+      - name: Build Astro site
+        working-directory: website
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

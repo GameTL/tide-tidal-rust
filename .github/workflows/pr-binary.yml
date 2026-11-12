@@ -1,0 +1,44 @@
+name: PR binary
+
+on:
+  pull_request:
+    branches: [staging, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-binary-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Dev zip (1)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package universal zip
+        id: pack
+        env:
+          TIDE_DEV_BUNDLE: '1'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-macos-zip.sh
+          zip_path=$(sh scripts/package-macos-zip.sh release --universal)
+          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload PR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tide-pr-${{ github.event.pull_request.number }}
+          path: ${{ steps.pack.outputs.zip }}
+          retention-days: 7
+          if-no-files-found: error

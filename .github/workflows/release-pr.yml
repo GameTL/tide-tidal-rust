@@ -1,0 +1,175 @@
+name: Release PR (staging -> main)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Force a specific bump (auto detects from PR labels if blank)'
+        required: false
+        type: choice
+        default: ''
+        options: ['', 'major', 'minor', 'patch']
+      version:
+        description: 'Force exact version (e.g. 1.8.0 or v1.8.0). Overrides bump.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    name: Open / refresh release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: staging
+
+      - name: Determine last release tag
+        id: last_tag
+        run: |
+          set -euo pipefail
+          last=$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            last="v0.0.0"
+          fi
+          echo "tag=$last" >> "$GITHUB_OUTPUT"
+          echo "Last release tag: $last"
+
+      - name: Detect bump from merged PR labels
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCED: ${{ inputs.bump }}
+          LAST_TAG: ${{ steps.last_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$FORCED" ]; then
+            echo "bump=$FORCED" >> "$GITHUB_OUTPUT"
+            echo "Forced bump: $FORCED"
+            exit 0
+          fi
+
+          since=$(git log -1 --format=%cI "$LAST_TAG" 2>/dev/null || echo "1970-01-01T00:00:00Z")
+          labels=$(gh pr list \
+            --base staging \
+            --state merged \
+            --search "merged:>$since" \
+            --json labels \
+            --jq '[.[].labels[].name] | unique | .[]' || true)
+
+          bump="patch"
+          if echo "$labels" | grep -qx 'release:major'; then
+            bump="major"
+          elif echo "$labels" | grep -qx 'release:minor'; then
+            bump="minor"
+          fi
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "Resolved bump: $bump"
+
+      - name: Compute next version
+        id: version
+        env:
+          LAST: ${{ steps.last_tag.outputs.tag }}
+          BUMP: ${{ steps.bump.outputs.bump }}
+          FORCED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$FORCED_VERSION" ]; then
+            v="${FORCED_VERSION#v}"
+            if ! echo "$v" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "Invalid version: $FORCED_VERSION" >&2
+              exit 1
+            fi
+            next="v${v}"
+            echo "next=$next" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          v="${LAST#v}"
+          IFS='.' read -r major minor patch <<< "$v"
+          case "$BUMP" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+          esac
+          next="v${major}.${minor}.${patch}"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog since last tag
+        id: changelog
+        env:
+          LAST: ${{ steps.last_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'body<<EOF'
+            if git rev-parse "$LAST" >/dev/null 2>&1; then
+              git log "$LAST"..origin/staging --pretty='- %s (%h)' --no-merges
+            else
+              git log origin/staging --pretty='- %s (%h)' --no-merges
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.version.outputs.next }}
+          BUMP: ${{ steps.bump.outputs.bump }}
+          CHANGES: ${{ steps.changelog.outputs.body }}
+        run: |
+          set -euo pipefail
+
+          title="Release ${NEXT}"
+          body=$(cat <<EOF
+          Automated release PR from \`staging\` -> \`main\`.
+
+          **Bump:** \`${BUMP}\`
+          **Next version:** \`${NEXT}\`
+
+          ## Changes
+          ${CHANGES}
+
+          ---
+          Merging this PR will tag the release, publish the macOS universal zip, and update the website.
+          EOF
+          )
+
+          existing=$(gh pr list \
+            --head staging \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          bump_label="release:${BUMP}"
+
+          if [ -n "$existing" ]; then
+            for l in release:major release:minor release:patch; do
+              if [ "$l" != "$bump_label" ]; then
+                gh pr edit "$existing" --remove-label "$l" || true
+              fi
+            done
+            gh pr edit "$existing" --title "$title" --body "$body" \
+              --add-label "release" --add-label "$bump_label" || \
+              gh pr edit "$existing" --title "$title" --body "$body"
+            echo "Updated existing release PR #$existing"
+          else
+            gh pr create \
+              --base main \
+              --head staging \
+              --title "$title" \
+              --body "$body" \
+              --label "release" \
+              --label "$bump_label" || \
+            gh pr create \
+              --base main \
+              --head staging \
+              --title "$title" \
+              --body "$body"
+          fi

@@ -1,0 +1,60 @@
+name: Staging binary
+
+on:
+  push:
+    branches: [staging]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: staging-binary
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Universal macOS zip
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package universal zip
+        id: pack
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-macos-zip.sh
+          zip_path=$(sh scripts/package-macos-zip.sh release --universal)
+          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
+          echo "Built $zip_path"
+
+      - name: Upload staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tide-staging-${{ github.sha }}
+          path: ${{ steps.pack.outputs.zip }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Prune old staging artifacts (keep 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # List artifact ids for this workflow named tide-staging-*, newest first.
+          ids=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("tide-staging-")) | select(.expired == false) | {id, created_at}] | sort_by(.created_at) | reverse | .[3:][].id' \
+            || true)
+          for id in $ids; do
+            echo "Deleting staging artifact $id"
+            gh api -X DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" || true
+          done
