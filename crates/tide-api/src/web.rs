@@ -23,8 +23,20 @@ pub struct Card {
     pub kind: String,
     pub title: String,
     pub subtitle: String,
+    /// Album badge label: MAX | HIGH | LOW | LOSSLESS.
+    #[serde(default)]
+    pub quality: String,
     /// Square artwork, ~320px.
     pub image_url: Option<String>,
+    /// ISO date the user added it to their collection (sorting).
+    #[serde(default)]
+    pub added: String,
+    /// ISO release date — albums only.
+    #[serde(default)]
+    pub released: String,
+    /// Who it is by: album artists, or a playlist's creator ("Me" for the user's own).
+    #[serde(default)]
+    pub by: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -45,6 +57,18 @@ pub struct CatalogDetail {
     pub track_count: u64,
     pub duration: u64,
     pub biography: String,
+    /// Full ISO release date — albums only.
+    #[serde(default)]
+    pub release_date: String,
+    #[serde(default)]
+    pub copyright: String,
+}
+
+/// One line of album credits: a role and everyone credited with it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Credit {
+    pub role: String,
+    pub names: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -221,6 +245,26 @@ fn mix_image(d: &Value) -> Option<String> {
     ["MEDIUM", "SMALL", "LARGE"].iter().find_map(|k| images.get(*k)).map(|i| s(i, "url")).filter(|u| !u.is_empty())
 }
 
+fn album_quality_badge(d: &Value) -> String {
+    let audio = s(d, "audioQuality");
+    let raw = if d
+        .pointer("/mediaMetadata/tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("HIRES_LOSSLESS")))
+    {
+        "HI_RES_LOSSLESS"
+    } else {
+        audio.as_str()
+    };
+    match raw.to_uppercase().as_str() {
+        "HI_RES_LOSSLESS" | "HIRES_LOSSLESS" => "MAX".into(),
+        "LOSSLESS" => "LOSSLESS".into(),
+        "HIGH" => "HIGH".into(),
+        "LOW" => "LOW".into(),
+        _ => String::new(),
+    }
+}
+
 fn parse_card(kind: &str, d: &Value, me: u64) -> Option<Card> {
     let card = match kind {
         "ALBUM" => {
@@ -230,24 +274,28 @@ fn parse_card(kind: &str, d: &Value, me: u64) -> Option<Card> {
                 kind: "album".into(),
                 title: s(d, "title"),
                 subtitle: artist_names(d),
+                quality: album_quality_badge(d),
                 image_url: (!cover.is_empty()).then(|| image_url(&cover, 320)),
+                released: s(d, "releaseDate"),
+                by: artist_names(d),
+                ..Default::default()
             }
         }
         "PLAYLIST" => {
             let img = Some(s(d, "squareImage")).filter(|x| !x.is_empty());
             let creator = d.get("creator").cloned().unwrap_or(Value::Null);
-            let by = if creator.get("id").and_then(Value::as_u64) == Some(me) {
-                "Created by me".to_string()
-            } else {
-                let name = s(&creator, "name");
-                if name.is_empty() { "Created by TIDAL".into() } else { format!("Created by {name}") }
-            };
+            let mine = creator.get("id").and_then(Value::as_u64) == Some(me);
+            let name = s(&creator, "name");
+            let owner = if mine { "Me".to_string() } else if name.is_empty() { "TIDAL".into() } else { name };
+            let by = if mine { "Created by me".to_string() } else { format!("Created by {owner}") };
             Card {
                 id: s(d, "uuid"),
                 kind: "playlist".into(),
                 title: s(d, "title"),
                 subtitle: by,
                 image_url: img.map(|u| image_url(&u, 320)),
+                by: owner,
+                ..Default::default()
             }
         }
         "MIX" => Card {
@@ -256,15 +304,19 @@ fn parse_card(kind: &str, d: &Value, me: u64) -> Option<Card> {
             title: text_info(d, &["titleTextInfo", "title"]),
             subtitle: text_info(d, &["subtitleTextInfo", "subTitleTextInfo", "subTitle", "shortSubtitleTextInfo"]),
             image_url: mix_image(d),
+            added: s(d, "dateAdded"),
+            ..Default::default()
         },
         "ARTIST" => {
-            let pic = s(d, "picture");
+            // Artists without a portrait fall back to one of their album covers.
+            let pic = Some(s(d, "picture")).filter(|p| !p.is_empty()).unwrap_or_else(|| s(d, "selectedAlbumCoverFallback"));
             Card {
                 id: s(d, "id"),
                 kind: "artist".into(),
                 title: s(d, "name"),
                 subtitle: "Artist".into(),
                 image_url: (!pic.is_empty()).then(|| image_url(&pic, 320)),
+                ..Default::default()
             }
         }
         "DEEP_LINK" if s(d, "url").ends_with("my-collection/tracks") => {
@@ -393,11 +445,7 @@ impl ApiHandle {
 
     /// Whether the user follows (has favourited) this artist.
     pub async fn is_artist_followed(&self, artist_id: &str) -> Result<bool, ApiError> {
-        let url = format!("{V1}/users/{}/favorites/ids", self.user_id);
-        let v = self.get(&url, &[]).await?;
-        Ok(v.get("ARTIST").and_then(Value::as_array).is_some_and(|ids| {
-            ids.iter().any(|id| id.as_str().map(str::to_string).or_else(|| id.as_u64().map(|n| n.to_string())).as_deref() == Some(artist_id))
-        }))
+        self.is_favorite("ARTIST", artist_id).await
     }
 
     pub async fn set_artist_followed(&self, artist_id: &str, follow: bool) -> Result<(), ApiError> {
@@ -471,9 +519,12 @@ impl ApiHandle {
                         title: s(it, "name"),
                         subtitle: format!("{n} playlist{}", if n == 1 { "" } else { "s" }),
                         image_url: None,
+                        added: s(it, "addedAt"),
+                        ..Default::default()
                     });
                 } else if let Some(mut card) = parse_card("PLAYLIST", d, self.user_id) {
                     let mine = d.pointer("/creator/id").and_then(Value::as_u64) == Some(self.user_id);
+                    card.added = s(it, "addedAt");
                     card.subtitle = if mine {
                         let n = d.get("numberOfTracks").and_then(Value::as_u64).unwrap_or(0)
                             + d.get("numberOfVideos").and_then(Value::as_u64).unwrap_or(0);
@@ -503,15 +554,147 @@ impl ApiHandle {
             .unwrap_or_default())
     }
 
+    /// One collection list from `/users/{me}/favorites/{what}`, newest first, every page.
+    async fn favorite_cards(&self, what: &str, kind: &str) -> Result<Vec<Card>, ApiError> {
+        let url = format!("{V1}/users/{}/favorites/{what}", self.user_id);
+        let mut out = Vec::new();
+        loop {
+            let offset = out.len().to_string();
+            let v = self
+                .get(&url, &[("limit", "100"), ("offset", &offset), ("order", "DATE"), ("orderDirection", "DESC")])
+                .await?;
+            let items = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            for entry in &items {
+                if let Some(mut card) = entry.get("item").and_then(|item| parse_card(kind, item, self.user_id)) {
+                    card.added = s(entry, "created");
+                    out.push(card);
+                }
+            }
+            let total = v.get("totalNumberOfItems").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if items.is_empty() || out.len() >= total || out.len() >= 2000 {
+                return Ok(out);
+            }
+        }
+    }
+
     pub async fn albums(&self) -> Result<Vec<Card>, ApiError> {
-        let url = format!("{V1}/users/{}/favorites/albums", self.user_id);
-        let v = self.get(&url, &[("limit", "100"), ("order", "DATE"), ("orderDirection", "DESC")]).await?;
-        Ok(v.get("items")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items.iter().filter_map(|e| parse_card("ALBUM", e.get("item")?, self.user_id)).collect()
+        self.favorite_cards("albums", "ALBUM").await
+    }
+
+    /// Artists the user follows (the Profiles page).
+    pub async fn followed_artists(&self) -> Result<Vec<Card>, ApiError> {
+        let mut cards = self.favorite_cards("artists", "ARTIST").await?;
+        for card in &mut cards {
+            card.subtitle.clear();
+        }
+        Ok(cards)
+    }
+
+    pub async fn similar_artists(&self, id: &str) -> Result<Vec<Card>, ApiError> {
+        let data = self.get(&format!("{V1}/artists/{id}/similar"), &[("limit", "20")]).await?;
+        Ok(data["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let mut card = parse_card("ARTIST", item, self.user_id)?;
+                card.subtitle.clear();
+                Some(card)
             })
-            .unwrap_or_default())
+            .collect())
+    }
+
+    pub async fn album_credits(&self, id: &str) -> Result<Vec<Credit>, ApiError> {
+        let data = self.get(&format!("{V1}/albums/{id}/credits"), &[]).await?;
+        Ok(data
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| Credit {
+                role: s(entry, "type"),
+                names: entry["contributors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| s(c, "name"))
+                    .filter(|n| !n.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .filter(|credit| !credit.role.is_empty() && !credit.names.is_empty())
+            .collect())
+    }
+
+    /// Whether `id` is in the user's collection. `kind` is "ALBUM" or "ARTIST".
+    pub async fn is_favorite(&self, kind: &str, id: &str) -> Result<bool, ApiError> {
+        let url = format!("{V1}/users/{}/favorites/ids", self.user_id);
+        let v = self.get(&url, &[]).await?;
+        Ok(v.get(kind).and_then(Value::as_array).is_some_and(|ids| {
+            ids.iter().any(|x| x.as_str().map(str::to_string).or_else(|| x.as_u64().map(|n| n.to_string())).as_deref() == Some(id))
+        }))
+    }
+
+    pub async fn set_album_favorite(&self, album_id: &str, favorite: bool) -> Result<(), ApiError> {
+        let q = [("countryCode", self.country.as_str())];
+        if favorite {
+            let url = format!("{V1}/users/{}/favorites/albums", self.user_id);
+            let form = [("albumIds", album_id), ("onArtifactNotFound", "FAIL")];
+            self.send(http().post(&url).query(&q).form(&form), &url).await?;
+        } else {
+            let url = format!("{V1}/users/{}/favorites/albums/{album_id}", self.user_id);
+            self.send(http().delete(&url).query(&q), &url).await?;
+        }
+        Ok(())
+    }
+
+    /// Add or remove someone else's playlist from the user's collection.
+    pub async fn set_playlist_favorite(&self, playlist_id: &str, favorite: bool) -> Result<(), ApiError> {
+        let q = [("countryCode", self.country.as_str())];
+        if favorite {
+            let url = format!("{V1}/users/{}/favorites/playlists", self.user_id);
+            let form = [("uuids", playlist_id), ("onArtifactNotFound", "FAIL")];
+            self.send(http().post(&url).query(&q).form(&form), &url).await?;
+        } else {
+            let url = format!("{V1}/users/{}/favorites/playlists/{playlist_id}", self.user_id);
+            self.send(http().delete(&url).query(&q), &url).await?;
+        }
+        Ok(())
+    }
+
+    /// Append tracks to one of the user's playlists. Tracks already in it are skipped.
+    pub async fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ApiError> {
+        let q = [("countryCode", self.country.as_str())];
+        let url = format!("{V1}/playlists/{playlist_id}");
+        // Edits must carry the playlist's current ETag.
+        let head = http()
+            .get(&url)
+            .query(&q)
+            .bearer_auth(&self.token)
+            .header("x-tidal-client-version", CLIENT_VERSION)
+            .send()
+            .await?;
+        if !head.status().is_success() {
+            return Err(ApiError::Client(format!("HTTP {} for {url}", head.status())));
+        }
+        let etag = head.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or("*").to_string();
+        let items = format!("{url}/items");
+        let ids = track_ids.join(",");
+        let form = [("trackIds", ids.as_str()), ("onArtifactNotFound", "SKIP"), ("onDupes", "SKIP")];
+        self.send(http().post(&items).query(&q).header("If-None-Match", etag).form(&form), &items).await?;
+        Ok(())
+    }
+
+    /// Create an empty playlist or a folder inside `folder_id` ("root" for the top level).
+    pub async fn create_in_collection(&self, name: &str, folder_id: &str, folder: bool) -> Result<(), ApiError> {
+        let url = format!("{V2}/my-collection/playlists/folders/{}", if folder { "create-folder" } else { "create-playlist" });
+        let mut q = vec![("name", name), ("folderId", folder_id), ("countryCode", self.country.as_str())];
+        if folder {
+            q.push(("trns", ""));
+        } else {
+            q.extend([("description", ""), ("isPublic", "false")]);
+        }
+        self.send(http().put(&url).query(&q), &url).await?;
+        Ok(())
     }
 
     pub async fn catalog_detail(&self, kind: &str, id: &str) -> Result<CatalogDetail, ApiError> {
@@ -526,13 +709,7 @@ impl ApiHandle {
             .ok_or_else(|| ApiError::Client(format!("missing {kind} {id}")))?;
         let artist = data.get("artist").or_else(|| data.pointer("/artists/0"))
             .and_then(|artist| parse_card("ARTIST", artist, self.user_id));
-        let quality = if data.pointer("/mediaMetadata/tags").and_then(Value::as_array)
-            .is_some_and(|tags| tags.iter().any(|tag| tag == "HIRES_LOSSLESS"))
-        {
-            "HI_RES_LOSSLESS".into()
-        } else {
-            s(&data, "audioQuality")
-        };
+        let quality = album_quality_badge(&data);
         let biography = if kind == "artist" {
             self.get(&format!("{url}/bio"), &[]).await.ok().map(|bio| s(&bio, "text")).unwrap_or_default()
         } else {
@@ -546,6 +723,8 @@ impl ApiHandle {
             track_count: data["numberOfTracks"].as_u64().unwrap_or_default(),
             duration: data["duration"].as_u64().unwrap_or_default(),
             biography,
+            release_date: s(&data, "releaseDate"),
+            copyright: s(&data, "copyright"),
         })
     }
 
@@ -556,7 +735,14 @@ impl ApiHandle {
             params.push(("filter", "EPSANDSINGLES"));
         }
         let data = self.get(&url, &params).await?;
+        // TIDAL lists every edition of a release (clean, Dolby Atmos, re-uploads)
+        // under the same title. Keep the first stereo one of each.
+        let mut seen = std::collections::HashSet::new();
         Ok(data["items"].as_array().into_iter().flatten().filter_map(|item| {
+            let stereo = item["audioModes"].as_array().is_none_or(|modes| modes.iter().any(|m| m == "STEREO"));
+            if !stereo || !seen.insert(s(item, "title").to_lowercase()) {
+                return None;
+            }
             let mut card = parse_card("ALBUM", item, self.user_id)?;
             let date = s(item, "releaseDate");
             let year = date.split('-').next().filter(|year| !year.is_empty());
@@ -689,6 +875,16 @@ mod tests {
         assert_eq!(b64_decode("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
         let lines = parse_lrc("[00:10.23] first\n[01:02.50] second\njunk");
         assert_eq!(lines, vec![(10_230, "first".to_string()), (62_500, "second".to_string())]);
+    }
+
+    #[test]
+    fn album_quality_badge_from_tags_and_field() {
+        let hires: Value = serde_json::json!({"audioQuality": "LOSSLESS", "mediaMetadata": {"tags": ["HIRES_LOSSLESS"]}});
+        assert_eq!(super::album_quality_badge(&hires), "MAX");
+        let high: Value = serde_json::json!({"audioQuality": "HIGH"});
+        assert_eq!(super::album_quality_badge(&high), "HIGH");
+        let low: Value = serde_json::json!({"audioQuality": "LOW"});
+        assert_eq!(super::album_quality_badge(&low), "LOW");
     }
 
     #[test]

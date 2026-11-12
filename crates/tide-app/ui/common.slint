@@ -21,8 +21,12 @@ export struct CardData {
     kind: string, // playlist | album | mix | artist | folder | tracks
     title: string,
     subtitle: string,
+    /// MAX | HIGH | LOW | LOSSLESS — albums only.
+    quality: string,
     image: image,
     image-url: string,
+    /// Album artists, or a playlist's creator ("Me" for the user's own).
+    by: string,
 }
 
 export struct SectionData {
@@ -142,6 +146,39 @@ export global App {
     in property <[TrackData]> tracks;
     in property <bool> tracks-show-date: true;
     in property <[CardData]> grid-cards;
+    // Card grid pages (Mixes, Playlists, Albums, Profiles, folders). The cards
+    // arrive filtered, sorted and split into groups; one untitled group when
+    // grouping is off.
+    in property <[SectionData]> grid-groups;
+    in property <string> grid-kind: ""; // mixes | playlists | albums | profiles
+    in property <string> grid-filter-hint: "Filter";
+    in property <[string]> grid-sort-options;
+    in property <string> grid-sort;
+    in property <[string]> grid-group-options;
+    in property <string> grid-group;
+    in property <bool> grid-can-create: false;
+    callback set-grid-sort(string);
+    callback set-grid-group(string);
+    // New playlist / folder dialog: "" (closed) | playlist | folder.
+    in-out property <string> create-kind: "";
+    callback create-in-collection(string, string); // kind, name
+    // The user's own playlists, for "Add to playlist".
+    in property <[CardData]> own-playlists;
+
+    // Album and artist pages
+    in property <bool> page-favorite: false; // in the collection / artist followed
+    // The album, playlist or mix the page shows, for its buttons and menu.
+    in property <CardData> page-card;
+    in property <bool> page-can-favorite: false;
+    in property <string> page-release-line;
+    in property <string> page-copyright;
+    in property <[CardData]> related-artists;
+    in property <[CreditLine]> page-credits;
+    in property <string> page-credits-status;
+    callback toggle-page-favorite();
+    // copy-link | credits
+    callback page-action(string, string);
+    callback related-art(int, int);
     in property <[CardData]> artist-albums;
     in property <[CardData]> artist-singles;
     in property <[CardData]> search-cards;
@@ -223,20 +260,32 @@ export global App {
     in property <[LyricLine]> lyrics;
     in property <string> lyrics-status: "";
 
-    in-out property <bool> track-menu-open;
-    in-out property <bool> track-menu-share-open;
-    public function escape-track-menu() {
-        if (track-menu-share-open) {
-            track-menu-share-open = false;
+    // The context menu (see context-menu.slint). One per window.
+    in-out property <bool> menu-open;
+    // Its open flyout: "" | playlists | share.
+    in-out property <string> menu-sub;
+    public function escape-menu() {
+        if (menu-sub != "") {
+            menu-sub = "";
         } else {
-            track-menu-open = false;
+            menu-open = false;
         }
     }
 
-    in property <TrackData> track-menu-track;
-    in property <length> track-menu-x;
-    in property <length> track-menu-y;
+    // What the menu was opened on: track | album | playlist | mix | artist.
+    in property <string> menu-kind: "track";
+    in property <TrackData> menu-track;
+    in property <CardData> menu-card;
+    // For cards: whether it is in the collection, and whether that can change.
+    in property <bool> menu-favorite: false;
+    in property <bool> menu-can-favorite: false;
+    in property <length> menu-x;
+    in property <length> menu-y;
     callback request-track-menu(string, length, length);
+    callback request-card-menu(CardData, length, length);
+    // Card entries, and "add-to-playlist" (argument: playlist id) for any kind:
+    // play | play-next | favorite | artist | open | copy-link | add-to-playlist.
+    callback menu-action(string, string);
     callback play-track-next(string);
     callback copy-track-link(string);
 
@@ -281,7 +330,6 @@ export global App {
     // Settings
     in-out property <int> settings-tab: 0;
     in property <string> quality: "max"; // max | high | low
-    in property <bool> low-memory: false;
     in property <string> cache-info: "";
     in property <bool> max-login: false;
     in property <string> pkce-status: "";
@@ -299,7 +347,6 @@ export global App {
     // Bumped to move keyboard focus into the search field.
     in property <int> focus-search: 0;
     callback set-quality(string);
-    callback set-low-memory(bool);
     callback set-show-collection(bool);
     callback set-show-audio-metadata(bool);
     callback clear-cache();
@@ -330,11 +377,96 @@ export component Icon inherits Image {
     image-fit: contain;
 }
 
+// Dropdown menu surface and rows, used inside PopupWindows.
+export component MenuPanel inherits Rectangle {
+    background: #2d2d2d;
+    border-radius: 14px;
+    VerticalLayout {
+        padding: 8px;
+        @children
+    }
+}
+
+export component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> checked: false;
+    in property <bool> chevron: false;
+    callback activated();
+    height: 44px;
+    border-radius: 8px;
+    background: ta.has-hover ? #3d3d3d : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    if has-icon: Icon {
+        x: 14px;
+        source: root.icon;
+        size: 18px;
+        tint: Theme.text;
+    }
+    Text {
+        x: root.has-icon ? 46px : 14px;
+        width: root.width - self.x - 42px;
+        text: root.label;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: Theme.demibold;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if checked: Icon {
+        x: root.width - 34px;
+        source: @image-url("icons/check.svg");
+        size: 18px;
+        tint: Theme.lossless;
+    }
+    if chevron: Icon {
+        x: root.width - 30px;
+        source: @image-url("icons/chevron-right.svg");
+        size: 16px;
+        tint: Theme.text-secondary;
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    callback toggled(bool);
+    width: 46px;
+    height: 28px;
+    border-radius: 14px;
+    background: on ? white : #2a2a2a;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled(!root.on);
+        }
+    }
+
+    Rectangle {
+        x: on ? 21px : 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: black;
+        animate x {
+            duration: 120ms;
+        }
+    }
+}
+
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <length> size: 20px;
     in property <color> tint: Theme.text-secondary;
     in property <color> hover-tint: Theme.text;
+    in property <color> disabled-tint: Theme.text-dim;
     in property <bool> enabled: true;
     callback clicked();
     callback context-requested(length, length);
@@ -358,7 +490,48 @@ export component IconButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: root.icon;
         size: root.size;
-        tint: !root.enabled ? Theme.text-dim : ta.has-hover ? root.hover-tint : root.tint;
+        tint: !root.enabled ? root.disabled-tint : ta.has-hover ? root.hover-tint : root.tint;
+    }
+}
+
+// "+" that offers a new playlist or folder; the name is asked in CreateDialog.
+export component CreateButton inherits Rectangle {
+    in property <length> size: 16px;
+    in property <color> tint: Theme.text-secondary;
+    width: size + 16px;
+    height: size + 16px;
+    IconButton {
+        icon: @image-url("icons/plus-circle.svg");
+        size: root.size;
+        tint: root.tint;
+        clicked => {
+            create-pop.show();
+        }
+    }
+
+    create-pop := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: 220px;
+        MenuPanel {
+            MenuRow {
+                label: "Playlist";
+                icon: @image-url("icons/playlist.svg");
+                has-icon: true;
+                activated => {
+                    App.create-kind = "playlist";
+                }
+            }
+
+            MenuRow {
+                label: "Folder";
+                icon: @image-url("icons/folder.svg");
+                has-icon: true;
+                activated => {
+                    App.create-kind = "folder";
+                }
+            }
+        }
     }
 }
 
@@ -503,6 +676,12 @@ export component CardArt inherits Rectangle {
         source: card.image;
         radius: root.radius;
         round: card.kind == "artist";
+        // Shown until the portrait arrives, and for artists that have none.
+        if card.kind == "artist" && card.image.width == 0: Icon {
+            source: @image-url("icons/user.svg");
+            size: root.width * 0.34;
+            tint: #5a5a5a;
+        }
     }
 }
 
@@ -516,6 +695,63 @@ export component ExplicitBadge inherits Rectangle {
         color: black;
         font-size: 10px;
         font-weight: 800;
+    }
+}
+
+// Album quality chip after the title (rounded rect, not a capsule).
+export component QualityBadge inherits Rectangle {
+    in property <string> tier: "";
+    width: tier == "" ? 0px : label.preferred-width + 10px;
+    height: tier == "" ? 0px : 16px;
+    border-radius: 3px;
+    background: tier == "MAX" ? #ffd43233
+        : tier == "HIGH" ? #2a2f2a
+        : tier == "LOSSLESS" ? #33ffee22
+        : tier == "LOW" ? #3a3a3a
+        : transparent;
+    visible: tier != "";
+    label := Text {
+        text: tier;
+        color: tier == "MAX" ? Theme.max
+            : tier == "HIGH" ? Theme.lossless
+            : tier == "LOSSLESS" ? Theme.lossless
+            : tier == "LOW" ? #c8c8c8
+            : Theme.text-secondary;
+        font-size: 10px;
+        font-weight: Theme.bold;
+        letter-spacing: 0.3px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Title + optional quality chip. Must be a Rectangle so absolute x/y in free
+// layouts (MediaCard) stick — a bare HorizontalLayout flows to the end.
+export component TitleWithQuality inherits Rectangle {
+    in property <string> title;
+    in property <string> quality;
+    in property <length> font-size: 15px;
+    in property <int> font-weight: Theme.medium;
+    in property <color> title-color: Theme.text;
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: root.title;
+            color: root.title-color;
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        if root.quality != "": VerticalLayout {
+            alignment: center;
+            QualityBadge {
+                tier: root.quality;
+            }
+        }
     }
 }
 

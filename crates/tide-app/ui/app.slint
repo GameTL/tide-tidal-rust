@@ -1,12 +1,12 @@
 import { Palette } from "std-widgets.slint";
-import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage } from "common.slint";
-import { Sidebar, TopBar, PlayerBar } from "chrome.slint";
+import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine } from "common.slint";
+import { Sidebar, TopBar, PlayerBar, DebugPanel, ErrorAlert, CreateDialog } from "chrome.slint";
 import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView } from "views.slint";
 import { SettingsView } from "settings.slint";
-import { TrackMenu } from "track-menu.slint";
+import { ContextMenu } from "context-menu.slint";
 import { Typography } from "@typography";
 
-export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage }
+export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine }
 
 export component MainWindow inherits Window {
     title: "TIDE";
@@ -128,7 +128,8 @@ export component MainWindow inherits Window {
                 title: "Music";
                 shortcut: @keys(Escape);
                 activated => {
-                    if (App.track-menu-open) { App.escape-track-menu(); }
+                    if (App.create-kind != "") { App.create-kind = ""; }
+                    else if (App.menu-open) { App.escape-menu(); }
                     else { App.navigate("home"); }
                 }
             }
@@ -162,7 +163,19 @@ export component MainWindow inherits Window {
     }
 
     if !App.logged-in: LoginView { }
-    if App.logged-in: VerticalLayout {
+    if App.logged-in: logged-in-root := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        KeyBinding {
+            enabled: !App.menu-open && App.create-kind == "";
+            keys: @keys(" ");
+            activated => {
+                App.toggle-play();
+            }
+        }
+
+        VerticalLayout {
         HorizontalLayout {
             Sidebar { }
 
@@ -249,19 +262,41 @@ export component MainWindow inherits Window {
                     // Left out of page snapshots: it never moves with a pane.
                     visible: !App.capturing;
                 }
+
+                if App.debug-open && !App.capturing: DebugPanel {
+                    x: parent.width - 13px - self.width;
+                    y: 58px;
+                    limit: parent.height - 58px - 12px;
+                }
             }
         }
 
         PlayerBar { }
-    }
-    if App.logged-in && App.show-now-playing && !App.capturing: NowPlayingView {
-        PlayerBar {
-            y: parent.height - self.height;
-            overlay: true;
+        }
+
+        if App.show-now-playing && !App.capturing: NowPlayingView {
+            width: parent.width;
+            height: parent.height;
+            PlayerBar {
+                y: parent.height - self.height;
+                overlay: true;
+            }
+        }
+        if App.menu-open && !App.capturing: ContextMenu {
+            width: parent.width;
+            height: parent.height;
         }
     }
-    if App.logged-in && App.track-menu-open && !App.capturing: TrackMenu {
+
+    if App.create-kind != "" && !App.capturing: CreateDialog {
         width: parent.width;
         height: parent.height;
+    }
+
+    // One error alert at a time, above the player bar.
+    if App.alert-text != "" && !App.capturing: ErrorAlert {
+        width: min(520px, parent.width - 32px);
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 96px - 16px - self.height;
     }
 }

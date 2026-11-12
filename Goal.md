@@ -11,7 +11,7 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
 
 ### A. Exact 1:1 Tidal Desktop UI (Pure Rust Native Slint)
 - **Slint (Native Cocoa / Skia / Software backend)**: Built on the high-performance pure-Rust native desktop UI framework, with a native Cocoa window and low CPU use.
-- **Refresh rate comes first**: the GPU renderer is the default and draws at the display's native refresh rate (120 Hz on ProMotion, 240 Hz on a 240 Hz monitor). Smoothness takes priority over memory. The low-memory (CPU) renderer is an opt-in setting, off by default, for when memory matters more than frame rate.
+- **Refresh rate comes first**: the GPU renderer is the default and draws at the display's native refresh rate (120 Hz on ProMotion, 240 Hz on a 240 Hz monitor). Smoothness takes priority over memory.
 - **Visual Design**:
   - Black background, `#151515` selected navigation, `#ffffff` primary text, and `#909090` secondary text. Use Nationale for desktop typography when the local font files are available.
   - Desktop navigation follows the TIDAL references. The sidebar groups Music, Explore, and Feed above Collection and All playlists. The top bar provides history, search, and profile controls.
@@ -50,12 +50,13 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
 - **Stereo only**: streams are always requested in stereo. Dolby Atmos (E-AC-3) and 360 Reality Audio are declined because the decoder cannot play them.
 - **Audio Output**: `cpal` targeting macOS native CoreAudio.
 - **Bit-perfect when the output allows it**:
-  - While a track plays, the output device is switched to the track's sample rate, so nothing is resampled. Tracks with a different rate are not joined gaplessly; the device is re-clocked between them.
+  - "Match output sample rate" is on by default (Settings → Playback). While a track plays and it is on, the output device is switched to the track's sample rate, so nothing is resampled. Tracks with a different rate are not joined gaplessly; the device is re-clocked between them.
+  - The same switch is the "Bit-perfect playback" toggle at the bottom of the signal path popup.
   - Never for Bluetooth, AirPlay or virtual devices: those links re-encode or re-clock the audio anyway, so the device is left at its own rate and the track is resampled.
   - If the device does not support the track's rate, the track is resampled and the UI says so.
   - TIDE does not take exclusive (hog) access; other apps can still play sound.
-- **Respect other apps**: the sample rate a device had before TIDE changed it is remembered. It is restored when playback has been paused for a few seconds and whenever TIDE quits (window close, Quit, Ctrl+C), and taken again on resume.
-- **Signal path indicator** (in the style of Roon): the quality badge opens a signal path showing source format, any sample-rate conversion or software volume step, and the output device. Purple "Lossless" means bit-perfect, green "High quality" means a lossless source that is processed on the way, yellow "Low quality" means a lossy step (AAC source or Bluetooth). It states why bit-perfect is or isn't possible.
+- **Respect other apps**: the sample rate a device had before TIDE changed it is remembered. "Restore original sample rate" is on by default and lives only in Settings → Playback. When it is on, that rate is restored when playback has been paused for a few seconds and whenever TIDE quits (window close, Quit, Ctrl+C), and taken again on resume. When it is off, TIDE leaves the device at the track's sample rate across pause and quit.
+- **Signal path indicator** (in the style of Roon): the quality badge opens a signal path showing source format, any sample-rate conversion or software volume step, and the output device. Purple "Lossless" means bit-perfect, green "High quality" means a lossless source that is processed on the way, yellow "Low quality" means a lossy step (AAC source or Bluetooth). It states why bit-perfect is or isn't possible. Under that note, a divider and a "Bit-perfect playback" toggle turn sample-rate matching on or off without leaving the player.
 - **Follows the system output**: plugging in headphones or connecting Bluetooth moves playback to the new device and re-evaluates the signal path.
 - **Sample-Accurate Gapless Playback**:
   - Double-buffered audio stream preloader.
@@ -103,13 +104,37 @@ tidal-rust/
 - [x] Keep Settings focused on supported controls and local information. Persist the audio-quality, renderer, audio-metadata, and collection-visibility preferences, and expose audio-cache controls and system output information.
 - [x] Hi-Res login: PKCE in the default browser is the default login and completes without a paste step where the browser allows it. Not yet verified with a real sign-in (see milestone 8).
 - [x] Offline cache: size limit, play-count-based eviction, "Keep most played offline", and cache hit rate in Settings.
-- [x] Bit-perfect output with a signal path indicator, and the output device handed back at its original sample rate on pause and quit.
+- [x] Bit-perfect output with a signal path indicator. Sample-rate matching is on by default, and the device is handed back at its original sample rate on pause and quit.
+- [x] Bit-perfect controls: a "Bit-perfect playback" toggle under the note in the signal path popup (the same setting as Settings → Playback → Match output sample rate), and "Restore original sample rate" in Settings only (on by default). Off keeps the track's sample rate across pause and quit.
 - [x] macOS Now Playing & Control Center: Native pure-Rust `objc2` integration with `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`. Publishes live playback rate (1.0 playing, 0.0 paused) so the system scrubber advances live, elapsed playback time, track metadata, and album artwork loaded directly from the local disk cache into `MPMediaItemArtwork`. Supports media keys (Play, Pause, Toggle, Next, Previous, Stop) and timeline scrubbing via `changePlaybackPositionCommand`.
 - [x] How login tokens and local data are handled is documented in [SECURITY.md](SECURITY.md).
 - [x] Back / forward page transitions. Each page is a pane:
-  - Going back, the current page slides off to the right and the previous page grows from 75% to 100% while fading in from dark. Forward runs the same motion in reverse. Buttons, the menu and ⌘[ / ⌘] run it over 0.3 s with ease-in-out. The top bar, sidebar and player bar never move, and only position, scale and opacity animate.
+  - Going back, the current page slides off to the right and the previous page grows from 75% to 100% while fading in from dark. Forward runs the same motion in reverse. Buttons, the menu and ⌘[ / ⌘] run it over 0.15 s with ease-in-out. The top bar, sidebar and player bar never move, and only position, scale and opacity animate.
   - A two-finger trackpad swipe drives the panes directly, following Apple's conventions: a gesture is claimed only when it starts sideways, release past halfway or a flick completes it, the momentum afterwards is ignored, and the system "Swipe between pages" setting is respected. With "Reduce motion" on, buttons and shortcuts switch pages instantly.
   - Pages up to two steps away in history are kept in memory as snapshots, along with each history entry's scroll position. Swiping back shows the page as it was left, and the live page comes back at the same scroll position, so no reload jumps to the top.
   - Esc goes to the home page as a new history entry, so Back returns to where you were. Going to the page already on screen never adds a second history entry.
 
-Explore, Feed, Videos, Profiles, and Save for Later remain navigation placeholders.
+- [x] Collection grids (Mixes & Radio, Playlists, Albums, Profiles, folders):
+  - A filter box narrows the grid as you type ("Filter playlists", "Filter albums", …).
+  - A sort button (↑↓) next to the title: Date added, A-Z, Artist and Release date for albums; A-Z, Date added and Creator for playlists; Date added and A-Z for mixes and profiles.
+  - A group-by button next to it, in the style of a library view: a rule, the group name and its item count above each block. Albums group by Artist, Year or Title; playlists by Creator or Title; mixes and profiles by Title. Folders always lead.
+  - Sort and grouping are remembered per kind of page.
+- [x] Create playlists and folders: a "+" on the Playlists page and beside "All playlists" in the sidebar offers Playlist or Folder, then asks for a name. Inside a folder page the new item is created in that folder. Not yet verified against a real account (it writes to the collection).
+- [x] Profiles: the artists the user follows, as a grid of round portraits that open the artist page.
+- [x] Album page, following the TIDAL client:
+  - Add (to My Collection), Credits, Share and More on the right of Play / Shuffle. More opens the album's context menu (below). Report and Save for Later are not offered.
+  - The artist name carries the artist's picture, underlines on hover and opens the artist page.
+  - Under the track list: release date, track count and length, the copyright line, "More Albums by …" and "Related Artists".
+- [x] Playlist and mix pages carry the same buttons: Share and More, plus Add / Added for playlists made by someone else (the user's own are always in the collection).
+- [x] One context menu for everything (`context-menu.slint`): right-click a track, album, playlist, mix or artist wherever it is shown (track rows, the player bar, grids, carousels, home tiles, search results, the sidebar), or press its More button. The look is shared (cover, title and subtitle on top, then entries with their icons, flyouts to the side, full keyboard control); the entries depend on what was clicked:
+  - Track: Play next, Add to playlist ›, Add to / Remove from My Collection, Go to album, Go to artist, Share › Copy link.
+  - Album: Play now, Play next, Add to playlist ›, Add to / Remove from My Collection, Go to artist, Share › Copy link.
+  - Playlist: Play now, Play next, Add to playlist ›, Add to / Remove from My Collection (other people's playlists only), Share › Copy link.
+  - Mix: Play now, Play next, Add to playlist ›, Share › Copy link. Artist: Go to artist, Share › Copy link.
+  - "Add to playlist" lists the user's own top-level playlists. Folders have no menu.
+- [x] Artist page: a Follow / Following button and a "Related Artists" row.
+- [x] Error alerts: every error-level log line (playback failure, expired token, audio stream error) shows as one alert above the player bar. A new one replaces the one on screen; it dismisses itself after 8 seconds. Confirmations ("Album link copied") use the same slot in a neutral style.
+- [x] Debug panel (computer button in the top bar): a plain overlay that toggles with the button and never blocks the window. It shows the chunk download grid, the last 4 errors with their log fields, and a verbose log tail (the last 60 lines, newest first; TIDE's own crates down to DEBUG, everything else from INFO).
+- [x] `TIDE --get <url> [key=value …]` prints the JSON of a TIDAL API GET, for checking response shapes during development.
+
+Explore, Feed, Videos, and Save for Later remain navigation placeholders.

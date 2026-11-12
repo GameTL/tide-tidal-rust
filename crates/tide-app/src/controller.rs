@@ -41,8 +41,6 @@ fn gb_to_bytes(gb: f64) -> u64 {
 pub struct Settings {
     /// "max" | "high" | "low"
     pub quality: String,
-    /// Render on the CPU (about half the memory of the GPU renderer).
-    pub low_memory: bool,
     pub show_collection: bool,
     pub show_audio_metadata: bool,
     /// Size limit of the offline audio cache.
@@ -101,6 +99,57 @@ mod tests {
         assert_eq!(play_order, ["D", "B", "Y", "X", "A", "C"]);
         assert_eq!(play_order[state.pos], "B");
         assert_eq!(state.prefetched_for, None);
+    }
+
+    #[test]
+    fn grid_is_filtered_sorted_and_grouped() {
+        let album = |title: &str, by: &str, added: &str, released: &str| Card {
+            kind: "album".into(),
+            id: title.into(),
+            title: title.into(),
+            subtitle: by.into(),
+            by: by.into(),
+            added: added.into(),
+            released: released.into(),
+            ..Default::default()
+        };
+        let cards = vec![
+            album("Zebra", "Lauv", "2026-01-01", "2019-05-01"),
+            album("apple", "Weezer", "2026-03-01", "2024-02-02"),
+            album("Mango", "Lauv", "2026-02-01", "2024-09-09"),
+        ];
+        let titles = |groups: &[(String, Vec<Card>)]| -> Vec<(String, Vec<String>)> {
+            groups.iter().map(|(g, c)| (g.clone(), c.iter().map(|c| c.title.clone()).collect())).collect()
+        };
+        let flat = |sort: &str| titles(&arrange_grid(&cards, "", sort, "None"))[0].1.clone();
+        assert_eq!(flat("Date added"), ["apple", "Mango", "Zebra"]);
+        assert_eq!(flat("A-Z"), ["apple", "Mango", "Zebra"]);
+        assert_eq!(flat("Artist"), ["Mango", "Zebra", "apple"]);
+        assert_eq!(flat("Release date"), ["Mango", "apple", "Zebra"]);
+
+        // Filtering matches the title or who it is by.
+        assert_eq!(titles(&arrange_grid(&cards, " lauv ", "A-Z", "None"))[0].1, ["Mango", "Zebra"]);
+
+        // Groups keep the sort order inside; years run newest first.
+        assert_eq!(
+            titles(&arrange_grid(&cards, "", "A-Z", "Artist")),
+            [("Lauv".to_string(), vec!["Mango".to_string(), "Zebra".into()]), ("Weezer".into(), vec!["apple".into()])]
+        );
+        let years: Vec<String> = arrange_grid(&cards, "", "A-Z", "Year").into_iter().map(|(g, _)| g).collect();
+        assert_eq!(years, ["2024", "2019"]);
+
+        // Folders lead, in their own group when grouping.
+        let mut with_folder = cards.clone();
+        with_folder.push(Card { kind: "folder".into(), id: "f".into(), title: "Zzz".into(), ..Default::default() });
+        assert_eq!(arrange_grid(&with_folder, "", "A-Z", "None")[0].1[0].title, "Zzz");
+        assert_eq!(arrange_grid(&with_folder, "", "A-Z", "Title")[0].0, "Folders");
+    }
+
+    #[test]
+    fn release_dates_are_spelled_out() {
+        assert_eq!(long_date("2026-11-12"), "NOVEMBER 12, 2026");
+        assert_eq!(long_date("2024-07-19T00:00:00.000+0000"), "JULY 19, 2024");
+        assert_eq!(long_date(""), "");
     }
 
     #[test]
@@ -358,6 +407,7 @@ enum Page {
     Mixes,
     Playlists,
     Albums,
+    Profiles,
     Folder { id: String, title: String },
     Detail(Card),
     ArtistTracks(Card),
@@ -406,8 +456,16 @@ struct State {
     tracks_model: Option<Rc<VecModel<TrackData>>>,
     rows_requested: HashSet<usize>,
     sidebar_cards: Vec<Card>,
+    /// The card grid on screen, as loaded; filter, sort and grouping are applied on top.
+    grid: Grid,
+    /// Album whose credits are loaded or loading.
+    credits_for: String,
+    /// Page and artist whose "more albums" and related artists were requested.
+    extras_for: (u64, String),
 
     menu_track: Option<TrackItem>,
+    /// The album, playlist, mix or artist the context menu was opened on.
+    menu_card: Option<Card>,
     queue: Vec<TrackItem>,
     order: Vec<usize>,
     pos: usize,
@@ -418,8 +476,12 @@ struct State {
     /// Ticks since playback stopped; the output device is handed back after a moment.
     idle_ticks: u32,
     tick_count: u32,
+    /// Source bitrate last shown in the signal path, to refresh it once the download finishes.
+    shown_bitrate: u32,
     prefetched_for: Option<u64>,
     last_serial: u64,
+    /// Saved position for a restored session before the audio file has been opened.
+    pending_seek: Option<Duration>,
     volume_before_mute: f32,
     muted: bool,
 
@@ -459,8 +521,8 @@ pub struct Ui {
 
 /// Snapshots are kept for pages at most this many steps from the current one.
 const SNAP_REACH: usize = 2;
-/// Back / forward from a button or shortcut (the 0.3 s page-motion token).
-const NAV_DURATION: f32 = 0.30;
+/// Back / forward from a button or shortcut (the 0.15 s page-motion token).
+const NAV_DURATION: f32 = 0.15;
 /// Cross-fade from the arrived pane's snapshot to the live page.
 const NAV_FADE: f32 = 0.18;
 
@@ -513,27 +575,19 @@ fn swipe_commits(p: f32, velocity: f32) -> bool {
     (p > 0.5 && velocity > -300.0) || (p > 0.02 && velocity > 600.0)
 }
 
-/// Cut `(x, y, w, h)` out of a window snapshot, at half size when `halve` is set.
-fn crop_pane(buf: &SharedPixelBuffer<Rgba8Pixel>, rect: (u32, u32, u32, u32), halve: bool) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+/// Cut `(x, y, w, h)` out of a window snapshot.
+fn crop_pane(buf: &SharedPixelBuffer<Rgba8Pixel>, rect: (u32, u32, u32, u32)) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let (x, y) = (rect.0.min(buf.width()), rect.1.min(buf.height()));
     let (w, h) = (rect.2.min(buf.width() - x), rect.3.min(buf.height() - y));
-    let step = if halve { 2 } else { 1 };
-    let (out_w, out_h) = (w / step, h / step);
-    if out_w == 0 || out_h == 0 {
+    if w == 0 || h == 0 {
         return None;
     }
     let src = buf.as_slice();
     let stride = buf.width() as usize;
-    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(out_w, out_h);
-    for (row, line) in out.make_mut_slice().chunks_exact_mut(out_w as usize).enumerate() {
-        let start = (y as usize + row * step as usize) * stride + x as usize;
-        if halve {
-            for (col, px) in line.iter_mut().enumerate() {
-                *px = src[start + col * 2];
-            }
-        } else {
-            line.copy_from_slice(&src[start..start + out_w as usize]);
-        }
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    for (row, line) in out.make_mut_slice().chunks_exact_mut(w as usize).enumerate() {
+        let start = (y as usize + row) * stride + x as usize;
+        line.copy_from_slice(&src[start..start + w as usize]);
     }
     Some(out)
 }
@@ -573,6 +627,101 @@ pub fn on_ui(f: impl FnOnce(&Rc<Ui>) + Send + 'static) {
     });
 }
 
+/// A card grid page: what was loaded, and how it is filtered, sorted and grouped.
+#[derive(Default)]
+struct Grid {
+    /// mixes | playlists | albums | profiles — picks the options and the saved preferences.
+    kind: String,
+    all: Vec<Card>,
+    filter: String,
+    sort: String,
+    group: String,
+}
+
+/// Sort and group choices for a grid page; the first of each is the default.
+fn grid_options(kind: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match kind {
+        "albums" => (&["Date added", "A-Z", "Artist", "Release date"], &["None", "Artist", "Year", "Title"]),
+        "playlists" => (&["A-Z", "Date added", "Creator"], &["None", "Creator", "Title"]),
+        _ => (&["Date added", "A-Z"], &["None", "Title"]),
+    }
+}
+
+/// Filter, sort and split cards into titled groups (one untitled group for "None").
+/// Folders stay ahead of playlists, as in the official client.
+fn arrange_grid(cards: &[Card], filter: &str, sort: &str, group: &str) -> Vec<(String, Vec<Card>)> {
+    let needle = filter.trim().to_lowercase();
+    let mut cards: Vec<Card> = cards
+        .iter()
+        .filter(|c| {
+            needle.is_empty()
+                || c.title.to_lowercase().contains(&needle)
+                || c.subtitle.to_lowercase().contains(&needle)
+                || c.by.to_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect();
+    let title = |c: &Card| c.title.to_lowercase();
+    match sort {
+        "A-Z" => cards.sort_by_key(title),
+        "Artist" | "Creator" => cards.sort_by_key(|c| (c.by.to_lowercase(), title(c))),
+        "Date added" => cards.sort_by(|a, b| b.added.cmp(&a.added)),
+        "Release date" => cards.sort_by(|a, b| b.released.cmp(&a.released)),
+        _ => {}
+    }
+    cards.sort_by_key(|c| c.kind != "folder");
+    if group == "None" || group.is_empty() {
+        return vec![(String::new(), cards)];
+    }
+    let name = |c: &Card| -> String {
+        if c.kind == "folder" {
+            return "Folders".into();
+        }
+        match group {
+            "Year" => c.released.get(..4).filter(|y| !y.is_empty()).unwrap_or("Unknown year").to_string(),
+            "Title" => match c.title.trim().chars().next() {
+                Some(first) if first.is_alphabetic() => first.to_uppercase().collect(),
+                _ => "#".into(),
+            },
+            _ if c.by.is_empty() => "Unknown".into(),
+            _ => c.by.clone(),
+        }
+    };
+    let mut groups: Vec<(String, Vec<Card>)> = Vec::new();
+    for card in cards {
+        let key = name(&card);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(card),
+            None => groups.push((key, vec![card])),
+        }
+    }
+    // Folders and the user's own playlists lead; "#" and unknowns trail.
+    let rank = |k: &str| match k {
+        "Folders" => 0,
+        "Me" if group == "Creator" => 1,
+        "#" | "Unknown" | "Unknown year" => 3,
+        _ => 2,
+    };
+    groups.sort_by(|(a, _), (b, _)| {
+        let by_name = if group == "Year" { b.cmp(a) } else { a.to_lowercase().cmp(&b.to_lowercase()) };
+        rank(a).cmp(&rank(b)).then(by_name)
+    });
+    groups
+}
+
+/// "2026-11-12" -> "NOVEMBER 12, 2026".
+fn long_date(iso: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER",
+        "DECEMBER",
+    ];
+    let mut parts = iso.get(..10).unwrap_or("").split('-').filter_map(|p| p.parse::<usize>().ok());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(y), Some(m @ 1..=12), Some(d)) => format!("{} {d}, {y}", MONTHS[m - 1]),
+        _ => String::new(),
+    }
+}
+
 fn fmt_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
@@ -601,8 +750,45 @@ fn card_row(c: &Card) -> CardData {
         kind: c.kind.as_str().into(),
         title: c.title.as_str().into(),
         subtitle: c.subtitle.as_str().into(),
+        quality: c.quality.as_str().into(),
         image: Image::default(),
         image_url: c.image_url.as_deref().unwrap_or_default().into(),
+        by: c.by.as_str().into(),
+    }
+}
+
+fn card_from_row(card: &CardData) -> Card {
+    Card {
+        kind: card.kind.to_string(),
+        id: card.id.to_string(),
+        title: card.title.to_string(),
+        subtitle: card.subtitle.to_string(),
+        quality: card.quality.to_string(),
+        image_url: (!card.image_url.is_empty()).then(|| card.image_url.to_string()),
+        by: card.by.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Whether the collection toggle applies: albums, and playlists known to be someone else's.
+fn can_favorite(card: &Card) -> bool {
+    card.kind == "album" || (card.kind == "playlist" && !card.by.is_empty() && card.by != "Me")
+}
+
+/// The `favorites/ids` key for a card kind.
+fn favorite_kind(kind: &str) -> &'static str {
+    match kind {
+        "album" => "ALBUM",
+        "playlist" => "PLAYLIST",
+        _ => "ARTIST",
+    }
+}
+
+async fn set_card_favorite(api: &ApiHandle, card: &Card, favorite: bool) -> Result<(), tide_api::ApiError> {
+    match card.kind.as_str() {
+        "album" => api.set_album_favorite(&card.id, favorite).await,
+        "playlist" => api.set_playlist_favorite(&card.id, favorite).await,
+        _ => api.set_artist_followed(&card.id, favorite).await,
     }
 }
 
@@ -705,7 +891,7 @@ impl Ui {
         ui
     }
 
-    fn app(&self) -> App<'_> {
+    pub(crate) fn app(&self) -> App<'_> {
         self.win.global::<App>()
     }
 
@@ -754,6 +940,14 @@ impl Ui {
             app.set_sidebar_ascending(!app.get_sidebar_ascending());
             ui.present_sidebar();
         });
+        bind!(on_set_grid_sort, |ui, sort| ui.set_grid_arrangement(Some(sort.to_string()), None));
+        bind!(on_set_grid_group, |ui, group| ui.set_grid_arrangement(None, Some(group.to_string())));
+        bind!(on_create_in_collection, |ui, kind, name| ui.create_in_collection(kind == "folder", name.trim()));
+        bind!(on_toggle_page_favorite, |ui| ui.toggle_page_favorite());
+        bind!(on_page_action, |ui, action, arg| ui.page_action(&action, &arg));
+        bind!(on_related_art, |ui, from, upto| {
+            ui.card_art(ui.app().get_related_artists(), from.max(0) as usize, upto.max(0) as usize);
+        });
         bind!(on_back, |ui| ui.step_history(-1));
         bind!(on_forward, |ui| ui.step_history(1));
         bind!(on_np_artist_hovered, |ui| ui.load_artist_hover_card());
@@ -776,6 +970,8 @@ impl Ui {
         bind!(on_filter, |ui, text| ui.apply_filter(&text));
         bind!(on_rows_visible, |ui, first, count| ui.rows_visible(first.max(0) as usize, count.max(0) as usize));
         bind!(on_request_track_menu, |ui, id, x, y| ui.open_track_menu(&id, x, y));
+        bind!(on_request_card_menu, |ui, card, x, y| ui.open_card_menu(card, x, y));
+        bind!(on_menu_action, |ui, action, arg| ui.menu_action(&action, &arg));
         bind!(on_play_track_next, |ui, id| ui.play_track_next(&id));
         bind!(on_copy_track_link, |ui, id| {
             if let Err(error) = ui.copy_track_link(&id) {
@@ -813,7 +1009,6 @@ impl Ui {
         });
         bind!(on_section_visible, |ui, index, upto| ui.section_visible(index.max(0) as usize, upto.max(0) as usize));
         bind!(on_set_quality, |ui, quality| ui.update_settings(|s| s.quality = quality.to_string()));
-        bind!(on_set_low_memory, |ui, on| ui.update_settings(|s| s.low_memory = on));
         bind!(on_set_show_collection, |ui, on| ui.update_settings(|s| s.show_collection = on));
         bind!(on_set_show_audio_metadata, |ui, on| ui.update_settings(|s| s.show_audio_metadata = on));
         bind!(on_clear_cache, |ui| {
@@ -949,16 +1144,7 @@ impl Ui {
                 Err(e) => tracing::warn!("home feed failed: {e}"),
             }
         });
-        self.spawn(|ctx| async move {
-            let Some(api) = ctx.api() else { return };
-            match api.playlists("root").await {
-                Ok(cards) => {
-                    let _ = ctx.meta.put_json("cards:playlists", &serde_json::to_string(&cards).unwrap_or_default());
-                    on_ui(move |ui| ui.set_sidebar(&cards));
-                }
-                Err(e) => tracing::warn!("playlists failed: {e}"),
-            }
-        });
+        self.sync_playlists();
         self.spawn(|ctx| async move {
             let Some(api) = ctx.api() else { return };
             let mut all: Vec<TrackItem> = Vec::new();
@@ -986,6 +1172,20 @@ impl Ui {
             }
             let _ = ctx.meta.save_favorites(&all);
             let _ = ctx.meta.put_json("favorites", &serde_json::to_string(&all).unwrap_or_default());
+        });
+    }
+
+    /// Refresh the sidebar's playlists and folders.
+    fn sync_playlists(self: &Rc<Self>) {
+        self.spawn(|ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            match api.playlists("root").await {
+                Ok(cards) => {
+                    let _ = ctx.meta.put_json("cards:playlists", &serde_json::to_string(&cards).unwrap_or_default());
+                    on_ui(move |ui| ui.set_sidebar(&cards));
+                }
+                Err(e) => tracing::warn!("playlists failed: {e}"),
+            }
         });
     }
 
@@ -1365,6 +1565,8 @@ impl Ui {
 
     fn set_sidebar(self: &Rc<Self>, cards: &[Card]) {
         self.state.borrow_mut().sidebar_cards = cards.to_vec();
+        let own: Vec<CardData> = cards.iter().filter(|c| c.kind == "playlist" && c.by == "Me").map(card_row).collect();
+        self.app().set_own_playlists(ModelRc::new(VecModel::from(own)));
         self.present_sidebar();
     }
 
@@ -1380,7 +1582,83 @@ impl Ui {
     }
 
     fn set_grid(self: &Rc<Self>, cards: &[Card]) {
-        self.app().set_grid_cards(ModelRc::from(self.cards_model(cards, 320)));
+        self.state.borrow_mut().grid.all = cards.to_vec();
+        self.present_grid();
+    }
+
+    /// Draw the grid from what was loaded, with the current filter, sort and grouping.
+    fn present_grid(self: &Rc<Self>) {
+        let groups = {
+            let st = self.state.borrow();
+            arrange_grid(&st.grid.all, &st.grid.filter, &st.grid.sort, &st.grid.group)
+        };
+        let flat: Vec<CardData> = groups.iter().flat_map(|(_, cards)| cards.iter().map(card_row)).collect();
+        let sections: Vec<SectionData> = groups
+            .iter()
+            .map(|(title, cards)| SectionData {
+                title: title.as_str().into(),
+                layout: "cards".into(),
+                cards: ModelRc::from(self.cards_model(cards, 320)),
+                tracks: ModelRc::default(),
+            })
+            .collect();
+        let app = self.app();
+        app.set_grid_cards(ModelRc::new(VecModel::from(flat)));
+        app.set_grid_groups(ModelRc::new(VecModel::from(sections)));
+    }
+
+    /// Change the sort and / or grouping of the grid on screen and remember it for that page kind.
+    fn set_grid_arrangement(self: &Rc<Self>, sort: Option<String>, group: Option<String>) {
+        let (kind, sort, group) = {
+            let mut st = self.state.borrow_mut();
+            if let Some(sort) = sort {
+                st.grid.sort = sort;
+            }
+            if let Some(group) = group {
+                st.grid.group = group;
+            }
+            (st.grid.kind.clone(), st.grid.sort.clone(), st.grid.group.clone())
+        };
+        let _ = self.ctx.meta.put_json(&format!("grid-prefs:{kind}"), &serde_json::json!([sort, group]).to_string());
+        let app = self.app();
+        app.set_grid_sort(sort.into());
+        app.set_grid_group(group.into());
+        self.present_grid();
+    }
+
+    /// Create an empty playlist or folder, inside the folder on screen if there is one.
+    fn create_in_collection(self: &Rc<Self>, folder: bool, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let current = {
+            let st = self.state.borrow();
+            st.history.get(st.hist_pos).cloned()
+        };
+        let parent = match &current {
+            Some(Page::Folder { id, .. }) => id.clone(),
+            _ => "root".to_string(),
+        };
+        let name = name.to_string();
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            let what = if folder { "folder" } else { "playlist" };
+            match api.create_in_collection(&name, &parent, folder).await {
+                Ok(()) => on_ui(move |ui| {
+                    crate::alerts::notice(&ui.app(), &format!("Created {what} “{name}”"));
+                    ui.sync_playlists();
+                    // Reload the playlists page if that is where we are.
+                    let current = {
+                        let st = ui.state.borrow();
+                        st.history.get(st.hist_pos).cloned()
+                    };
+                    if let Some(page @ (Page::Playlists | Page::Folder { .. })) = current {
+                        ui.show(page, false);
+                    }
+                }),
+                Err(e) => tracing::error!("Could not create {what} “{name}”: {e}"),
+            }
+        });
     }
 
     /// Replace the track table.
@@ -1422,6 +1700,11 @@ impl Ui {
     }
 
     fn apply_filter(self: &Rc<Self>, text: &str) {
+        if self.app().get_view() == "grid" {
+            self.state.borrow_mut().grid.filter = text.to_string();
+            self.present_grid();
+            return;
+        }
         let needle = text.trim().to_lowercase();
         let tracks: Vec<TrackItem> = {
             let st = self.state.borrow();
@@ -1461,7 +1744,7 @@ impl Ui {
             "explore" => Page::Stub { key: key.into(), title: "Explore".into() },
             "feed" => Page::Stub { key: key.into(), title: "Feed".into() },
             "videos" => Page::Stub { key: key.into(), title: "Videos".into() },
-            "profiles" => Page::Stub { key: key.into(), title: "Profiles".into() },
+            "profiles" => Page::Profiles,
             "later" => Page::Stub { key: key.into(), title: "Save for Later".into() },
             _ => return,
         };
@@ -1475,13 +1758,7 @@ impl Ui {
         let page = match card.kind.as_str() {
             "tracks" => Page::Tracks,
             "folder" => Page::Folder { id: card.id.to_string(), title: card.title.to_string() },
-            kind => Page::Detail(Card {
-                kind: kind.to_string(),
-                id: card.id.to_string(),
-                title: card.title.to_string(),
-                subtitle: card.subtitle.to_string(),
-                image_url: (!card.image_url.is_empty()).then(|| card.image_url.to_string()),
-            }),
+            _ => Page::Detail(card_from_row(&card)),
         };
         self.show(page, true);
     }
@@ -1543,9 +1820,7 @@ impl Ui {
         let scale = window.scale_factor();
         let px = |v: f32| (v * scale).round().max(0.0) as u32;
         let rect = (px(app.get_pane_x()), px(app.get_pane_y()), px(app.get_pane_width()), px(app.get_pane_height()));
-        // Low-memory mode keeps the snapshots at a quarter of the pixels.
-        let halve = scale > 1.0 && self.ctx.settings.read().unwrap().low_memory;
-        Some(Image::from_rgba8(crop_pane(&buf, rect, halve)?))
+        Some(Image::from_rgba8(crop_pane(&buf, rect)?))
     }
 
     /// Put up the two panes for a step through history. False when there is
@@ -1751,7 +2026,7 @@ impl Ui {
     }
 
     fn show(self: &Rc<Self>, page: Page, push: bool) {
-        self.app().set_track_menu_open(false);
+        self.app().set_menu_open(false);
         // Going to the page already on screen shows it afresh, without a
         // second history entry for it.
         let push = push && {
@@ -1824,6 +2099,16 @@ impl Ui {
         app.set_search_cards(ModelRc::default());
         app.set_catalog_error(false);
         app.set_loading(false);
+        app.set_page_favorite(false);
+        app.set_page_release_line("".into());
+        app.set_page_copyright("".into());
+        app.set_related_artists(ModelRc::default());
+        app.set_page_credits(ModelRc::default());
+        app.set_page_credits_status("".into());
+        app.set_create_kind("".into());
+        app.set_page_card(CardData::default());
+        app.set_page_can_favorite(false);
+        self.state.borrow_mut().credits_for.clear();
 
         match page {
             Page::Home => {
@@ -1838,18 +2123,25 @@ impl Ui {
                 app.set_filter_text("".into());
                 self.apply_filter("");
             }
-            Page::Mixes => self.show_grid("mixes", "Mixes & Radio", page_gen, |api| async move { api.mixes().await }),
-            Page::Playlists => {
-                self.show_grid("playlists", "Playlists", page_gen, |api| async move { api.playlists("root").await })
+            Page::Mixes => {
+                self.show_grid("mixes", "mixes", "Mixes & Radio", page_gen, |api| async move { api.mixes().await })
             }
-            Page::Albums => self.show_grid("albums", "Albums", page_gen, |api| async move { api.albums().await }),
+            Page::Playlists => self.show_grid("playlists", "playlists", "Playlists", page_gen, |api| async move {
+                api.playlists("root").await
+            }),
+            Page::Albums => {
+                self.show_grid("albums", "albums", "Albums", page_gen, |api| async move { api.albums().await })
+            }
+            Page::Profiles => self.show_grid("profiles", "profiles", "Profiles", page_gen, |api| async move {
+                api.followed_artists().await
+            }),
             Page::Folder { id, title } => {
                 let key = format!("folder:{id}");
-                self.show_grid(&key, &title, page_gen, move |api| async move { api.playlists(&id).await });
+                self.show_grid(&key, "playlists", &title, page_gen, move |api| async move { api.playlists(&id).await });
                 app.set_nav_key("playlists".into());
             }
             Page::Detail(card) => {
-                let Card { kind, id, title, .. } = &card;
+                let Card { kind, id, title, quality, .. } = &card;
                 let view = match kind.as_str() {
                     "album" => "album",
                     "artist" => "artist",
@@ -1861,11 +2153,32 @@ impl Ui {
                 app.set_tracks_show_date(kind == "playlist");
                 let cache_key = format!("tracks:{kind}:{id}");
                 self.present_catalog_card(&card, page_gen);
+                if kind == "album" && !quality.is_empty() {
+                    app.set_page_quality(quality.clone().into());
+                }
                 if matches!(view, "artist" | "album") {
                     self.load_catalog_detail(kind, id, page_gen);
                 }
                 if view == "artist" {
                     self.load_artist_releases(id, page_gen);
+                    self.load_related_artists(id, page_gen);
+                }
+                if matches!(kind.as_str(), "album" | "playlist" | "mix") {
+                    app.set_page_card(card_row(&card));
+                    app.set_page_can_favorite(can_favorite(&card));
+                }
+                if view == "artist" || can_favorite(&card) {
+                    let (fav_kind, fav_id) = (favorite_kind(kind), id.clone());
+                    self.spawn(move |ctx| async move {
+                        let Some(api) = ctx.api() else { return };
+                        if let Ok(favorite) = api.is_favorite(fav_kind, &fav_id).await {
+                            on_ui(move |ui| {
+                                if ui.state.borrow().page_gen == page_gen {
+                                    ui.app().set_page_favorite(favorite);
+                                }
+                            });
+                        }
+                    });
                 }
                 let (kind, id) = (kind.clone(), id.clone());
                 self.show_track_list(&cache_key, title, page_gen, move |api| async move { api.tracks_of(&kind, &id).await });
@@ -1930,6 +2243,9 @@ impl Ui {
         }
         if !card.subtitle.is_empty() {
             app.set_page_subtitle(card.subtitle.as_str().into());
+        }
+        if card.kind == "album" && !card.quality.is_empty() {
+            app.set_page_quality(card.quality.as_str().into());
         }
         if let Some(url) = &card.image_url {
             let url = if card.kind == "artist" {
@@ -2027,20 +2343,36 @@ impl Ui {
             move |ui, detail: CatalogDetail| {
                 ui.present_catalog_card(&detail.card, page_gen);
                 let app = ui.app();
+                let is_album = detail.card.kind == "album";
                 if let Some(artist) = detail.artist {
                     app.set_page_artist(card_row(&artist));
+                    if let Some(url) = &artist.image_url {
+                        let (weak, artist_id) = (Rc::downgrade(ui), artist.id.clone());
+                        ui.load_image(url, 96, move |image, _| {
+                            let Some(ui) = weak.upgrade().filter(|ui| ui.state.borrow().page_gen == page_gen) else { return };
+                            let mut row = ui.app().get_page_artist();
+                            if row.id == artist_id.as_str() {
+                                row.image = image.clone();
+                                ui.app().set_page_artist(row);
+                            }
+                        });
+                    }
+                    if is_album {
+                        ui.load_album_extras(&artist.id, &detail.card, page_gen);
+                    }
                 }
                 app.set_page_year(detail.year.into());
-                app.set_page_quality(match detail.quality.as_str() {
-                    "HI_RES_LOSSLESS" | "HIRES_LOSSLESS" => "MAX",
-                    "LOSSLESS" => "LOSSLESS",
-                    "HIGH" => "HIGH",
-                    _ => "",
-                }.into());
+                app.set_page_quality(detail.quality.into());
                 if detail.track_count > 0 {
                     let label = if detail.track_count == 1 { "TRACK" } else { "TRACKS" };
-                    app.set_page_summary(format!("{} {label}  ({})", detail.track_count, fmt_time(detail.duration)).into());
+                    let summary = format!("{} {label}  ({})", detail.track_count, fmt_time(detail.duration));
+                    let date = long_date(&detail.release_date);
+                    if is_album && !date.is_empty() {
+                        app.set_page_release_line(format!("{date}  ·  {summary}").into());
+                    }
+                    app.set_page_summary(summary.into());
                 }
+                app.set_page_copyright(detail.copyright.to_uppercase().into());
                 app.set_page_biography(detail.biography.into());
             },
         );
@@ -2066,9 +2398,293 @@ impl Ui {
         }
     }
 
+    /// "More albums by" and related artists under an album's track list. Asked once per page.
+    fn load_album_extras(self: &Rc<Self>, artist_id: &str, album: &Card, page_gen: u64) {
+        {
+            let mut st = self.state.borrow_mut();
+            let key = (page_gen, artist_id.to_string());
+            if st.extras_for == key {
+                return;
+            }
+            st.extras_for = key;
+        }
+        let (id, album_id, album_title) = (artist_id.to_string(), album.id.clone(), album.title.to_lowercase());
+        self.load_catalog(
+            format!("artist-albums:{id}"),
+            page_gen,
+            {
+                let id = id.clone();
+                move |api| async move { api.artist_releases(&id, false).await }
+            },
+            move |ui, cards: Vec<Card>| {
+                // Other editions of this album carry the same title.
+                let rows: Vec<CardData> = cards
+                    .iter()
+                    .filter(|c| c.id != album_id && c.title.to_lowercase() != album_title)
+                    .map(card_row)
+                    .collect();
+                ui.app().set_artist_albums(ModelRc::new(VecModel::from(rows)));
+            },
+        );
+        self.load_related_artists(&id, page_gen);
+    }
+
+    fn load_related_artists(self: &Rc<Self>, artist_id: &str, page_gen: u64) {
+        let id = artist_id.to_string();
+        self.load_catalog(
+            format!("artist-similar:{id}"),
+            page_gen,
+            move |api| async move { api.similar_artists(&id).await },
+            |ui, cards: Vec<Card>| {
+                let rows: Vec<CardData> = cards.iter().map(card_row).collect();
+                ui.app().set_related_artists(ModelRc::new(VecModel::from(rows)));
+            },
+        );
+    }
+
+    /// The album, playlist, mix or artist page on screen, if that is what is showing.
+    fn page_card(&self) -> Option<Card> {
+        let st = self.state.borrow();
+        match st.history.get(st.hist_pos) {
+            Some(Page::Detail(card)) => Some(card.clone()),
+            _ => None,
+        }
+    }
+
+    /// Add / remove the album from the collection, or follow / unfollow the artist.
+    fn toggle_page_favorite(self: &Rc<Self>) {
+        let Some(card) = self.page_card().filter(|card| card.kind == "artist" || can_favorite(card)) else { return };
+        let page_gen = self.state.borrow().page_gen;
+        let app = self.app();
+        let favorite = !app.get_page_favorite();
+        app.set_page_favorite(favorite);
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            if let Err(e) = set_card_favorite(&api, &card, favorite).await {
+                tracing::error!("Could not update My Collection for {}: {e}", card.title);
+                on_ui(move |ui| {
+                    if ui.state.borrow().page_gen == page_gen {
+                        ui.app().set_page_favorite(!favorite);
+                    }
+                });
+            }
+        });
+    }
+
+    /// Share and Credits on an album, playlist or mix page.
+    fn page_action(self: &Rc<Self>, action: &str, _arg: &str) {
+        let Some(card) = self.page_card() else { return };
+        match action {
+            "copy-link" => self.copy_card_link(&card),
+            "credits" if card.kind == "album" => {
+                {
+                    let mut st = self.state.borrow_mut();
+                    if st.credits_for == card.id {
+                        return;
+                    }
+                    st.credits_for = card.id.clone();
+                }
+                let app = self.app();
+                app.set_page_credits(ModelRc::default());
+                app.set_page_credits_status("Loading…".into());
+                let id = card.id;
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    let credits = api.album_credits(&id).await;
+                    on_ui(move |ui| {
+                        if ui.state.borrow().credits_for != id {
+                            return;
+                        }
+                        let app = ui.app();
+                        match credits {
+                            Ok(credits) => {
+                                app.set_page_credits_status("No credits available".into());
+                                let rows: Vec<CreditLine> = credits
+                                    .into_iter()
+                                    .map(|c| CreditLine { role: c.role.into(), names: c.names.into() })
+                                    .collect();
+                                app.set_page_credits(ModelRc::new(VecModel::from(rows)));
+                            }
+                            Err(e) => {
+                                tracing::warn!("credits failed: {e}");
+                                app.set_page_credits_status("Couldn’t load credits".into());
+                                ui.state.borrow_mut().credits_for.clear();
+                            }
+                        }
+                    });
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn copy_card_link(&self, card: &Card) {
+        match self.copy_link(&format!("https://tidal.com/{}/{}", card.kind, card.id)) {
+            Ok(()) => crate::alerts::notice(&self.app(), "Link copied"),
+            Err(e) => tracing::warn!("Could not copy link: {e}"),
+        }
+    }
+
+    /// Open the context menu on an album, playlist, mix or artist card.
+    fn open_card_menu(self: &Rc<Self>, row: CardData, x: f32, y: f32) {
+        let app = self.app();
+        if app.get_menu_open() || !app.get_logged_in() || row.id.is_empty() {
+            return;
+        }
+        if !matches!(row.kind.as_str(), "album" | "playlist" | "mix" | "artist") {
+            return;
+        }
+        let card = card_from_row(&row);
+        // Opened from the page's own More button: the page knows the cover and the state.
+        let on_page = self.page_card().is_some_and(|page| page.kind == card.kind && page.id == card.id);
+        let mut row = row;
+        if on_page && row.image.size().width == 0 {
+            row.image = app.get_page_cover();
+        }
+        app.set_menu_sub("".into());
+        app.set_menu_kind(row.kind.clone());
+        app.set_menu_card(row);
+        app.set_menu_can_favorite(can_favorite(&card));
+        app.set_menu_favorite(on_page && app.get_page_favorite());
+        app.set_menu_x(x);
+        app.set_menu_y(y);
+        app.set_menu_open(true);
+        self.state.borrow_mut().menu_card = Some(card.clone());
+        if can_favorite(&card) && !on_page {
+            self.spawn(move |ctx| async move {
+                let Some(api) = ctx.api() else { return };
+                if let Ok(true) = api.is_favorite(favorite_kind(&card.kind), &card.id).await {
+                    on_ui(move |ui| {
+                        let app = ui.app();
+                        if app.get_menu_open() && app.get_menu_card().id == card.id.as_str() {
+                            app.set_menu_favorite(true);
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    /// An entry of the context menu that the controller carries out: every
+    /// card entry, and "add-to-playlist" for tracks too.
+    fn menu_action(self: &Rc<Self>, action: &str, arg: &str) {
+        let app = self.app();
+        if app.get_menu_kind() == "track" {
+            let Some(track) = self.state.borrow().menu_track.clone() else { return };
+            if action == "add-to-playlist" && !arg.is_empty() {
+                self.add_to_playlist(arg, vec![track.id], track.title);
+            }
+            return;
+        }
+        let Some(card) = self.state.borrow().menu_card.clone() else { return };
+        match action {
+            "open" => self.open_card(app.get_menu_card()),
+            "copy-link" => self.copy_card_link(&card),
+            "favorite" if can_favorite(&card) => {
+                let favorite = !app.get_menu_favorite();
+                let on_page = self.page_card().is_some_and(|page| page.kind == card.kind && page.id == card.id);
+                let page_gen = self.state.borrow().page_gen;
+                if on_page {
+                    app.set_page_favorite(favorite);
+                }
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    match set_card_favorite(&api, &card, favorite).await {
+                        Ok(()) => on_ui(move |ui| {
+                            let text = if favorite { "Added to My Collection" } else { "Removed from My Collection" };
+                            crate::alerts::notice(&ui.app(), text);
+                            if card.kind == "playlist" {
+                                ui.sync_playlists();
+                            }
+                        }),
+                        Err(e) => {
+                            tracing::error!("Could not update My Collection for {}: {e}", card.title);
+                            on_ui(move |ui| {
+                                if on_page && ui.state.borrow().page_gen == page_gen {
+                                    ui.app().set_page_favorite(!favorite);
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+            "artist" if card.kind == "album" => {
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    match api.catalog_detail("album", &card.id).await {
+                        Ok(detail) => on_ui(move |ui| {
+                            if let Some(artist) = detail.artist {
+                                ui.open_card(card_row(&artist));
+                            }
+                        }),
+                        Err(e) => tracing::warn!("could not find the artist of {}: {e}", card.title),
+                    }
+                });
+            }
+            "play" | "play-next" | "add-to-playlist" => {
+                let (action, arg) = (action.to_string(), arg.to_string());
+                // The page already holds the tracks of the card it shows.
+                let on_page = self.page_card().is_some_and(|page| page.kind == card.kind && page.id == card.id);
+                let loaded = on_page.then(|| self.state.borrow().page_tracks.clone()).filter(|t| !t.is_empty());
+                if let Some(tracks) = loaded {
+                    self.card_tracks_action(&action, &arg, &card, tracks);
+                    return;
+                }
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    match api.tracks_of(&card.kind, &card.id).await {
+                        Ok(tracks) => on_ui(move |ui| ui.card_tracks_action(&action, &arg, &card, tracks)),
+                        Err(e) => tracing::error!("Could not load the tracks of {}: {e}", card.title),
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Play, queue or add to a playlist the tracks behind a card.
+    fn card_tracks_action(self: &Rc<Self>, action: &str, arg: &str, card: &Card, tracks: Vec<TrackItem>) {
+        if tracks.is_empty() {
+            return;
+        }
+        match action {
+            "play" => self.play_queue(tracks, 0, &card.title, Some(false)),
+            "play-next" if self.current_track().is_none() => self.play_queue(tracks, 0, &card.title, Some(false)),
+            "play-next" => {
+                // Inserted last to first, so they follow in their own order.
+                for track in tracks.into_iter().rev() {
+                    self.queue_next(track);
+                }
+            }
+            "add-to-playlist" if !arg.is_empty() => {
+                self.add_to_playlist(arg, tracks.into_iter().map(|t| t.id).collect(), card.title.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn add_to_playlist(self: &Rc<Self>, playlist: &str, ids: Vec<String>, title: String) {
+        let playlist = playlist.to_string();
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            match api.add_to_playlist(&playlist, &ids).await {
+                Ok(()) => on_ui(move |ui| {
+                    crate::alerts::notice(&ui.app(), &format!("Added “{title}” to the playlist"));
+                    ui.sync_playlists();
+                }),
+                Err(e) => tracing::error!("Could not add “{title}” to the playlist: {e}"),
+            }
+        });
+    }
+
     fn artist_release_art(self: &Rc<Self>, singles: bool, from: usize, upto: usize) {
         let app = self.app();
         let model = if singles { app.get_artist_singles() } else { app.get_artist_albums() };
+        self.card_art(model, from, upto);
+    }
+
+    /// Lazily load artwork for cards [from, upto) of a carousel's model.
+    fn card_art(self: &Rc<Self>, model: ModelRc<CardData>, from: usize, upto: usize) {
         for i in from..upto.min(model.row_count()) {
             let Some(row) = model.row_data(i).filter(|row| !row.image_url.is_empty() && row.image.size().width == 0) else {
                 continue;
@@ -2118,7 +2734,7 @@ impl Ui {
     }
 
     /// Card grid: cached copy first (zero network), then refresh.
-    fn show_grid<F, Fut>(self: &Rc<Self>, key: &str, title: &str, page_gen: u64, fetch: F)
+    fn show_grid<F, Fut>(self: &Rc<Self>, key: &str, kind: &str, title: &str, page_gen: u64, fetch: F)
     where
         F: FnOnce(ApiHandle) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<Vec<Card>, tide_api::ApiError>> + Send,
@@ -2127,6 +2743,30 @@ impl Ui {
         app.set_view("grid".into());
         app.set_nav_key(key.into());
         app.set_page_title(title.into());
+        // Sort and grouping are remembered per kind of page.
+        let (sorts, groups) = grid_options(kind);
+        let saved: Vec<String> = self
+            .ctx
+            .meta
+            .get_json(&format!("grid-prefs:{kind}"))
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let pick = |saved: Option<&String>, options: &[&str]| {
+            saved.filter(|s| options.contains(&s.as_str())).cloned().unwrap_or_else(|| options[0].to_string())
+        };
+        let (sort, group) = (pick(saved.first(), sorts), pick(saved.get(1), groups));
+        let texts = |options: &[&str]| {
+            ModelRc::new(VecModel::from(options.iter().map(|o| slint::SharedString::from(*o)).collect::<Vec<_>>()))
+        };
+        app.set_grid_kind(kind.into());
+        app.set_grid_sort_options(texts(sorts));
+        app.set_grid_group_options(texts(groups));
+        app.set_grid_sort(sort.as_str().into());
+        app.set_grid_group(group.as_str().into());
+        app.set_grid_can_create(kind == "playlists");
+        app.set_grid_filter_hint(format!("Filter {kind}").into());
+        app.set_filter_text("".into());
+        self.state.borrow_mut().grid = Grid { kind: kind.into(), sort, group, ..Default::default() };
         let cache_key = format!("cards:{key}");
         let cached: Vec<Card> =
             self.ctx.meta.get_json(&cache_key).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
@@ -2213,7 +2853,7 @@ impl Ui {
 
     fn open_track_menu(self: &Rc<Self>, id: &str, x: f32, y: f32) {
         let app = self.app();
-        if app.get_track_menu_open() || !app.get_logged_in() {
+        if app.get_menu_open() || !app.get_logged_in() {
             return;
         }
         let track = {
@@ -2230,33 +2870,40 @@ impl Ui {
             row.cover = app.get_np_cover();
         }
         self.state.borrow_mut().menu_track = Some(track);
+        app.set_menu_sub("".into());
+        app.set_menu_kind("track".into());
         let cover_url = row.cover_url.clone();
-        app.set_track_menu_track(row);
-        app.set_track_menu_x(x);
-        app.set_track_menu_y(y);
-        app.set_track_menu_open(true);
+        app.set_menu_track(row);
+        app.set_menu_x(x);
+        app.set_menu_y(y);
+        app.set_menu_open(true);
         if !cover_url.is_empty() {
             let id = id.to_owned();
             let weak = Rc::downgrade(self);
-            self.load_image(&sized_cover(&cover_url, 128), 128, move |image, _| {
+            // The stored URL is the 160px cover; TIDAL does not serve a 128px one.
+            self.load_image(&cover_url, 128, move |image, _| {
                 let Some(ui) = weak.upgrade() else { return };
                 let app = ui.app();
-                let mut row = app.get_track_menu_track();
-                if app.get_track_menu_open() && row.id == id {
+                let mut row = app.get_menu_track();
+                if app.get_menu_open() && row.id == id {
                     row.cover = image.clone();
-                    app.set_track_menu_track(row);
+                    app.set_menu_track(row);
                 }
             });
         }
     }
 
     fn copy_track_link(&self, id: &str) -> Result<(), arboard::Error> {
+        self.copy_link(&format!("https://tidal.com/track/{id}"))
+    }
+
+    fn copy_link(&self, url: &str) -> Result<(), arboard::Error> {
         let mut clipboard = self.clipboard.borrow_mut();
         if clipboard.is_none() {
             *clipboard = Some(arboard::Clipboard::new()?);
         }
         if let Some(clipboard) = clipboard.as_mut() {
-            clipboard.set_text(format!("https://tidal.com/track/{id}"))?;
+            clipboard.set_text(url.to_string())?;
         }
         Ok(())
     }
@@ -2269,7 +2916,11 @@ impl Ui {
             self.refresh_queue_page();
             return;
         }
+        self.queue_next(track);
+    }
 
+    /// Put `track` right after the one playing. Something must be playing or queued.
+    fn queue_next(self: &Rc<Self>, track: TrackItem) {
         // A stale prefetch can be downloading, waiting in the audio queue, or
         // already decoded. Cancel all three before changing the playback order.
         {
@@ -2281,6 +2932,7 @@ impl Ui {
             self.sync_gapless_transition();
         }
         self.state.borrow_mut().insert_next(track);
+        self.persist_queue();
         self.refresh_queue_page();
     }
 
@@ -2434,6 +3086,7 @@ impl Ui {
         app.set_np_context(context.into());
         app.set_np_explicit(track.explicit);
         app.set_np_favorite(favorite);
+        app.set_duration_secs(track.duration_secs.max(0) as i32);
         app.set_total(fmt_time(track.duration_secs as u64).into());
         app.set_elapsed("0:00".into());
         app.set_progress(0.0);
@@ -2484,7 +3137,8 @@ impl Ui {
         let Some(format) = self.ctx.player.format_info() else { return };
         let khz = format.sample_rate as f32 / 1000.0;
         if format.bits_per_sample == 0 {
-            app.set_quality_label("High".into());
+            // Lossy streams only come from the "Low" tier, which is AAC 320 kbps.
+            app.set_quality_label("AAC 320kbps".into());
             app.set_quality_tier("high".into());
         } else {
             app.set_quality_label(format!("{}-bit {khz}kHz", format.bits_per_sample).into());
@@ -2530,6 +3184,11 @@ impl Ui {
 
     /// Stop what is playing and start the current queue entry from the top.
     fn start_current(self: &Rc<Self>) {
+        self.start_current_at(Duration::ZERO);
+    }
+
+    /// Stop what is playing and start the current queue entry at `start_at`.
+    fn start_current_at(self: &Rc<Self>, start_at: Duration) {
         let Some(track) = self.current_track() else { return };
         let generation = self.ctx.play_gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.ctx.player.pause();
@@ -2592,18 +3251,22 @@ impl Ui {
                     st.loading_track = false;
                     st.last_serial = ui.ctx.player.track_serial();
                 }
+                let total_buffering_ms = t_buffering_start.elapsed().as_millis();
                 let app = ui.app();
                 app.set_buffering(false);
                 match result {
                     Ok(()) => {
+                        tracing::info!(track_id = %track.id, total_buffering_ms, "Buffering complete, playback starting");
                         app.set_playing(true);
                         ui.present_format();
+                        let elapsed = ui.ctx.player.elapsed();
                         ui.ctx.with_media(|m| {
-                            let _ = m.set_playback_state(true, Some(Duration::ZERO));
+                            let _ = m.set_playback_state(true, Some(elapsed));
                         });
+                        ui.persist_cursor();
                     }
                     Err(e) => {
-                        tracing::error!("Could not play {}: {e}", track.title);
+                        tracing::error!(track_id = %track.id, total_buffering_ms, "Could not play {}: {e}", track.title);
                         app.set_np_artist(format!("Couldn't play this track ({e})").into());
                     }
                 }
@@ -2620,7 +3283,12 @@ impl Ui {
             player.pause();
         } else if player.is_finished() || player.current_id().is_none() {
             if self.current_track().is_some() {
-                self.start_current();
+                let start_at = if player.is_finished() {
+                    Duration::ZERO
+                } else {
+                    self.state.borrow_mut().pending_seek.take().unwrap_or(Duration::ZERO)
+                };
+                self.start_current_at(start_at);
             } else {
                 // Nothing queued yet: start the list on screen.
                 self.play_all(false);
@@ -2635,12 +3303,18 @@ impl Ui {
         self.ctx.with_media(|m| {
             let _ = m.set_playback_state(playing, Some(elapsed));
         });
+        self.persist_cursor();
     }
 
     fn skip(self: &Rc<Self>, _delta: i32, manual: bool) {
         match self.following(!manual) {
             Some(next) => {
-                self.state.borrow_mut().pos = next;
+                {
+                    let mut st = self.state.borrow_mut();
+                    st.pos = next;
+                    st.pending_seek = None;
+                }
+                self.persist_cursor();
                 self.start_current();
             }
             None => {
@@ -2649,30 +3323,48 @@ impl Ui {
                 self.ctx.with_media(|m| {
                     let _ = m.set_playback_state(false, Some(Duration::ZERO));
                 });
+                self.persist_cursor();
             }
         }
     }
 
     fn previous(self: &Rc<Self>) {
-        if self.ctx.player.elapsed() > Duration::from_secs(3) || self.state.borrow().pos == 0 {
+        if self.effective_elapsed() > Duration::from_secs(3) || self.state.borrow().pos == 0 {
             self.seek(0.0);
             return;
         }
-        self.state.borrow_mut().pos -= 1;
+        {
+            let mut st = self.state.borrow_mut();
+            st.pos -= 1;
+            st.pending_seek = None;
+        }
+        self.persist_cursor();
         self.start_current();
     }
 
     fn seek(self: &Rc<Self>, fraction: f32) {
         let Some(track) = self.current_track() else { return };
-        let to = Duration::from_secs_f32(track.duration_secs as f32 * fraction.clamp(0.0, 1.0));
+        let clamped = fraction.clamp(0.0, 1.0);
+        let to = Duration::from_secs_f32(track.duration_secs as f32 * clamped);
         if self.ctx.player.seek(to) {
             let app = self.app();
-            app.set_progress(fraction);
+            app.set_progress(clamped);
             app.set_elapsed(fmt_time(to.as_secs()).into());
             let playing = self.ctx.player.is_playing();
             self.ctx.with_media(|m| {
                 let _ = m.set_playback_state(playing, Some(to));
             });
+            self.persist_cursor();
+        } else if self.ctx.player.current_id().is_none() {
+            // Audio isn't open yet (e.g. restored session while paused): stage the new offset.
+            self.state.borrow_mut().pending_seek = Some(to);
+            let app = self.app();
+            app.set_progress(clamped);
+            app.set_elapsed(fmt_time(to.as_secs()).into());
+            self.ctx.with_media(|m| {
+                let _ = m.set_playback_state(false, Some(to));
+            });
+            self.persist_cursor();
         }
     }
 
@@ -2727,11 +3419,13 @@ impl Ui {
                 st.pos = current;
             }
             st.prefetched_for = None;
-            st.shuffle
+            (st.shuffle, st.order.clone())
         };
         // Whatever was pre-loaded for a gapless hand-over is no longer "next".
         self.ctx.player.clear_queue();
         self.app().set_shuffle(shuffle);
+        let _ = self.ctx.meta.update_playback_order(&order, self.current_cursor());
+        self.refresh_queue_page();
     }
 
     fn cycle_repeat(&self) {
@@ -2743,6 +3437,7 @@ impl Ui {
         };
         self.ctx.player.clear_queue();
         self.app().set_repeat_mode(mode);
+        self.persist_cursor();
     }
 
     /// Called ~4x a second: progress, gapless prefetch and end-of-track handling.
@@ -2789,6 +3484,10 @@ impl Ui {
             self.skip(1, false);
             return;
         }
+        if player.current_id().is_none() {
+            // Restored session before audio has been opened: keep the saved elapsed/scrubber untouched.
+            return;
+        }
 
         let Some(track) = self.current_track() else { return };
         let elapsed = player.elapsed();
@@ -2796,6 +3495,9 @@ impl Ui {
         app.set_playing(player.is_playing());
         app.set_elapsed(fmt_time(elapsed.as_secs().min(total.as_secs())).into());
         app.set_progress((elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0));
+        if player.is_playing() && save_tick {
+            self.persist_cursor();
+        }
 
         if player.is_playing() && total.saturating_sub(elapsed) < PREFETCH_BEFORE_END {
             self.prefetch_next();
@@ -2826,6 +3528,8 @@ impl Ui {
             if let Some(track) = self.current_track() {
                 let _ = self.ctx.meta.record_play(&track.id);
             }
+            self.persist_cursor();
+            self.refresh_queue_page();
         }
     }
 
@@ -2846,8 +3550,10 @@ impl Ui {
         let st = self.state.borrow();
         let Some(track) = next.and_then(|p| st.order.get(p)).and_then(|i| st.queue.get(*i)).cloned() else { return };
         drop(st);
+        // Full fetch, no debug UI: progressive `.tmp` enqueue would end the next
+        // track early the same way, and chunk callbacks would stack on the panel.
         self.spawn(|ctx| async move {
-            match ctx.resolve_audio(&track.id).await {
+            match ctx.resolve_audio_for(&track.id, false).await {
                 Ok(path) if ctx.play_gen.load(Ordering::SeqCst) == generation => {
                     let revision_guard = ctx.next_revision.lock().unwrap();
                     if *revision_guard != revision
@@ -3001,7 +3707,7 @@ impl Ui {
                     ui.app().set_lyrics(ModelRc::from(Rc::new(VecModel::from(lines))));
                 }
                 ui.state.borrow_mut().lyrics = lyrics;
-                ui.update_lyric_line(ui.ctx.player.elapsed());
+                ui.update_lyric_line(ui.effective_elapsed());
             });
         });
     }
@@ -3073,16 +3779,21 @@ impl Ui {
     }
 
     fn logout(self: &Rc<Self>) {
-        self.app().set_track_menu_open(false);
+        self.app().set_menu_open(false);
         self.ctx.play_gen.fetch_add(1, Ordering::SeqCst);
         self.ctx.player.pause();
         self.ctx.player.clear_queue();
         *self.ctx.api.write().unwrap() = None;
         let _ = self.ctx.meta.clear_json();
+        let _ = self.ctx.meta.clear_playback_state();
         *self.state.borrow_mut() = State { volume_before_mute: 1.0, ..Default::default() };
         let app = self.app();
         app.set_logged_in(false);
         app.set_has_track(false);
+        app.set_duration_secs(0);
+        app.set_progress(0.0);
+        app.set_elapsed("0:00".into());
+        app.set_total("0:00".into());
         app.set_playing(false);
         app.set_current_id("".into());
         app.set_user_code("".into());
@@ -3130,8 +3841,20 @@ impl Ui {
             (4000, "03-mixes", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("playlists"))),
             (4000, "04-playlists", Box::new(|_| {})),
+            (200, "", Box::new(|ui| {
+                let cards = ui.app().get_grid_cards();
+                if let Some(card) = cards.iter().find(|c| c.kind == "playlist") {
+                    ui.open_card(card);
+                }
+            })),
+            (4000, "04a-playlist-detail", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.navigate_key("profiles"))),
+            (4000, "04b-profiles", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("albums"))),
             (4000, "05-albums", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.set_grid_arrangement(None, Some("Artist".into())))),
+            (1500, "05b-albums-by-artist", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.set_grid_arrangement(None, Some("None".into())))),
             (
                 200,
                 "",
@@ -3143,6 +3866,40 @@ impl Ui {
                 }),
             ),
             (4000, "06-album-detail", Box::new(|_| {})),
+            (200, "", Box::new(|ui| ui.app().set_scroll_y(-520.0))),
+            (2500, "06-album-footer", Box::new(|_| {})),
+            (200, "", Box::new(|ui| {
+                ui.app().set_scroll_y(0.0);
+                ui.app().set_debug_open(true);
+                tracing::error!(track_id = 1, "Snapshot tour: sample error alert");
+            })),
+            (800, "06-debug-panel", Box::new(|_| {})),
+            // The shared context menu: on the album (More), then on a track.
+            (200, "", Box::new(|ui| {
+                ui.app().set_debug_open(false);
+                ui.app().set_alert_text("".into());
+                let card = ui.app().get_page_card();
+                ui.open_card_menu(card, 900.0, 300.0);
+            })),
+            (1500, "06-menu-album", Box::new(|_| {})),
+            (100, "", Box::new(|ui| ui.app().set_menu_sub("playlists".into()))),
+            (500, "06-menu-album-playlists", Box::new(|_| {})),
+            (200, "", Box::new(|ui| {
+                ui.app().set_menu_open(false);
+                let id = ui.state.borrow().page_tracks.first().map(|t| t.id.clone());
+                if let Some(id) = id {
+                    ui.open_track_menu(&id, 700.0, 380.0);
+                }
+            })),
+            (1000, "06-menu-track", Box::new(|_| {})),
+            (100, "", Box::new(|ui| ui.app().set_menu_open(false))),
+            (200, "", Box::new(|ui| {
+                ui.app().set_debug_open(false);
+                ui.app().set_alert_text("".into());
+                ui.app().set_create_kind("playlist".into());
+            })),
+            (600, "06-create-dialog", Box::new(|_| {})),
+            (100, "", Box::new(|ui| ui.app().set_create_kind("".into()))),
             (200, "", Box::new(|ui| {
                 let app = ui.app();
                 let artist = app.get_page_artist();
@@ -3162,10 +3919,10 @@ impl Ui {
             // Back / forward panes: caught mid-flight, held by a swipe, and settled.
             (200, "", Box::new(|ui| ui.app().set_scroll_y(-600.0))),
             (300, "", Box::new(|ui| ui.app().invoke_back())),
-            (150, "06c-back-midway", Box::new(|_| {})),
+            (75, "06c-back-midway", Box::new(|_| {})),
             (1500, "06d-back-arrived", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.app().invoke_forward())),
-            (150, "06e-forward-midway", Box::new(|_| {})),
+            (75, "06e-forward-midway", Box::new(|_| {})),
             // Should report scroll=-600: the page comes back where it was left.
             (1500, "06e2-forward-arrived", Box::new(|_| {})),
             (200, "06f-swipe-held", Box::new(|ui| {

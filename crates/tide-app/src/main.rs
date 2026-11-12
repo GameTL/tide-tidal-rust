@@ -124,6 +124,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             println!("  TIDE --search <query> Search Tidal catalog");
             println!("  TIDE --play <id>      Play track in MAX Hi-Res quality");
             println!("  TIDE --logout         Log out and clear session tokens");
+            println!("  TIDE --get <url> [k=v ...]  Print the JSON of a TIDAL API GET ({{me}} = user id)");
             println!("  TIDE --snapshot <dir> [--play]  UI self-test: render each view to PNG");
         }
         "--status" => {
@@ -206,6 +207,22 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("PKCE Login failed: {e}");
                 }
             }
+        }
+        // Developer probe: print the JSON of a GET against the TIDAL API.
+        "--get" => {
+            let Some(url) = args.get(2) else {
+                eprintln!("Usage: TIDE --get <url> [key=value ...]");
+                return Ok(());
+            };
+            let mut svc = TidalService::with_device_auth()?;
+            if !svc.load_session().await.unwrap_or(false) {
+                eprintln!("You are not logged in. Run `TIDE --login` first.");
+                return Ok(());
+            }
+            let api = svc.handle().ok_or("no credentials")?;
+            let url = url.replace("{me}", &api.user_id().to_string());
+            let params: Vec<(&str, &str)> = args[3..].iter().filter_map(|p| p.split_once('=')).collect();
+            println!("{}", serde_json::to_string_pretty(&api.get(&url, &params).await?)?);
         }
         "--logout" => {
             let mut svc = TidalService::with_device_auth()?;

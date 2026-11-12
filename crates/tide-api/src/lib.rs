@@ -7,7 +7,7 @@ use tidlers::client::models::search::config::{SearchConfig, SearchType};
 use tidlers::TidalClient;
 
 pub mod web;
-pub use web::{ApiHandle, Card, CatalogDetail, Lyrics, Section, StreamInfo};
+pub use web::{ApiHandle, Card, CatalogDetail, Credit, Lyrics, Section, StreamInfo};
 
 #[derive(Error, Debug)]
 pub enum ApiError {

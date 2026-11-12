@@ -1,8 +1,8 @@
 // Main content views.
 import { ScrollView } from "std-widgets.slint";
-import { TrackMenuButton } from "track-menu.slint";
+import { TrackMenuButton } from "context-menu.slint";
 import { MaxLogin } from "settings.slint";
-import { App, Theme, EditableInput, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, PillButton, DragArea } from "common.slint";
+import { App, Theme, EditableInput, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, TitleWithQuality, PillButton, DragArea, MenuPanel, MenuRow, CreateButton } from "common.slint";
 
 // ---------------------------------------------------------------- cards
 
@@ -11,6 +11,11 @@ component MediaCard inherits Rectangle {
     height: self.width + 76px;
     ta := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             App.open-card(root.card);
         }
@@ -25,7 +30,7 @@ component MediaCard inherits Rectangle {
         opacity: ta.has-hover ? 0.8 : 1.0;
     }
 
-    Text {
+    if card.kind == "artist": Text {
         x: 0;
         y: root.width + 12px;
         width: root.width;
@@ -34,7 +39,19 @@ component MediaCard inherits Rectangle {
         font-size: 15px;
         font-weight: 500;
         overflow: elide;
-        horizontal-alignment: card.kind == "artist" ? center : left;
+        horizontal-alignment: center;
+    }
+
+    if card.kind != "artist": TitleWithQuality {
+        x: 0;
+        y: root.width + 12px;
+        width: root.width;
+        height: 20px;
+        title: card.title;
+        // Grid / carousel: Max only — High / Low / Lossless stay on the album page.
+        quality: card.kind == "album" && card.quality == "MAX" ? card.quality : "";
+        font-size: 15px;
+        font-weight: Theme.medium;
     }
 
     Text {
@@ -62,6 +79,11 @@ component RowCard inherits Rectangle {
     background: tile ? (ta.has-hover ? #1e1e1e : Theme.surface) : (ta.has-hover ? #111111 : transparent);
     ta := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             App.open-card(root.card);
         }
@@ -80,12 +102,12 @@ component RowCard inherits Rectangle {
         width: root.width - self.x - 12px;
         alignment: center;
         spacing: 3px;
-        Text {
-            text: card.title;
-            color: Theme.text;
+        TitleWithQuality {
+            height: tile ? 18px : 20px;
+            title: card.title;
+            quality: card.kind == "album" && card.quality == "MAX" ? card.quality : "";
             font-size: tile ? 13.5px : 15px;
-            font-weight: tile ? 600 : 500;
-            overflow: elide;
+            font-weight: tile ? Theme.demibold : Theme.medium;
         }
 
         if card.subtitle != "": Text {
@@ -669,14 +691,50 @@ component TrackPlaceholder inherits Rectangle {
     }
 }
 
+// Icon over a label: the album page's Add / Credits / Share / More.
+component ActionButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    callback clicked();
+    width: 64px;
+    height: 58px;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Icon {
+        y: 4px;
+        source: root.icon;
+        size: 22px;
+        tint: Theme.text;
+        opacity: ta.has-hover ? 1.0 : 0.85;
+    }
+
+    Text {
+        y: 38px;
+        width: root.width;
+        text: root.label;
+        color: Theme.text;
+        font-size: 12px;
+        font-weight: Theme.demibold;
+        horizontal-alignment: center;
+    }
+
+    @children
+}
+
 export component TracksView inherits Rectangle {
     property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 89px);
     property <length> w: self.width - 2 * pad;
     property <bool> album-page: App.view == "album";
     property <bool> artist-page: App.view == "artist";
     property <bool> about: artist-page && App.artist-tab == 2;
+    property <bool> music-tab: artist-page && App.artist-tab == 1;
     property <bool> track-placeholders: artist-page && !about && App.loading && App.tracks.length < 5;
-    property <int> row-count: artist-page ? (about ? 0 : track-placeholders ? 5 : min(5, App.tracks.length)) : App.tracks.length;
+    property <int> row-count: artist-page ? (about || music-tab ? 0 : track-placeholders ? 5 : min(5, App.tracks.length)) : App.tracks.length;
     property <bool> wide: w > 980px && !album-page;
     property <bool> show-bpm: wide && App.bpm-available && App.show-audio-metadata;
     property <bool> show-date: App.tracks-show-date && w > 760px;
@@ -715,7 +773,7 @@ export component TracksView inherits Rectangle {
     sv := ScrollView {
         content-y <=> App.scroll-y;
         content-width: root.width;
-        content-height: artist-page ? artist-content.y + artist-content.preferred-height + 32px
+        content-height: artist-page || album-page ? artist-content.y + artist-content.preferred-height + 48px
             : header-h + row-count * row-h + 48px;
         if artist-page || album-page: Rectangle {
             y: 0;
@@ -759,18 +817,38 @@ export component TracksView inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if has-cover && !artist-page: Text {
+        if album-page && App.page-artist.id != "": Cover {
             x: pad + cover-size + 32px;
+            y: y-title + cover-size * 0.23 + 46px;
+            width: 24px;
+            height: 24px;
+            source: App.page-artist.image;
+            round: true;
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { App.open-card(App.page-artist); }
+            }
+        }
+        if has-cover && !artist-page: Text {
+            property <bool> linked: album-page && App.page-artist.id != "";
+            x: pad + cover-size + 32px + (linked ? 34px : 0px);
             y: album-page ? y-title + cover-size * 0.23 + 48px : y-title + 124px;
             width: root.width - self.x - pad;
             text: App.page-subtitle;
-            color: album-page && App.page-artist.id != "" ? Theme.text : Theme.text-secondary;
+            color: linked ? Theme.text : Theme.text-secondary;
             font-size: 15px;
             font-weight: Theme.medium;
             overflow: elide;
-            TouchArea {
+            if linked && artist-link.has-hover: Rectangle {
+                x: 0;
+                y: parent.height - 1px;
+                width: artist-link.width;
+                height: 1px;
+                background: Theme.text;
+            }
+            artist-link := TouchArea {
                 width: min(parent.width, parent.preferred-width);
-                enabled: album-page && App.page-artist.id != "";
+                enabled: parent.linked;
                 mouse-cursor: pointer;
                 clicked => { App.open-card(App.page-artist); }
             }
@@ -798,10 +876,11 @@ export component TracksView inherits Rectangle {
                 }
                 if App.page-quality != "": Text {
                     text: App.page-quality;
-                    color: App.page-quality == "MAX" ? Theme.max : App.page-quality == "LOSSLESS" ? Theme.lossless : Theme.text-secondary;
+                    color: App.page-quality == "MAX" ? Theme.max : App.page-quality == "LOSSLESS" || App.page-quality == "HIGH" ? Theme.lossless : Theme.text-secondary;
                     font-size: 12px;
                     font-weight: Theme.bold;
                     letter-spacing: 1px;
+                    vertical-alignment: center;
                 }
             }
         }
@@ -864,6 +943,127 @@ export component TracksView inherits Rectangle {
         }
 
         if artist-page: Rectangle {
+            x: pad + 64px;
+            y: y-buttons + 6px;
+            width: follow-label.preferred-width + 36px;
+            height: 36px;
+            border-radius: 18px;
+            border-width: 1px;
+            border-color: follow.has-hover ? Theme.text : #6a6a6a;
+            background: App.page-favorite ? #ffffff1a : transparent;
+            follow-label := Text {
+                text: App.page-favorite ? "Following" : "Follow";
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: Theme.demibold;
+            }
+            follow := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { App.toggle-page-favorite(); }
+            }
+        }
+        // Add / Credits / Share / More, right of Play and Shuffle on album,
+        // playlist and mix pages.
+        if App.page-card.id != "": HorizontalLayout {
+            x: root.width - pad - self.width;
+            y: y-buttons - 2px;
+            width: self.preferred-width;
+            height: 58px;
+            spacing: 12px;
+            if App.page-can-favorite: ActionButton {
+                icon: App.page-favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+                label: App.page-favorite ? "Added" : "Add";
+                clicked => { App.toggle-page-favorite(); }
+            }
+            // Wrapped: a popup on the root of a conditional element crashes the Slint 1.18 compiler.
+            if album-page: HorizontalLayout {
+                ActionButton {
+                    icon: @image-url("icons/info.svg");
+                    label: "Credits";
+                    clicked => {
+                        App.page-action("credits", "");
+                        credits-pop.show();
+                    }
+                    credits-pop := PopupWindow {
+                        x: parent.width - 340px;
+                        y: parent.height + 6px;
+                        width: 340px;
+                        height: min(420px, credits-list.preferred-height + 62px);
+                        MenuPanel {
+                            Text {
+                                height: 38px;
+                                text: "  Credits";
+                                color: Theme.text;
+                                font-size: 17px;
+                                font-weight: Theme.bold;
+                                vertical-alignment: center;
+                            }
+
+                            ScrollView {
+                                credits-list := VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 8px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    if App.page-credits.length == 0: Text {
+                                        text: App.page-credits-status;
+                                        color: Theme.text-secondary;
+                                        font-size: 14px;
+                                    }
+                                    for credit in App.page-credits: VerticalLayout {
+                                        spacing: 2px;
+                                        Text {
+                                            text: credit.role;
+                                            color: Theme.text-secondary;
+                                            font-size: 12px;
+                                            font-weight: Theme.medium;
+                                        }
+
+                                        Text {
+                                            text: credit.names;
+                                            color: Theme.text;
+                                            font-size: 14px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            ActionButton {
+                icon: @image-url("icons/share.svg");
+                label: "Share";
+                clicked => { share-pop.show(); }
+                share-pop := PopupWindow {
+                    x: parent.width - 240px;
+                    y: parent.height + 6px;
+                    width: 240px;
+                    MenuPanel {
+                        MenuRow {
+                            label: "Copy link";
+                            icon: @image-url("icons/link.svg");
+                            has-icon: true;
+                            activated => { App.page-action("copy-link", ""); }
+                        }
+                    }
+                }
+            }
+
+            // The same menu a right-click on this album or playlist opens.
+            ActionButton {
+                icon: @image-url("icons/more.svg");
+                label: "More";
+                clicked => {
+                    App.request-card-menu(App.page-card, self.absolute-position.x + self.width - 300px, self.absolute-position.y + self.height + 6px);
+                }
+            }
+        }
+
+        if artist-page: Rectangle {
             x: pad;
             y: y-tabs;
             width: w;
@@ -897,7 +1097,7 @@ export component TracksView inherits Rectangle {
                 }
             }
         }
-        if artist-page && !about: SectionHeader {
+        if artist-page && !about && !music-tab: SectionHeader {
             x: pad;
             y: y-top-tracks;
             width: w;
@@ -1027,19 +1227,74 @@ export component TracksView inherits Rectangle {
         }
         artist-content := VerticalLayout {
             x: pad;
-            y: about ? y-tabs + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
+            y: about || music-tab ? y-tabs + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
             width: w;
             height: self.preferred-height;
             spacing: 16px;
-            if artist-page && !about && App.artist-albums.length > 0: Carousel {
+            if album-page && App.page-release-line != "": VerticalLayout {
+                padding-top: 4px;
+                padding-bottom: 46px;
+                spacing: 6px;
+                Text {
+                    text: App.page-release-line;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: Theme.demibold;
+                    letter-spacing: 1.4px;
+                }
+
+                if App.page-copyright != "": Text {
+                    text: App.page-copyright;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: Theme.demibold;
+                    letter-spacing: 1.4px;
+                    wrap: word-wrap;
+                }
+            }
+            if album-page && App.artist-albums.length > 0: Carousel {
+                section: { title: "More Albums by " + App.page-artist.title, cards: App.artist-albums };
+                view-all: false;
+                request-art(from, upto) => { App.artist-release-art(false, from, upto); }
+            }
+            if album-page && App.related-artists.length > 0: Carousel {
+                section: { title: "Related Artists", cards: App.related-artists };
+                view-all: false;
+                request-art(from, upto) => { App.related-art(from, upto); }
+            }
+            if music-tab: VerticalLayout {
+                spacing: 0px;
+                SectionHeader {
+                    title: "Albums";
+                    view-all: false;
+                }
+                for card in App.artist-albums: RowCard {
+                    width: parent.width;
+                    card: card;
+                }
+                if App.artist-singles.length > 0: SectionHeader {
+                    title: "EPs & Singles";
+                    view-all: false;
+                }
+                for card in App.artist-singles: RowCard {
+                    width: parent.width;
+                    card: card;
+                }
+            }
+            if artist-page && !about && !music-tab && App.artist-albums.length > 0: Carousel {
                 section: { title: "Albums", cards: App.artist-albums };
                 view-all: false;
                 request-art(from, upto) => { App.artist-release-art(false, from, upto); }
             }
-            if artist-page && !about && App.artist-singles.length > 0: Carousel {
+            if artist-page && !about && !music-tab && App.artist-singles.length > 0: Carousel {
                 section: { title: "EPs & Singles", cards: App.artist-singles };
                 view-all: false;
                 request-art(from, upto) => { App.artist-release-art(true, from, upto); }
+            }
+            if artist-page && !about && !music-tab && App.related-artists.length > 0: Carousel {
+                section: { title: "Related Artists", cards: App.related-artists };
+                view-all: false;
+                request-art(from, upto) => { App.related-art(from, upto); }
             }
             if artist-page && App.artist-tab != 1 && (about || App.page-biography != ""): VerticalLayout {
                 spacing: 12px;
@@ -1061,53 +1316,213 @@ export component TracksView inherits Rectangle {
 
 // ---------------------------------------------------------------- card grid
 
+// Round header button that opens a list of choices (sort by / group by).
+component ChoiceButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> heading;
+    in property <[string]> options;
+    in property <string> current;
+    in property <bool> highlighted: false;
+    callback chosen(string);
+    width: 34px;
+    height: 34px;
+    border-radius: 17px;
+    background: ta.has-hover ? #1e1e1e : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            pop.show();
+        }
+    }
+
+    Icon {
+        source: root.icon;
+        size: 18px;
+        tint: root.highlighted ? Theme.lossless : ta.has-hover ? Theme.text : Theme.text-secondary;
+    }
+
+    pop := PopupWindow {
+        x: 0px;
+        y: root.height + 6px;
+        width: 260px;
+        MenuPanel {
+            Text {
+                height: 30px;
+                text: "   " + root.heading;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                font-weight: Theme.demibold;
+                letter-spacing: 0.8px;
+                vertical-alignment: center;
+            }
+
+            for option in root.options: MenuRow {
+                label: option;
+                checked: option == root.current;
+                activated => {
+                    root.chosen(option);
+                }
+            }
+        }
+    }
+}
+
 export component GridView inherits Rectangle {
     property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 90px);
     property <length> w: self.width - 2 * pad;
     property <length> gap: 18px;
     property <int> cols: max(2, floor((w + gap) / (236px + gap)));
     property <length> card-w: (w - (cols - 1) * gap) / cols;
-    property <length> cell-h: card-w + 76px + 64px;
+    // Profiles have no subtitle line under the name.
+    property <length> cell-h: card-w + (App.grid-kind == "profiles" ? 40px : 76px) + 64px;
     ScrollView {
         content-y <=> App.scroll-y;
-        content-width: root.width;
-        content-height: 82px + ceil(App.grid-cards.length / cols) * cell-h + 24px;
-        HorizontalLayout {
-            x: pad;
-            y: 8px;
-            height: 38px;
-            width: self.preferred-width;
-            spacing: 22px;
-            Text {
-                text: App.page-title;
-                color: Theme.text;
-                font-size: 28px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
+        VerticalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-top: 8px;
+            padding-bottom: 24px;
+            spacing: 0px;
+            alignment: start;
+            Rectangle {
+                height: 38px;
+                HorizontalLayout {
+                    x: 0px;
+                    width: self.preferred-width;
+                    spacing: 6px;
+                    Text {
+                        text: App.page-title;
+                        color: Theme.text;
+                        font-size: 28px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
 
-            VerticalLayout {
-                alignment: center;
-                Icon {
-                    source: @image-url("icons/more.svg");
-                    size: 22px;
-                    tint: Theme.text-secondary;
+                    Rectangle {
+                        width: 10px;
+                    }
+
+                    if App.grid-sort-options.length > 0: VerticalLayout {
+                        alignment: center;
+                        ChoiceButton {
+                            icon: @image-url("icons/sort.svg");
+                            heading: "SORT BY";
+                            options: App.grid-sort-options;
+                            current: App.grid-sort;
+                            chosen(option) => { App.set-grid-sort(option); }
+                        }
+                    }
+                    if App.grid-group-options.length > 0: VerticalLayout {
+                        alignment: center;
+                        ChoiceButton {
+                            icon: @image-url("icons/group.svg");
+                            heading: "GROUP BY";
+                            options: App.grid-group-options;
+                            current: App.grid-group;
+                            highlighted: App.grid-group != "None";
+                            chosen(option) => { App.set-grid-group(option); }
+                        }
+                    }
+                    if App.grid-can-create: VerticalLayout {
+                        alignment: center;
+                        CreateButton {
+                            size: 18px;
+                        }
+                    }
                 }
             }
-        }
 
-        for card[i] in App.grid-cards: MediaCard {
-            x: pad + mod(i, cols) * (card-w + gap);
-            y: 82px + floor(i / cols) * cell-h;
-            width: card-w;
-            card: card;
-        }
-        if App.grid-cards.length == 0: Text {
-            x: pad;
-            y: 100px;
-            text: App.loading ? "Loading…" : "Nothing here yet";
-            color: Theme.text-secondary;
-            font-size: 15px;
+            Rectangle {
+                height: 26px;
+            }
+
+            Rectangle {
+                height: 44px;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: filter.has-focus ? #3a3a3a : Theme.border;
+                Icon {
+                    x: 16px;
+                    source: @image-url("icons/search.svg");
+                    size: 16px;
+                }
+
+                if filter.text == "": Text {
+                    x: 49px;
+                    text: App.grid-filter-hint;
+                    color: #aeafb2;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                }
+                filter := EditableInput {
+                    x: 49px;
+                    width: parent.width - 65px;
+                    height: 20px;
+                    text <=> App.filter-text;
+                    color: Theme.text;
+                    font-size: 15px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    selection-background-color: #4a4a4a;
+                    edited => {
+                        App.filter(self.text);
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 36px;
+            }
+
+            if App.grid-cards.length == 0: Text {
+                text: App.loading ? "Loading…" : App.filter-text != "" ? "Nothing matches “" + App.filter-text + "”" : "Nothing here yet";
+                color: Theme.text-secondary;
+                font-size: 15px;
+            }
+            for group in App.grid-groups: VerticalLayout {
+                // Group header in the style of a library "group by" view:
+                // a rule, the group name and how many items it holds.
+                if group.title != "": Rectangle {
+                    height: 58px;
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: #1f1f1f;
+                    }
+
+                    Text {
+                        x: 0px;
+                        y: 14px;
+                        width: parent.width - 120px;
+                        text: group.title;
+                        color: Theme.text;
+                        font-size: 20px;
+                        font-weight: Theme.bold;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        x: parent.width - 120px;
+                        y: 20px;
+                        width: 120px;
+                        text: group.cards.length + (group.cards.length == 1 ? " ITEM" : " ITEMS");
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: Theme.demibold;
+                        letter-spacing: 1px;
+                        horizontal-alignment: right;
+                    }
+                }
+                Rectangle {
+                    height: ceil(group.cards.length / root.cols) * root.cell-h - (group.title != "" ? 28px : 0px);
+                    for card[i] in group.cards: MediaCard {
+                        x: mod(i, root.cols) * (root.card-w + root.gap);
+                        y: floor(i / root.cols) * root.cell-h;
+                        width: root.card-w;
+                        card: card;
+                    }
+                }
+            }
         }
     }
 }

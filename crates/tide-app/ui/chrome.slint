@@ -1,7 +1,7 @@
 // Window chrome: sidebar, top bar and the bottom player bar.
-import { TrackMenuButton } from "track-menu.slint";
+import { TrackMenuButton } from "context-menu.slint";
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Icon, IconButton, CircleButton, Cover, CardArt, CardData, ExplicitBadge, Slider, DragArea } from "common.slint";
+import { CreateButton, App, Theme, EditableInput, Icon, IconButton, CircleButton, Cover, CardArt, CardData, ExplicitBadge, Slider, DragArea, Toggle } from "common.slint";
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -44,6 +44,11 @@ component SidebarPlaylist inherits Rectangle {
     height: 57px;
     ta := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             App.open-card(root.card);
         }
@@ -196,6 +201,11 @@ export component Sidebar inherits Rectangle {
                     color: Theme.text-dim;
                     font-size: 15px;
                     font-weight: Theme.medium;
+                }
+
+                CreateButton {
+                    x: parent.width - 70px;
+                    y: 18px;
                 }
 
                 IconButton {
@@ -543,25 +553,30 @@ export component TopBar inherits Rectangle {
         height: 39px;
         border-radius: 19.5px;
         background: Theme.pill;
+        // Chevron size, weight, spacing and colours measured from the official client.
         HorizontalLayout {
-            padding-left: 4px;
-            padding-right: 4px;
             alignment: center;
             IconButton {
-                icon: @image-url("icons/chevron-left.svg");
-                size: 18px;
+                width: 38px;
+                height: 39px;
+                icon: @image-url("icons/nav-back.svg");
+                size: 24px;
                 enabled: App.can-go-back;
-                tint: Theme.text;
+                tint: #f0f0f0;
+                disabled-tint: #404040;
                 clicked => {
                     App.back();
                 }
             }
 
             IconButton {
-                icon: @image-url("icons/chevron-right.svg");
-                size: 18px;
+                width: 38px;
+                height: 39px;
+                icon: @image-url("icons/nav-forward.svg");
+                size: 24px;
                 enabled: App.can-go-forward;
-                tint: Theme.text;
+                tint: #f0f0f0;
+                disabled-tint: #404040;
                 clicked => {
                     App.forward();
                 }
@@ -569,11 +584,11 @@ export component TopBar inherits Rectangle {
         }
     }
 
-    // Search
+    // Search. Right edge sits left of the debug circle.
     Rectangle {
-        x: parent.width - 66px - self.width;
-        y: 13px;
-        width: min(306px, parent.width - 190px);
+        x: parent.width - 101px - self.width;
+        y: (parent.height - self.height) / 2;
+        width: min(306px, parent.width - 220px);
         height: 39px;
         border-radius: 19.5px;
         background: Theme.pill;
@@ -581,6 +596,7 @@ export component TopBar inherits Rectangle {
         border-color: #3a3a3a;
         Icon {
             x: 14px;
+            y: (parent.height - self.height) / 2;
             source: @image-url("icons/search.svg");
             size: 15px;
             tint: Theme.text-secondary;
@@ -588,6 +604,8 @@ export component TopBar inherits Rectangle {
 
         if input.text == "": Text {
             x: 48px;
+            y: 0px;
+            height: parent.height;
             text: "Search";
             color: Theme.text-secondary;
             font-size: 15px;
@@ -595,6 +613,7 @@ export component TopBar inherits Rectangle {
         }
         input := EditableInput {
             x: 48px;
+            y: (parent.height - self.height) / 2;
             width: parent.width - 48px - 40px;
             height: 20px;
             text <=> App.search-text;
@@ -616,6 +635,7 @@ export component TopBar inherits Rectangle {
 
         if input.text != "": IconButton {
             x: parent.width - 40px;
+            y: (parent.height - self.height) / 2;
             icon: @image-url("icons/x.svg");
             size: 15px;
             tint: Theme.text;
@@ -668,6 +688,8 @@ export component TopBar inherits Rectangle {
         }
 
         Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
             source: @image-url("icons/user.svg");
             size: 18px;
         }
@@ -751,16 +773,48 @@ export component TopBar inherits Rectangle {
     }
 }
 
+// Inset "LCD" pill, as in the official client: black rim, a highlight under the
+// lower edge, and a glow in the quality colour rising from the bottom centre.
 component QualityPill inherits Rectangle {
     callback clicked();
-    width: 132px;
-    height: 43px;
-    border-radius: 21.5px;
-    background: #050505;
-    border-width: 1px;
-    border-color: #2b2b2b;
-    drop-shadow-blur: App.has-track ? 14px : 0px;
-    drop-shadow-color: App.accent.with-alpha(0.12);
+    property <color> tone: App.quality-tier == "lossless" ? #19d8a7 : App.accent;
+    property <color> top: root.tone.mix(#141818, 0.04);
+    width: 133px;
+    height: 45px;
+    Rectangle {
+        y: 1px;
+        height: 44px;
+        border-radius: 22px;
+        background: #383838;
+    }
+
+    Rectangle {
+        y: 0px;
+        height: 44px;
+        border-radius: 22px;
+        background: black;
+        Rectangle {
+            x: 1.5px;
+            y: 1.5px;
+            width: parent.width - 3px;
+            height: parent.height - 3px;
+            border-radius: self.height / 2;
+            background: #0c1010;
+            clip: true;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height * 0.75 - self.height / 2;
+                width: 150px;
+                height: 150px;
+                background: @radial-gradient(circle, root.tone.mix(#0c1010, 0.2) 0%, #0c101000 50%);
+            }
+
+            Rectangle {
+                background: @linear-gradient(180deg, root.top 0%, root.top.with-alpha(0) 60%);
+            }
+        }
+    }
+
     TouchArea {
         mouse-cursor: pointer;
         clicked => {
@@ -769,20 +823,22 @@ component QualityPill inherits Rectangle {
     }
 
     HorizontalLayout {
+        y: 0px;
+        height: 44px;
         alignment: center;
-        spacing: 6px;
-        // Signal-path indicator: gold = bit-perfect hi-res, blue = bit-perfect lossless, green = processed, white = lossy.
+        spacing: 5px;
+        // Signal-path indicator: gold = bit-perfect hi-res, cyan = bit-perfect lossless, green = processed, white = lossy.
         if App.signal-quality != "": VerticalLayout {
             alignment: center;
             Icon {
                 source: @image-url("icons/sparkle.svg");
-                size: 11px;
+                size: 10px;
                 tint: App.signal-color(App.signal-quality);
             }
         }
         Text {
             text: App.quality-label;
-            color: App.accent;
+            color: root.tone;
             font-size: 13px;
             font-weight: 500;
             vertical-alignment: center;
@@ -1116,6 +1172,128 @@ component ArtistCard inherits Rectangle {
     }
 }
 
+// TIDAL-style playback scrubber: thin muted hairline when idle; expands on hover/drag
+// with a cursor preview shade, quality-accent fill + thumb, live scrubbed timestamp,
+// and clickable total / remaining duration toggle.
+component Scrubber inherits Rectangle {
+    in property <length> bar-w;
+    callback seek(float);
+
+    property <bool> active: App.has-track && (ta.has-hover || ta.pressed);
+    property <float> drag: 0.0;
+    property <float> hover-frac: 0.0;
+    property <float> shown: ta.pressed ? root.drag : clamp(App.progress, 0.0, 1.0);
+    property <int> shown-secs: Math.round(root.shown * App.duration-secs);
+    property <length> track-h: root.active ? 4px : 2px;
+
+    height: 20px;
+
+    // Left timestamp: live scrubbed time in accent while dragging, elapsed otherwise.
+    Text {
+        x: (root.width - root.bar-w) / 2 - 14px - self.width;
+        y: (parent.height - self.height) / 2;
+        text: ta.pressed && App.duration-secs > 0 ? App.format-time(root.shown-secs) : App.elapsed;
+        color: ta.pressed ? App.accent : root.active ? Theme.text : #6e6e6e;
+        font-size: 12px;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+
+    // Track & interactive scrub bar
+    bar-area := Rectangle {
+        x: (root.width - root.bar-w) / 2;
+        y: 0px;
+        width: root.bar-w;
+        height: parent.height;
+
+        ta := TouchArea {
+            enabled: App.has-track;
+            mouse-cursor: App.has-track ? pointer : default;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                    root.drag = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                    root.hover-frac = root.drag;
+                } else if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                    root.seek(root.drag);
+                }
+            }
+            moved => {
+                root.hover-frac = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                if self.pressed {
+                    root.drag = root.hover-frac;
+                }
+            }
+        }
+
+        // Base track
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: parent.width;
+            height: root.track-h;
+            border-radius: self.height / 2;
+            background: root.active ? #383838 : #2e2e2e;
+            clip: true;
+            animate height, background { duration: 120ms; }
+
+            // Hover-position preview shade under cursor
+            if ta.has-hover && App.has-track: Rectangle {
+                x: 0px;
+                width: parent.width * root.hover-frac;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: #ffffff24;
+            }
+
+            // Played / scrubbed progress fill
+            Rectangle {
+                x: 0px;
+                width: parent.width * root.shown;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: root.active ? App.accent : #b3b3b3;
+                animate background { duration: 120ms; }
+            }
+        }
+
+        // Circular scrubber thumb
+        Rectangle {
+            x: clamp(parent.width * root.shown - self.width / 2, 0px, max(0px, parent.width - self.width));
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: App.accent;
+            opacity: root.active ? 1.0 : 0.0;
+            animate opacity { duration: 120ms; }
+        }
+    }
+
+    // Right timestamp: click to toggle total duration vs remaining time (-m:ss)
+    rem-label := Text {
+        x: (root.width + root.bar-w) / 2 + 14px;
+        y: (parent.height - self.height) / 2;
+        text: App.show-remaining && App.has-track && App.duration-secs > 0
+            ? "-" + App.format-time(max(0, App.duration-secs - root.shown-secs))
+            : App.total;
+        color: rem-ta.has-hover && App.has-track ? Theme.text : #6e6e6e;
+        font-size: 12px;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+
+    rem-ta := TouchArea {
+        x: rem-label.x - 4px;
+        y: 0px;
+        width: max(36px, rem-label.width + 8px);
+        height: parent.height;
+        enabled: App.has-track;
+        mouse-cursor: App.has-track ? pointer : default;
+        clicked => {
+            App.show-remaining = !App.show-remaining;
+        }
+    }
+}
+
 export component PlayerBar inherits Rectangle {
     in property <bool> overlay: false;
     height: 96px;
@@ -1321,36 +1499,15 @@ export component PlayerBar inherits Rectangle {
         }
     }
 
-    // Centre: timeline
-    property <length> bar-w: min(728px, root.width * 0.354);
-    Text {
-        x: (root.width - bar-w) / 2 - 16px - self.width;
-        y: 66px;
-        height: 16px;
-        text: App.elapsed;
-        color: #6e6e6e;
-        font-size: 12px;
-        vertical-alignment: center;
-    }
-
-    Slider {
-        x: (root.width - bar-w) / 2;
-        y: 66px;
-        width: bar-w;
-        value: App.progress;
-        changed(v) => {
+    // Centre: timeline scrubber
+    Scrubber {
+        x: 0px;
+        y: 64px;
+        width: root.width;
+        bar-w: min(728px, root.width * 0.354);
+        seek(v) => {
             App.seek(v);
         }
-    }
-
-    Text {
-        x: (root.width + bar-w) / 2 + 16px;
-        y: 66px;
-        height: 16px;
-        text: App.total;
-        color: #6e6e6e;
-        font-size: 12px;
-        vertical-alignment: center;
     }
 
     // Right: queue, output, volume, now playing, quality

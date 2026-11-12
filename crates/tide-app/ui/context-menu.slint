@@ -1,0 +1,423 @@
+import { App, Theme, TrackData, CardData, Cover, Icon } from "common.slint";
+
+// The one context menu of the window: right-click or "More" on a track, album,
+// playlist, mix or artist. The look is shared; the entries depend on what was
+// clicked (`App.menu-kind`). Anchors use window coordinates.
+
+// One trigger per track. Opens the menu for that track.
+export component TrackMenuButton inherits Rectangle {
+    in property <string> track-id;
+    property <string> opener;
+    width: 34px;
+    height: 34px;
+    accessible-role: button;
+    accessible-label: "Track options";
+    accessible-action-default => { root.open-menu(); }
+
+    public function open-at(x: length, y: length) {
+        if (!root.track-id.is-empty) {
+            root.opener = root.track-id;
+            trigger.focus();
+            App.request-track-menu(root.track-id, x, y);
+        }
+    }
+
+    function open-menu() {
+        root.open-at(self.absolute-position.x, self.absolute-position.y + self.height);
+    }
+
+    property <bool> menu-open: App.menu-open;
+    changed menu-open => {
+        if (!App.menu-open && !root.opener.is-empty) {
+            if (root.opener == root.track-id) {
+                trigger.focus();
+            }
+            root.opener = "";
+        }
+    }
+
+    trigger := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.open-menu();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open-menu(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.open-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+    Icon {
+        source: @image-url("icons/more.svg");
+        size: 18px;
+        tint: trigger.has-focus ? Theme.text : Theme.text-secondary;
+    }
+    background: area.has-hover ? #ffffff12 : transparent;
+    border-radius: 5px;
+    border-width: trigger.has-focus ? 1px : 0px;
+    border-color: Theme.text-secondary;
+}
+
+struct CtxItem {
+    id: string,
+    label: string,
+    icon: image,
+    available: bool,
+    // Name of the flyout this entry opens: "" | playlists | share.
+    flyout: string,
+}
+
+component MenuEntry inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> selected;
+    in property <bool> available: true;
+    in property <bool> flyout;
+    callback entered();
+    callback activate();
+    height: 44px;
+    border-radius: 8px;
+    background: selected && available ? #3d3d3d : transparent;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-enabled: available;
+    accessible-action-default => { if (root.available) { root.activate(); } }
+
+    area := TouchArea {
+        enabled: root.available;
+        mouse-cursor: pointer;
+        changed has-hover => { if (self.has-hover) { root.entered(); } }
+        clicked => { root.activate(); }
+    }
+    Icon {
+        x: 14px;
+        source: root.icon;
+        size: 18px;
+        tint: root.available ? Theme.text-secondary : Theme.text-dim;
+    }
+    Text {
+        x: 46px;
+        width: parent.width - 46px - 34px;
+        text: root.label;
+        color: root.available ? Theme.text : Theme.text-dim;
+        font-size: 15px;
+        font-weight: Theme.demibold;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    if flyout: Icon {
+        x: parent.width - 28px;
+        source: @image-url("icons/chevron-right.svg");
+        size: 16px;
+        tint: Theme.text-secondary;
+    }
+}
+
+component Surface inherits Rectangle {
+    background: #2d2d2d;
+    border-radius: 14px;
+    // Scrolling over the menu never reaches the page.
+    TouchArea { scroll-event(_) => { return accept; } }
+    @children
+}
+
+export component ContextMenu inherits Rectangle {
+    property <string> kind: App.menu-kind;
+    property <TrackData> track: App.menu-track;
+    property <CardData> card: App.menu-card;
+    property <bool> favorite: kind == "track" ? track.favorite : App.menu-favorite;
+    property <string> collection-label: favorite ? "Remove from My Collection" : "Add to My Collection";
+    property <image> collection-icon: favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+
+    property <[CtxItem]> items: kind == "track" ? [
+        { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
+        { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        { id: "favorite", label: collection-label, icon: collection-icon, available: true, flyout: "" },
+        { id: "album", label: "Go to album", icon: @image-url("icons/disc.svg"), available: !track.album-id.is-empty, flyout: "" },
+        { id: "artist", label: "Go to artist", icon: @image-url("icons/user.svg"), available: !track.artist-id.is-empty, flyout: "" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "album" ? [
+        { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
+        { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
+        { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        { id: "favorite", label: collection-label, icon: collection-icon, available: true, flyout: "" },
+        { id: "artist", label: "Go to artist", icon: @image-url("icons/user.svg"), available: true, flyout: "" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "playlist" ? [
+        { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
+        { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
+        { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        // The user's own playlists are always in the collection.
+        { id: "favorite", label: collection-label, icon: collection-icon, available: App.menu-can-favorite, flyout: "" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "mix" ? [
+        { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
+        { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
+        { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : [
+        { id: "open", label: "Go to artist", icon: @image-url("icons/user.svg"), available: true, flyout: "" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ];
+
+    property <int> selected: 0;
+    // The open flyout: "" | playlists | share.
+    property <string> sub <=> App.menu-sub;
+    // Entry of the flyout that has keyboard focus; -1 while the main list has it.
+    property <int> sub-selected: -1;
+    property <int> sub-count: sub == "playlists" ? App.own-playlists.length : sub == "share" ? 1 : 0;
+    // Main entry the flyout hangs off.
+    property <int> sub-anchor: 0;
+    property <length> margin: 8px;
+    property <length> row-h: 44px;
+    property <length> head-h: 76px;
+
+    init => {
+        root.sub = "";
+        keys.focus();
+    }
+
+    changed sub => {
+        if (root.sub == "") { root.sub-selected = -1; }
+    }
+
+    function dismiss() {
+        App.menu-open = false;
+    }
+
+    function step-selection(step: int) {
+        selected = mod(selected + step + items.length, items.length);
+    }
+
+    function move-selection(step: int) {
+        sub = "";
+        root.step-selection(step);
+        // Skip entries that are not available (never more than a few in a row).
+        if (!items[selected].available) { root.step-selection(step); }
+        if (!items[selected].available) { root.step-selection(step); }
+        if (!items[selected].available) { root.step-selection(step); }
+    }
+
+    function open-flyout(index: int, focused: bool) {
+        sub-anchor = index;
+        sub = items[index].flyout;
+        sub-selected = focused && sub-count > 0 ? 0 : -1;
+    }
+
+    // Run a plain entry. Track entries keep their own callbacks; everything
+    // else goes to the controller, which knows what the menu was opened on.
+    function run(id: string) {
+        root.dismiss();
+        if (kind == "track" && id == "play-next") {
+            App.play-track-next(track.id);
+        } else if (kind == "track" && id == "favorite") {
+            App.toggle-favorite(track.id);
+        } else if (kind == "track" && id == "album") {
+            App.open-track-album(track);
+        } else if (kind == "track" && id == "artist") {
+            App.open-track-artist(track);
+        } else {
+            App.menu-action(id, "");
+        }
+    }
+
+    function activate(index: int) {
+        if (!items[index].available) {
+            return;
+        }
+        if (items[index].flyout != "") {
+            root.open-flyout(index, true);
+        } else {
+            root.run(items[index].id);
+        }
+    }
+
+    function activate-sub(index: int) {
+        if (sub == "share") {
+            root.dismiss();
+            if (kind == "track") {
+                App.copy-track-link(track.id);
+            } else {
+                App.menu-action("copy-link", "");
+            }
+        } else if (sub == "playlists" && index >= 0 && index < App.own-playlists.length) {
+            root.dismiss();
+            App.menu-action("add-to-playlist", App.own-playlists[index].id);
+        }
+    }
+
+    TouchArea {
+        clicked => { root.dismiss(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.right) {
+                root.dismiss();
+            }
+        }
+        scroll-event(_) => { return accept; }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.escape-menu();
+                return accept;
+            }
+            if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab) {
+                if (root.sub-selected >= 0 && root.sub-count > 0) {
+                    root.sub-selected = mod(root.sub-selected + (event.text == Key.UpArrow || event.modifiers.shift ? -1 : 1) + root.sub-count, root.sub-count);
+                } else {
+                    root.move-selection(event.text == Key.UpArrow || event.modifiers.shift ? -1 : 1);
+                }
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.items[root.selected].flyout != "") {
+                root.activate(root.selected);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow && root.sub != "") {
+                root.sub = "";
+                return accept;
+            }
+            if (event.text == Key.Return || event.text == Key.Space) {
+                if (root.sub-selected >= 0) { root.activate-sub(root.sub-selected); }
+                else { root.activate(root.selected); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    menu := Surface {
+        x: clamp(App.menu-x, root.margin, root.width - self.width - root.margin);
+        y: clamp(App.menu-y, root.margin, root.height - self.height - root.margin);
+        width: 300px;
+        height: root.head-h + root.items.length * root.row-h + 10px;
+        accessible-role: groupbox;
+        accessible-label: "Options";
+
+        Cover {
+            x: 22px;
+            y: 14px;
+            width: 48px;
+            height: 48px;
+            radius: 3px;
+            round: root.kind == "artist";
+            source: root.kind == "track" ? root.track.cover : root.card.image;
+        }
+
+        Text {
+            x: 82px;
+            y: 17px;
+            width: parent.width - 82px - 16px;
+            text: root.kind == "track" ? root.track.title : root.card.title;
+            color: Theme.text;
+            font-size: 16px;
+            font-weight: Theme.bold;
+            overflow: elide;
+        }
+
+        Text {
+            x: 82px;
+            y: 40px;
+            width: parent.width - 82px - 16px;
+            text: root.kind == "track" ? root.track.artist : root.card.subtitle;
+            color: Theme.text-secondary;
+            font-size: 14px;
+            font-weight: Theme.demibold;
+            overflow: elide;
+        }
+
+        for entry[index] in root.items: MenuEntry {
+            x: 8px;
+            y: root.head-h + index * root.row-h;
+            width: parent.width - 16px;
+            label: entry.label;
+            icon: entry.icon;
+            available: entry.available;
+            selected: root.selected == index;
+            flyout: entry.flyout != "";
+            entered => {
+                root.selected = index;
+                if (entry.flyout != "") {
+                    if (root.sub != entry.flyout) { root.open-flyout(index, false); }
+                } else {
+                    root.sub = "";
+                }
+            }
+            activate => { root.activate(index); }
+        }
+    }
+
+    // Flyouts open beside the entry, on whichever side has room.
+    property <length> flyout-y: menu.y + root.head-h + root.sub-anchor * root.row-h - 8px;
+    pure function flyout-x(width: length) -> length {
+        return menu.x + menu.width + 4px + width <= root.width - root.margin ? menu.x + menu.width + 4px : menu.x - width - 4px;
+    }
+
+    if sub == "share": Surface {
+        width: 200px;
+        height: root.row-h + 16px;
+        x: root.flyout-x(self.width);
+        y: clamp(root.flyout-y, root.margin, root.height - self.height - root.margin);
+        accessible-role: groupbox;
+        accessible-label: "Share";
+        MenuEntry {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            label: "Copy link";
+            icon: @image-url("icons/link.svg");
+            selected: root.sub-selected == 0;
+            entered => { root.sub-selected = 0; }
+            activate => { root.activate-sub(0); }
+        }
+    }
+    if sub == "playlists": Surface {
+        property <int> rows: App.own-playlists.length;
+        property <int> focused: root.sub-selected;
+        width: 280px;
+        height: clamp(rows, 1, 8) * root.row-h + 16px;
+        x: root.flyout-x(self.width);
+        y: clamp(root.flyout-y, root.margin, root.height - self.height - root.margin);
+        accessible-role: groupbox;
+        accessible-label: "Add to playlist";
+        // Keep the keyboard-focused playlist in view.
+        changed focused => {
+            if (focused >= 0) {
+                list.content-y = -clamp(focused * root.row-h - 3 * root.row-h, 0px, max(0px, rows * root.row-h - list.height));
+            }
+        }
+
+        if rows == 0: Text {
+            x: 22px;
+            text: "No playlists of your own yet";
+            color: Theme.text-secondary;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        list := Flickable {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            content-height: rows * root.row-h;
+            for playlist[index] in App.own-playlists: MenuEntry {
+                x: 0px;
+                y: index * root.row-h;
+                width: parent.width;
+                label: playlist.title;
+                icon: @image-url("icons/playlist.svg");
+                selected: root.sub-selected == index;
+                entered => { root.sub-selected = index; }
+                activate => { root.activate-sub(index); }
+            }
+        }
+    }
+}
