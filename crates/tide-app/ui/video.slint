@@ -1,0 +1,263 @@
+// One live music video surface, from the player-bar thumbnail to full window.
+//
+// The decoded frame fills the window, letterboxed on black. Moving the mouse
+// brings up the player bar, header tools and minimize pill; the picture itself
+// is never dimmed. While the video plays,
+// the controls and the pointer hide again after a short rest. "Similar videos"
+// (the queue button) moves the picture to the left half and lists suggestions
+// on the right.
+import { App, Theme, Icon, IconButton, Cover, CardData, ExplicitBadge, TideLoader } from "common.slint";
+import { PlayerBar, HoverTip, HeaderTools } from "chrome.slint";
+
+component SimilarRow inherits Rectangle {
+    in property <CardData> card;
+    callback play();
+    height: 72px;
+    border-radius: 6px;
+    background: ta.has-hover ? #ffffff12 : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.play(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
+    Cover {
+        x: 0px;
+        y: 6px;
+        width: 108px;
+        height: 60px;
+        radius: 3px;
+        source: root.card.image;
+    }
+
+    VerticalLayout {
+        x: 124px;
+        width: parent.width - 124px - 56px;
+        alignment: center;
+        spacing: 4px;
+        Text {
+            text: root.card.title;
+            color: Theme.text;
+            font-size: 15px;
+            font-weight: Theme.medium;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.card.subtitle;
+            color: Theme.text-secondary;
+            font-size: 14px;
+            overflow: elide;
+        }
+    }
+
+    IconButton {
+        x: parent.width - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        icon: @image-url("icons/more.svg");
+        size: 16px;
+        clicked => {
+            App.request-card-menu(root.card, self.absolute-position.x, self.absolute-position.y + self.height);
+        }
+    }
+}
+
+export component VideoView inherits Rectangle {
+    background: black;
+    clip: true;
+    border-radius: 4px * (1 - root.expansion);
+    out property <float> expansion: App.video-open ? 1 : 0;
+    animate expansion { duration: 250ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    property <float> controls-opacity: root.controls ? max(0, (root.expansion - 0.75) / 0.25) : 0;
+    accessible-role: button;
+    accessible-label: App.video-open ? "Play or pause video" : "Expand video";
+    accessible-action-default => {
+        if (App.video-open) { App.toggle-play(); }
+        else { App.open-video(); }
+    }
+
+    // Controls: shown on any pointer movement, hidden after a rest while playing.
+    property <bool> controls: true;
+    property <duration> last-move: 0ms;
+    property <bool> over-controls: bar-ta.has-hover || collapse-ta.has-hover || header.engaged || App.debug-open;
+    property <bool> collapse-tip: false;
+    property <float> split: App.video-similar-open && App.video-open ? 1 : 0;
+    animate split { duration: 220ms; easing: ease-in-out; }
+    property <length> video-w: root.width + (min(root.width, max(320px, root.width * 0.48)) - root.width) * root.split;
+
+    function wake() {
+        root.last-move = animation-tick();
+        root.controls = true;
+    }
+
+    init => { root.wake(); }
+
+    property <int> wake-rev: App.video-wake;
+    changed wake-rev => { root.wake(); }
+
+    Timer {
+        interval: 300ms;
+        running: App.video-open && root.controls && App.playing && !root.over-controls && !App.menu-open;
+        triggered => {
+            if (animation-tick() - root.last-move > 2500ms) {
+                root.controls = false;
+            }
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: !App.video-open ? MouseCursor.pointer : root.controls ? MouseCursor.default : MouseCursor.none;
+        changed mouse-x => { root.wake(); }
+        changed mouse-y => { root.wake(); }
+        clicked => {
+            if (App.video-open) {
+                root.wake();
+                App.toggle-play();
+            } else {
+                App.open-video();
+            }
+        }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(App.video-card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        double-clicked => {
+            App.close-video();
+        }
+    }
+
+    // The picture, fitted inside its area. No overlay ever darkens it.
+    Rectangle {
+        x: 0px;
+        width: root.video-w;
+        Image {
+            width: 100%;
+            height: 100%;
+            source: App.video-frame.width > 0 ? App.video-frame : App.np-cover;
+            image-fit: contain;
+        }
+
+        if App.video-loading: TideLoader { size: 64px; }
+    }
+
+    // Similar videos.
+    if App.video-similar-open && App.video-open: Rectangle {
+        x: root.video-w + 54px;
+        y: 0px;
+        width: root.width - root.video-w - 54px - 24px;
+        height: root.height - 110px;
+        TouchArea {
+            changed mouse-x => { root.wake(); }
+            scroll-event(_) => { return reject; }
+        }
+        Flickable {
+            y: 96px;
+            height: parent.height - 96px;
+            content-height: list.preferred-height;
+            list := VerticalLayout {
+                alignment: start;
+                spacing: 0px;
+                Text {
+                    height: 48px;
+                    text: "Similar videos";
+                    color: Theme.text;
+                    font-size: 20px;
+                    font-weight: Theme.bold;
+                    vertical-alignment: top;
+                }
+
+                if App.video-similar.length == 0: Text {
+                    text: "Nothing yet";
+                    color: Theme.text-secondary;
+                    font-size: 15px;
+                }
+                for card[i] in App.video-similar: SimilarRow {
+                    card: card;
+                    play => { App.play-similar-video(i); }
+                }
+            }
+        }
+    }
+
+    // Bottom edge: gradient behind the player bar.
+    Rectangle {
+        y: root.height - self.height;
+        height: 128px;
+        opacity: root.controls-opacity;
+        visible: self.opacity > 0;
+        animate opacity { duration: 200ms; easing: ease-in-out; }
+        bar-ta := TouchArea {
+            changed mouse-x => { root.wake(); }
+        }
+
+        Rectangle {
+            background: @linear-gradient(180deg, #00000000 0%, #00000026 30%, #00000080 65%, #000000bf 100%);
+        }
+
+        PlayerBar {
+            y: parent.height - self.height - 4px;
+            overlay: true;
+        }
+    }
+
+    header := HeaderTools {
+        x: parent.width - self.width;
+        y: 0px;
+        active: App.video-open;
+        opacity: root.controls-opacity;
+        // Opacity hides idle controls; keep the input focusable so the search
+        // shortcut (or hovering a tool) can wake them again.
+        visible: App.video-open;
+        animate opacity { duration: 200ms; easing: ease-in-out; }
+        activity => { root.wake(); }
+        changed engaged => { if (self.engaged) { root.wake(); } }
+    }
+
+    // Wide minimize target just above the video details at the lower left.
+    Rectangle {
+        x: 32px;
+        y: root.height - 148px;
+        width: 96px;
+        height: 36px;
+        border-radius: 18px;
+        opacity: root.controls-opacity;
+        visible: self.opacity > 0;
+        animate opacity { duration: 200ms; easing: ease-in-out; }
+        background: collapse-ta.pressed ? #ffffff42 : collapse-ta.has-hover ? #ffffff2e : #ffffff1a;
+        animate background { duration: 120ms; }
+        accessible-role: button;
+        accessible-label: "Minimize video (Esc)";
+        accessible-action-default => { App.close-video(); }
+        collapse-ta := TouchArea {
+            enabled: root.controls && App.video-open;
+            mouse-cursor: pointer;
+            clicked => { App.close-video(); }
+            changed has-hover => {
+                root.collapse-tip = false;
+                if (self.has-hover) { root.wake(); }
+            }
+        }
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("icons/chevron-down.svg");
+            size: 22px;
+            tint: Theme.text;
+        }
+        Timer {
+            interval: 350ms;
+            running: App.video-open && collapse-ta.has-hover && !root.collapse-tip;
+            triggered => { root.collapse-tip = true; }
+        }
+        if root.collapse-tip && collapse-ta.has-hover && App.video-open: HoverTip {
+            x: 0px;
+            y: -(self.height + 8px);
+            text: "Esc to minimize";
+        }
+    }
+}

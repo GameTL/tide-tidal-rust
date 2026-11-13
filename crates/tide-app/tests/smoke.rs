@@ -1,6 +1,6 @@
 use tide_api::{TidalService, TrackItem};
-use tide_cache::{AudioCache, MetadataCache};
 use tide_audio::AudioPlayer;
+use tide_cache::{AudioCache, MetadataCache};
 
 #[tokio::test]
 async fn test_services_initialization() {
@@ -24,7 +24,7 @@ async fn test_services_initialization() {
         ..Default::default()
     };
 
-    meta.save_favorites(&[track.clone()]).unwrap();
+    meta.save_favorites(std::slice::from_ref(&track)).unwrap();
     let favs = meta.get_favorites().unwrap();
     assert_eq!(favs.len(), 1);
     assert_eq!(favs[0].title, "Test Hi-Res Song");
@@ -36,7 +36,10 @@ async fn test_services_initialization() {
 
     // Verify AudioPlayer CoreAudio initialization
     let player = AudioPlayer::new();
-    assert!(player.is_ok(), "AudioPlayer must initialize default output device");
+    assert!(
+        player.is_ok(),
+        "AudioPlayer must initialize default output device"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_cache_dir);
 }

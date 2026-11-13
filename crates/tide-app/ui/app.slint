@@ -1,12 +1,15 @@
 import { Palette } from "std-widgets.slint";
-import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage } from "common.slint";
-import { Sidebar, TopBar, PlayerBar } from "chrome.slint";
-import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView } from "views.slint";
+import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit } from "common.slint";
+import { Sidebar, TopBar, PlayerBar, DebugPanel, ErrorAlert, CreateDialog } from "chrome.slint";
+import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView, ModulesPage } from "views.slint";
+import { FeedView } from "feed.slint";
+import { VideoView } from "video.slint";
 import { SettingsView } from "settings.slint";
-import { TrackMenu } from "track-menu.slint";
+import { DspView } from "dsp.slint";
+import { ContextMenu } from "context-menu.slint";
 import { Typography } from "@typography";
 
-export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage }
+export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit }
 
 export component MainWindow inherits Window {
     title: "TIDE";
@@ -128,7 +131,9 @@ export component MainWindow inherits Window {
                 title: "Music";
                 shortcut: @keys(Escape);
                 activated => {
-                    if (App.track-menu-open) { App.escape-track-menu(); }
+                    if (App.create-kind != "") { App.create-kind = ""; }
+                    else if (App.menu-open) { App.escape-menu(); }
+                    else if (App.video-open) { App.close-video(); }
                     else { App.navigate("home"); }
                 }
             }
@@ -162,7 +167,33 @@ export component MainWindow inherits Window {
     }
 
     if !App.logged-in: LoginView { }
-    if App.logged-in: VerticalLayout {
+    if App.logged-in: logged-in-root := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        KeyBinding {
+            enabled: !App.menu-open && App.create-kind == "";
+            keys: @keys(" ");
+            activated => {
+                App.toggle-play();
+            }
+        }
+
+        KeyBinding {
+            enabled: App.video-active && !App.video-open && !App.menu-open && App.create-kind == "";
+            keys: @keys(Return);
+            activated => { App.open-video(); }
+        }
+
+        KeyBinding {
+            enabled: !App.menu-open && App.create-kind == "";
+            keys: @keys(Control + Y);
+            activated => {
+                App.edit("redo");
+            }
+        }
+
+        VerticalLayout {
         HorizontalLayout {
             Sidebar { }
 
@@ -193,8 +224,11 @@ export component MainWindow inherits Window {
                     if App.view == "home": HomeView { }
                     if App.view == "tracks" || App.view == "detail" || App.view == "album" || App.view == "artist" || App.view == "search" || App.view == "queue": TracksView { }
                     if App.view == "grid": GridView { }
+                    if App.view == "modules": ModulesPage { }
+                    if App.view == "feed": FeedView { }
                     if App.view == "stub": StubView { }
                     if App.view == "settings": SettingsView { }
+                    if App.view == "dsp": DspView { }
                 }
 
                 // Back / forward transition. Two panes drawn from page
@@ -249,19 +283,50 @@ export component MainWindow inherits Window {
                     // Left out of page snapshots: it never moves with a pane.
                     visible: !App.capturing;
                 }
+
             }
         }
 
         PlayerBar { }
-    }
-    if App.logged-in && App.show-now-playing && !App.capturing: NowPlayingView {
-        PlayerBar {
-            y: parent.height - self.height;
-            overlay: true;
+        }
+
+        if App.show-now-playing && !App.capturing: NowPlayingView {
+            width: parent.width;
+            height: parent.height;
+            PlayerBar {
+                y: parent.height - self.height;
+                overlay: true;
+            }
+        }
+        // Keep one live surface mounted: it grows from the player-bar thumbnail
+        // and returns to that same slot without replacing or freezing the frame.
+        if App.video-active && !App.capturing: VideoView {
+            x: 16px * (1 - self.expansion);
+            y: (parent.height - 76px) * (1 - self.expansion);
+            width: 100px + (parent.width - 100px) * self.expansion;
+            height: 56px + (parent.height - 56px) * self.expansion;
+        }
+        // One shared panel above both the page and the video surface.
+        if App.debug-open && !App.capturing: DebugPanel {
+            x: parent.width - 13px - self.width;
+            y: 58px;
+            limit: parent.height - 58px - 12px;
+        }
+        if App.menu-open && !App.capturing: ContextMenu {
+            width: parent.width;
+            height: parent.height;
         }
     }
-    if App.logged-in && App.track-menu-open && !App.capturing: TrackMenu {
+
+    if App.create-kind != "" && !App.capturing: CreateDialog {
         width: parent.width;
         height: parent.height;
+    }
+
+    // One error alert at a time, above the player bar.
+    if App.alert-text != "" && !App.capturing: ErrorAlert {
+        width: min(520px, parent.width - 32px);
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 96px - 16px - self.height;
     }
 }

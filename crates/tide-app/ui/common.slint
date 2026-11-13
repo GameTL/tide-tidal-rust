@@ -1,10 +1,18 @@
 // Shared theme, data types, application state and small building blocks.
 
+/// One credited artist that can be opened.
+export struct ArtistLink {
+    id: string,
+    name: string,
+}
+
 export struct TrackData {
     id: string,
     title: string,
     artist: string,
     artist-id: string,
+    /// Every credited artist; empty when only the joined `artist` text is known.
+    artists: [ArtistLink],
     album: string,
     album-id: string,
     cover-url: string,
@@ -18,16 +26,26 @@ export struct TrackData {
 
 export struct CardData {
     id: string,
-    kind: string, // playlist | album | mix | artist | folder | tracks
+    kind: string, // playlist | album | mix | artist | video | folder | tracks | page
     title: string,
     subtitle: string,
+    /// MAX | HIGH | LOW — albums only. HIGH is 16-bit FLAC; LOW is AAC.
+    quality: string,
     image: image,
     image-url: string,
+    /// Album artists, or a playlist's creator ("Me" for the user's own).
+    by: string,
+    /// In My Collection (albums / other people's playlists).
+    favorite: bool,
+    /// Fallback fill for genre / mood / decade tiles that have no artwork.
+    tint: color,
+    /// Small caps line under the subtitle: a video's length ("2 MIN").
+    detail: string,
 }
 
 export struct SectionData {
     title: string,
-    layout: string, // shortcuts | cards | rows | tracks
+    layout: string, // shortcuts | cards | rows | tracks | tiles | links
     cards: [CardData],
     tracks: [TrackData],
 }
@@ -44,6 +62,57 @@ export struct LyricLine {
     active: bool,
 }
 
+export struct ErrorEntry {
+    time: string,
+    source: string, // log target, e.g. tide_audio
+    message: string,
+    fields: string, // remaining log fields, `key=value …`
+}
+
+export struct LogEntry {
+    time: string,
+    level: string, // ERROR | WARN | INFO | DEBUG
+    text: string,
+}
+
+// One coloured part of the RAM inspector bar.
+export struct MemPart {
+    label: string,
+    size: string,
+    color: color,
+    frac: float, // share of the current footprint, 0..1
+}
+
+// One tracker column: part sizes in MB, bottom to top.
+export struct MemSample {
+    artwork: float,
+    snapshots: float,
+    heap: float,
+    window: float,
+    other: float,
+}
+
+export struct CreditLine {
+    role: string,
+    names: string,
+}
+
+// One EQ band on the DSP graphs. x and y are fractions of the graph (0 at the
+// left / top), worked out in Rust so both sides agree on the axes.
+export struct EqBand {
+    x: float,
+    y: float,
+    kind: int, // 0 peak, 1 low shelf, 2 high shelf
+    enabled: bool,
+    tint: color,
+}
+
+// A row in the AutoEq browser.
+export struct EqHit {
+    name: string,
+    source: string,
+}
+
 export global Theme {
     out property <color> bg: #000000;
     out property <color> surface: #141414;
@@ -58,6 +127,11 @@ export global Theme {
     out property <color> text-header: #999999;
     out property <color> max: #ffd432;
     out property <color> lossless: #33ffee;
+    // A DSP is in the signal path (magenta, as MQA's and Roon's "enhanced" lights).
+    out property <color> enhanced: #e455f0;
+    // Official playlist-folder tile: dark teal fill, cyan outline.
+    out property <color> folder: #1a4240;
+    out property <color> folder-icon: #3ad4c8;
     out property <int> light: 300;
     out property <int> regular: 400;
     out property <int> medium: 500;
@@ -73,9 +147,15 @@ export global App {
     in property <string> verification-url: "";
     in property <string> auth-status: "";
 
-    // Navigation. view: home | tracks | detail | grid | search | queue | stub
+    // Navigation. view: home | tracks | detail | grid | search | queue | stub | modules | feed
     in property <string> view: "home";
     in property <string> nav-key: "home";
+    // Home For you / Staff Picks / Uploads. Changing it does not add history.
+    in-out property <int> home-tab: 0;
+    callback set-home-tab(int);
+    // Card currently backing the play queue (kind + id), for Pause on cover.
+    in property <string> playing-card-id: "";
+    in property <string> playing-card-kind: "";
     in property <int> page-revision;
     in property <string> page-title: "";
     in property <string> page-subtitle: "";
@@ -83,6 +163,8 @@ export global App {
     in property <bool> page-has-cover: false;
     in property <color> page-tint: #222222;
     in property <CardData> page-artist;
+    /// Every credited album artist (album pages), each linked on its own.
+    in property <[ArtistLink]> page-artists;
     in property <string> page-year;
     in property <string> page-quality;
     in property <string> page-summary;
@@ -113,10 +195,15 @@ export global App {
     in-out property <string> filter-text: "";
     in-out property <string> edit-command;
     in-out property <int> edit-revision;
+    // How many text fields have focus. ⌘Z / ⌘⇧Z / ⌘Y undo the EQ when this is 0.
+    in-out property <int> edit-focus: 0;
 
     public function edit(command: string) {
         edit-command = command;
         edit-revision += 1;
+        if edit-focus <= 0 && view == "dsp" && (command == "undo" || command == "redo") {
+            dsp-action(command);
+        }
     }
 
     // Content
@@ -124,9 +211,57 @@ export global App {
     in property <[TrackData]> tracks;
     in property <bool> tracks-show-date: true;
     in property <[CardData]> grid-cards;
+    // Card grid pages (Mixes, Playlists, Albums, Profiles, folders). The cards
+    // arrive filtered, sorted and split into groups; one untitled group when
+    // grouping is off.
+    in property <[SectionData]> grid-groups;
+    callback grid-art(int, int, int);
+    in property <string> grid-kind: ""; // mixes | playlists | albums | profiles
+    in property <string> grid-filter-hint: "Filter";
+    in property <[string]> grid-sort-options;
+    in property <string> grid-sort;
+    in property <[string]> grid-group-options;
+    in property <string> grid-group;
+    in property <bool> grid-can-create: false;
+    // 0 = smallest artwork … 4 = largest. 3 matches the original 236px cards.
+    in property <int> grid-size: 3;
+    // When grouping playlists by Creator, fold everyone except Me into "Others".
+    in property <bool> grid-combine-others: false;
+    callback set-grid-sort(string);
+    callback set-grid-group(string);
+    callback set-grid-size(int);
+    callback set-grid-combine-others(bool);
+    // Name dialog: "" (closed) | playlist | folder | rename-folder | delete-folder.
+    in-out property <string> create-kind: "";
+    // Folder to create in, or the folder being renamed / deleted.
+    in-out property <string> create-folder-id: "";
+    in-out property <string> create-name: "";
+    callback create-in-collection(string, string); // kind, name
+    // The user's own playlists, for "Add to playlist".
+    in property <[CardData]> own-playlists;
+
+    // Album and artist pages
+    in property <bool> page-favorite: false; // in the collection / artist followed
+    // The album, playlist or mix the page shows, for its buttons and menu.
+    in property <CardData> page-card;
+    in property <bool> page-can-favorite: false;
+    in property <string> page-release-line;
+    in property <string> page-copyright;
+    in property <[CardData]> related-artists;
+    in property <[CreditLine]> page-credits;
+    in property <string> page-credits-status;
+    callback toggle-page-favorite();
+    // copy-link | credits
+    callback page-action(string, string);
+    callback related-art(int, int);
     in property <[CardData]> artist-albums;
     in property <[CardData]> artist-singles;
+    in property <[CardData]> artist-videos;
+    in property <string> artist-videos-status;
     in property <[CardData]> search-cards;
+    in property <[CardData]> search-videos;
+    in property <string> search-videos-status;
+    in-out property <int> search-tab;
     in property <[CardData]> sidebar-playlists;
     in-out property <bool> sidebar-collapsed;
     in-out property <bool> sidebar-ascending: true;
@@ -141,6 +276,9 @@ export global App {
     in property <string> np-artist: "";
     in property <string> np-context: "";
     in property <string> np-artist-id: "";
+    in property <[ArtistLink]> np-artists;
+    /// The artist shown in the player-bar hover card (the one under the pointer).
+    in property <string> np-artist-name: "";
     in property <string> np-artist-bio: "";
     in property <image> np-artist-image;
     in property <bool> np-artist-followed: false;
@@ -151,59 +289,194 @@ export global App {
     in property <bool> np-favorite: false;
     in property <bool> playing: false;
     in property <bool> buffering: false;
+
+    // Music videos. While `video-active` the player bar and transport drive the
+    // video; `video-open` is the full-window view of it.
+    in property <bool> video-active: false;
+    in property <bool> video-open: false;
+    in property <image> video-frame;
+    in property <float> video-aspect: 1.7778;
+    in property <bool> video-loading: false;
+    in property <CardData> video-card;
+    in property <[string]> video-qualities; // "Auto", "1080p", "720p", …
+    in property <string> video-quality: "Auto";
+    in property <string> video-quality-label: ""; // rendition on screen, "1080P"
+    in property <[CardData]> video-similar;
+    in-out property <bool> video-similar-open: false;
+    // Bumped to bring the video controls up (a new video, play / pause from a key).
+    in property <int> video-wake: 0;
+    callback open-video();
+    callback close-video();
+    callback stop-video();
+    callback set-video-quality(string);
+    callback play-similar-video(int);
+    // Dev chunk monitor (computer button, top right)
+    in property <bool> debug-active: false;
+    in property <string> debug-title: "";
+    in property <string> debug-status: "Idle";
+    in property <string> debug-stats: "";
+    in property <[int]> debug-blocks;
+    in-out property <bool> debug-open: false;
+    // Latest errors, newest first.
+    in property <[ErrorEntry]> debug-errors;
+    // Verbose log tail, newest first.
+    in property <[LogEntry]> debug-logs;
+    // RAM inspector: footprint now / peak, its parts, and a rolling tracker.
+    in property <string> mem-total: "";
+    in property <string> mem-peak: "";
+    in property <string> mem-note: "";
+    in property <[MemPart]> mem-parts;
+    in property <[MemSample]> mem-history;
+    in property <float> mem-scale: 1.0; // MB at the tracker's top edge
+    // The one error alert on screen; empty when there is none. A new error
+    // replaces it and bumps the serial.
+    in-out property <string> alert-text: "";
+    // False for a plain confirmation ("Added to playlist").
+    in property <bool> alert-error: true;
+    in property <int> alert-serial: 0;
     in property <float> progress: 0.0;
+    in property <int> duration-secs: 0;
+    in-out property <bool> show-remaining: false;
     in property <string> elapsed: "0:00";
     in property <string> total: "0:00";
+    pure public function format-time(secs: int) -> string {
+        if secs <= 0 {
+            return "0:00";
+        }
+        return Math.floor(secs / 60) + ":" + (Math.mod(secs, 60) < 10 ? "0" : "") + Math.mod(secs, 60);
+    }
     in property <string> quality-label: "";
     in property <string> quality-tier: "max"; // max | lossless | high
     in property <string> output-info: "";
     // Signal path (bit-perfect indicator)
-    in property <string> signal-quality: ""; // "" | max | lossless | high | low
+    in property <string> signal-quality: ""; // "" | enhanced | max | lossless | high | low
     in property <string> signal-title: "";
     in property <string> signal-note: "";
     in property <[SignalStage]> signal-stages;
     in property <bool> rate-matching: true;
     callback set-rate-matching(bool);
+    in property <bool> restore-sample-rate: true;
+    callback set-restore-sample-rate(bool);
     pure public function signal-color(quality: string) -> color {
-        return quality == "max" ? Theme.max : quality == "lossless" ? Theme.lossless : quality == "high" ? #4ade80 : quality == "low" ? #ffffff : #8c8c8c;
+        return quality == "enhanced" ? Theme.enhanced : quality == "max" ? Theme.max : quality == "lossless" ? Theme.lossless : quality == "high" ? #4ade80 : quality == "low" ? #ffffff : #8c8c8c;
     }
+    // DSP page: the USR and SPK equalisers of the current sound output.
+    in property <string> dsp-device: "";
+    in property <int> dsp-outputs: 0; // outputs with saved EQs
+    in property <bool> dsp-active: false; // an EQ is altering the sound
+    in property <bool> dsp-usr-enabled: true;
+    in property <bool> dsp-spk-enabled: true;
+    in property <bool> dsp-auto-preamp: false;
+    callback dsp-set-eq-enabled(int, bool);
+    callback dsp-set-preamp(string, float);
+    callback dsp-toggle-auto-preamp();
+    in property <bool> dsp-usr-on: false;
+    in property <bool> dsp-spk-on: false;
+    in property <float> dsp-range: 15; // editor spans ±this many dB
+    in property <float> dsp-result-min: -15;
+    in property <float> dsp-result-max: 15;
+    in property <int> dsp-tab: 0; // 0 USR EQ, 1 SPK EQ
+    in property <bool> dsp-enabled: true;
+    // Response curves as SVG paths in a 1000 × 1000 box.
+    in property <string> dsp-total-path;
+    in property <string> dsp-usr-path;
+    in property <string> dsp-spk-path;
+    in property <string> dsp-curve-path;
+    in property <string> dsp-band-path;
+    in property <[EqBand]> dsp-bands;
+    in property <int> dsp-selected: -1;
+    in property <int> dsp-band-kind: 0;
+    in property <bool> dsp-band-enabled: true;
+    in property <float> dsp-preamp-pos;
+    in property <float> dsp-freq-pos;
+    in property <float> dsp-gain-pos;
+    in property <float> dsp-q-pos;
+    in-out property <string> dsp-name;
+    in-out property <string> dsp-preamp-text;
+    in-out property <string> dsp-freq-text;
+    in-out property <string> dsp-gain-text;
+    in-out property <string> dsp-q-text;
+    // dB by which both EQs together go above 0 dB (0 when they do not).
+    in property <float> dsp-overshoot: 0;
+    in property <[string]> dsp-presets;
+    callback dsp-select-tab(int);
+    callback dsp-set-enabled(bool);
+    callback dsp-select-band(int);
+    callback dsp-move-band(int, float, float); // index, x, y
+    callback dsp-add-band(float, float); // x, y; negative for a default band
+    callback dsp-remove-band();
+    callback dsp-set-kind(int);
+    callback dsp-set-band-enabled(bool);
+    callback dsp-slide(string, float); // preamp | freq | gain | q, slider position
+    callback dsp-edit(string, string); // name | preamp | freq | gain | q, typed text
+    in property <bool> dsp-can-undo: false;
+    in property <bool> dsp-can-redo: false;
+    // import | export-parametric | export-graphic | save-preset | reset
+    // | fix-headroom | autoeq | autoeq-refresh | autoeq-close | undo | redo
+    callback dsp-action(string);
+    callback dsp-load-preset(int);
+    callback dsp-delete-preset(int);
+    in property <bool> autoeq-open: false;
+    in property <string> autoeq-status;
+    in property <[EqHit]> autoeq-hits;
+    in-out property <string> autoeq-query;
+    callback autoeq-search(string);
+    callback autoeq-pick(int);
     in-out property <float> volume: 1.0;
     in property <bool> muted: false;
     in property <bool> shuffle: false;
     in property <int> repeat-mode: 0; // 0 off, 1 all, 2 one
-    out property <color> accent: quality-tier == "max" ? Theme.max : quality-tier == "lossless" ? Theme.lossless : Theme.text;
+    out property <color> accent: video-active ? Theme.text : quality-tier == "max" ? Theme.max : quality-tier == "lossless" ? Theme.lossless : Theme.text;
 
     // Now playing overlay
     in-out property <bool> show-now-playing: false;
     in property <[LyricLine]> lyrics;
     in property <string> lyrics-status: "";
 
-    in-out property <bool> track-menu-open;
-    in-out property <bool> track-menu-share-open;
-    public function escape-track-menu() {
-        if (track-menu-share-open) {
-            track-menu-share-open = false;
+    // The context menu (see context-menu.slint). One per window.
+    in-out property <bool> menu-open;
+    // Its open flyout: "" | playlists | share.
+    in-out property <string> menu-sub;
+    public function escape-menu() {
+        if (menu-sub != "") {
+            menu-sub = "";
         } else {
-            track-menu-open = false;
+            menu-open = false;
         }
     }
 
-    in property <TrackData> track-menu-track;
-    in property <length> track-menu-x;
-    in property <length> track-menu-y;
+    // What the menu was opened on: track | album | playlist | mix | artist | folder.
+    in property <string> menu-kind: "track";
+    in property <TrackData> menu-track;
+    in property <CardData> menu-card;
+    // For cards: whether it is in the collection, and whether that can change.
+    in property <bool> menu-favorite: false;
+    in property <bool> menu-can-favorite: false;
+    in property <length> menu-x;
+    in property <length> menu-y;
     callback request-track-menu(string, length, length);
+    callback request-card-menu(CardData, length, length);
+    // Card entries, and "add-to-playlist" (argument: playlist id) for any kind:
+    // play | play-next | favorite | artist | open | copy-link | add-to-playlist
+    // | rename | delete | create-playlist.
+    callback menu-action(string, string);
     callback play-track-next(string);
     callback copy-track-link(string);
 
     callback navigate(string);
     callback open-card(CardData);
+    callback play-card(CardData);
+    callback toggle-card-favorite(CardData);
     callback open-track-artist(TrackData);
     callback open-track-album(TrackData);
-    callback np-artist-hovered();
+    callback np-artist-hovered(ArtistLink);
+    callback open-artist(ArtistLink);
     callback toggle-follow-artist();
     callback open-now-playing-artist();
     callback show-artist-tracks();
+    callback show-artist-releases(bool);
     callback artist-release-art(bool, int, int);
+    callback catalog-video-art(bool, int, int);
     callback sort-playlists();
     callback back();
     callback forward();
@@ -230,13 +503,12 @@ export global App {
     callback minimize();
     callback close-window();
     callback open-help();
-    // Ask for artwork of home section `index`, cards [0, upto).
-    callback section-visible(int, int);
+    // Ask for artwork of home section `index`, cards [from, upto).
+    callback section-visible(int, int, int);
 
     // Settings
     in-out property <int> settings-tab: 0;
     in property <string> quality: "max"; // max | high | low
-    in property <bool> low-memory: false;
     in property <string> cache-info: "";
     in property <bool> max-login: false;
     in property <string> pkce-status: "";
@@ -247,14 +519,15 @@ export global App {
     in property <bool> pkce-offer-safari: false;
     in-out property <string> cache-max: "20";
     in property <bool> keep-most-played: true;
+    in property <bool> low-ram;
     callback pkce-start-safari();
     callback set-cache-max(string);
     callback set-keep-most-played(bool);
+    callback set-low-ram(bool);
     in property <string> app-version: "";
     // Bumped to move keyboard focus into the search field.
     in property <int> focus-search: 0;
     callback set-quality(string);
-    callback set-low-memory(bool);
     callback set-show-collection(bool);
     callback set-show-audio-metadata(bool);
     callback clear-cache();
@@ -264,6 +537,14 @@ export global App {
 
 export component EditableInput inherits TextInput {
     property <int> edit-revision: App.edit-revision;
+    callback focused(bool);
+    changed has-focus => {
+        App.edit-focus += self.has-focus ? 1 : -1;
+        if App.edit-focus < 0 {
+            App.edit-focus = 0;
+        }
+        root.focused(self.has-focus);
+    }
     changed edit-revision => {
         if self.has-focus {
             if App.edit-command == "undo" { self.undo(); }
@@ -285,11 +566,110 @@ export component Icon inherits Image {
     image-fit: contain;
 }
 
+// Dropdown menu surface and rows, used inside PopupWindows.
+export component MenuPanel inherits Rectangle {
+    background: #2d2d2d;
+    border-radius: 14px;
+    VerticalLayout {
+        padding: 8px;
+        @children
+    }
+}
+
+export component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> checked: false;
+    in property <bool> chevron: false;
+    in property <bool> enabled: true;
+    callback activated();
+    height: 44px;
+    border-radius: 8px;
+    background: ta.has-hover && enabled ? #3d3d3d : transparent;
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    if has-icon: Icon {
+        x: 14px;
+        y: 13px;
+        source: root.icon;
+        size: 18px;
+        tint: root.enabled ? Theme.text : Theme.text-dim;
+    }
+    Text {
+        x: root.has-icon ? 46px : 14px;
+        width: root.width - self.x - (root.hint == "" ? 42px : hint-label.preferred-width + 28px);
+        text: root.label;
+        color: root.enabled ? Theme.text : Theme.text-dim;
+        font-size: 15px;
+        font-weight: Theme.demibold;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    hint-label := Text {
+        x: root.width - 14px - self.preferred-width;
+        text: root.hint;
+        color: root.enabled ? Theme.text-secondary : Theme.text-dim;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    if checked: Icon {
+        x: root.width - 34px;
+        y: 13px;
+        source: @image-url("icons/check.svg");
+        size: 18px;
+        tint: Theme.lossless;
+    }
+    if chevron: Icon {
+        x: root.width - 30px;
+        y: 14px;
+        source: @image-url("icons/chevron-right.svg");
+        size: 16px;
+        tint: Theme.text-secondary;
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    callback toggled(bool);
+    width: 46px;
+    height: 28px;
+    border-radius: 14px;
+    background: on ? white : #2a2a2a;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.toggled(!root.on);
+        }
+    }
+
+    Rectangle {
+        x: on ? 21px : 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: black;
+        animate x {
+            duration: 120ms;
+        }
+    }
+}
+
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <length> size: 20px;
     in property <color> tint: Theme.text-secondary;
     in property <color> hover-tint: Theme.text;
+    in property <color> disabled-tint: Theme.text-dim;
     in property <bool> enabled: true;
     callback clicked();
     callback context-requested(length, length);
@@ -313,7 +693,81 @@ export component IconButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: root.icon;
         size: root.size;
-        tint: !root.enabled ? Theme.text-dim : ta.has-hover ? root.hover-tint : root.tint;
+        tint: !root.enabled ? root.disabled-tint : ta.has-hover ? root.hover-tint : root.tint;
+    }
+}
+
+// Shared debug-panel toggle for page, video and Now Playing headers.
+export component DebugButton inherits Rectangle {
+    in property <bool> enabled: true;
+    out property <bool> hovered: ta.has-hover;
+    width: 35px;
+    height: 35px;
+    border-radius: 17.5px;
+    background: App.debug-open || ta.has-hover ? #333333 : #2a2a2a;
+    border-width: App.debug-open || App.debug-active ? 1px : 0px;
+    border-color: #f5b942;
+    accessible-role: button;
+    accessible-label: "Debug";
+    accessible-action-default => {
+        if (root.enabled) { App.debug-open = !App.debug-open; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { App.debug-open = !App.debug-open; }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/computer.svg");
+        size: 16px;
+        tint: App.debug-open || App.debug-active ? #f5b942 : Theme.text;
+    }
+}
+
+// "+" that offers a new playlist or folder; the name is asked in CreateDialog.
+export component CreateButton inherits Rectangle {
+    in property <length> size: 16px;
+    in property <color> tint: Theme.text-secondary;
+    width: size + 16px;
+    height: size + 16px;
+    IconButton {
+        icon: @image-url("icons/plus-circle.svg");
+        size: root.size;
+        tint: root.tint;
+        clicked => {
+            create-pop.show();
+        }
+    }
+
+    create-pop := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: 220px;
+        MenuPanel {
+            MenuRow {
+                label: "Playlist";
+                icon: @image-url("icons/playlist.svg");
+                has-icon: true;
+                activated => {
+                    App.create-folder-id = "";
+                    App.create-name = "";
+                    App.create-kind = "playlist";
+                }
+            }
+
+            MenuRow {
+                label: "Folder";
+                icon: @image-url("icons/folder.svg");
+                has-icon: true;
+                activated => {
+                    App.create-folder-id = "";
+                    App.create-name = "";
+                    App.create-kind = "folder";
+                }
+            }
+        }
     }
 }
 
@@ -347,6 +801,88 @@ export component Spinner inherits Rectangle {
         stroke-width: 2.4px;
         stroke-line-cap: round;
         fill: transparent;
+    }
+}
+
+// The TIDE wave filling up with water, splashing at the crest, then draining:
+// the loader for page-sized waits. Slint can only clip to rectangles, so the
+// lit part is the logo cut into thin vertical slices, each clipped at a
+// rolling sine-wave surface.
+export component TideLoader inherits Rectangle {
+    in property <length> size: 72px;
+    in property <color> tint: Theme.text;
+    width: size;
+    height: size * 367 / 601;
+
+    // One loop: rise (0 → .45), hold and splash (→ .55), drain (→ .95), rest.
+    property <float> phase: mod(animation-tick() / 3200ms, 1.0);
+    property <float> roll: mod(animation-tick() / 900ms, 1.0);
+    property <float> level: phase < 0.45 ? ease(phase / 0.45) : phase < 0.55 ? 1.0 : phase < 0.95 ? 1.0 - ease((phase - 0.55) / 0.4) : 0.0;
+    property <length> amp: root.height * 0.07;
+    // About 2px per slice; edges snap to half points so retina stays smooth.
+    property <int> slices: max(12, round(root.size / 2px));
+
+    pure function ease(t: float) -> float {
+        return (1 - cos(t * 180deg)) / 2;
+    }
+
+    // Water surface at `x`. Empty sits wholly below the logo, full wholly above.
+    pure function surface(x: length) -> length {
+        return (1 - root.level) * (root.height + 2 * root.amp) - root.amp + root.amp * sin((x / root.width * 2 - root.roll) * 360deg);
+    }
+
+    body := Rectangle {
+        width: 100%;
+        height: 100%;
+        // A small swell as the water reaches the crest.
+        transform-scale: root.phase > 0.38 && root.phase < 0.58 ? 1 + 0.035 * sin((root.phase - 0.38) / 0.2 * 180deg) : 1;
+
+        Image {
+            width: 100%;
+            height: 100%;
+            source: @image-url("icons/wave.svg");
+            colorize: root.tint.with-alpha(0.14);
+            image-fit: fill;
+        }
+
+        for i in root.slices: Rectangle {
+            property <length> left: round(root.width * i / root.slices / 0.5px) * 0.5px;
+            property <length> right: round(root.width * (i + 1) / root.slices / 0.5px) * 0.5px;
+            property <length> top: clamp(root.surface((self.left + self.right) / 2), 0px, root.height);
+            x: self.left;
+            y: self.top;
+            width: self.right - self.left;
+            height: root.height - self.top;
+            clip: true;
+            Image {
+                x: -parent.x;
+                y: -parent.y;
+                width: root.width;
+                height: root.height;
+                source: @image-url("icons/wave.svg");
+                colorize: root.tint;
+                image-fit: fill;
+            }
+        }
+
+        // Spray off the crest once the water reaches it. Offsets are in % of
+        // the logo width; each drop rises to (dx, dy) and falls away.
+        for drop in [
+            { dx: 7, dy: -12, delay: 0.0, r: 1.0 },
+            { dx: 14, dy: -6, delay: 0.016, r: 0.6 },
+            { dx: 1, dy: -15, delay: 0.028, r: 0.6 },
+            { dx: -5, dy: -9, delay: 0.012, r: 0.6 },
+        ]: Rectangle {
+            property <float> k: clamp((root.phase - 0.4 - drop.delay) / 0.28, 0, 1);
+            property <length> d: root.size * 0.032 * drop.r * (0.3 + 0.7 * min(1, self.k * 2)) * (1 - 0.6 * max(0, self.k * 2 - 1));
+            x: root.width * 0.66 + 1.43 * drop.dx * self.k * root.size / 100 - self.d / 2;
+            y: root.height * 0.16 + ((3 * drop.dy - 12) * self.k + (24 - 2 * drop.dy) * self.k * self.k) * root.size / 100 - self.d / 2;
+            width: self.d;
+            height: self.d;
+            border-radius: self.d / 2;
+            background: root.tint;
+            opacity: self.k <= 0 || self.k >= 1 ? 0 : min(1, self.k * 8) * (1 - self.k * self.k);
+        }
     }
 }
 
@@ -404,8 +940,11 @@ export component Cover inherits Rectangle {
         source: root.source;
         image-fit: cover;
         opacity: root.source.width > 0 ? 1.0 : 0.0;
+        // No fade while a page snapshot covers the page: artwork that lands
+        // underneath it would otherwise be caught half-faded as the snapshot
+        // lifts, which reads as a pulse.
         animate opacity {
-            duration: 200ms;
+            duration: App.nav-active ? 0ms : 200ms;
             easing: ease-in-out;
         }
     }
@@ -445,11 +984,13 @@ export component CardArt inherits Rectangle {
         width: 100%;
         height: 100%;
         border-radius: root.radius;
-        background: #1c1c1c;
+        background: @linear-gradient(180deg, #1e4e4b 0%, #143836 100%);
         Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
             source: @image-url("icons/folder.svg");
-            size: root.width * 0.42;
-            tint: Theme.text-secondary;
+            size: min(root.width, root.height) * 0.36;
+            tint: Theme.folder-icon;
         }
     }
     if card.kind != "tracks" && card.kind != "folder": Cover {
@@ -458,6 +999,12 @@ export component CardArt inherits Rectangle {
         source: card.image;
         radius: root.radius;
         round: card.kind == "artist";
+        // Shown until the portrait arrives, and for artists that have none.
+        if card.kind == "artist" && card.image.width == 0: Icon {
+            source: @image-url("icons/user.svg");
+            size: root.width * 0.34;
+            tint: #5a5a5a;
+        }
     }
 }
 
@@ -471,6 +1018,63 @@ export component ExplicitBadge inherits Rectangle {
         color: black;
         font-size: 10px;
         font-weight: 800;
+    }
+}
+
+// Album quality chip after the title (rounded rect, not a capsule).
+export component QualityBadge inherits Rectangle {
+    in property <string> tier: "";
+    width: tier == "" ? 0px : label.preferred-width + 10px;
+    height: tier == "" ? 0px : 16px;
+    border-radius: 3px;
+    background: tier == "MAX" ? #ffd43233
+        : tier == "HIGH" ? #2a2f2a
+        : tier == "LOSSLESS" ? #33ffee22
+        : tier == "LOW" ? #3a3a3a
+        : transparent;
+    visible: tier != "";
+    label := Text {
+        text: tier;
+        color: tier == "MAX" ? Theme.max
+            : tier == "HIGH" ? Theme.lossless
+            : tier == "LOSSLESS" ? Theme.lossless
+            : tier == "LOW" ? #c8c8c8
+            : Theme.text-secondary;
+        font-size: 10px;
+        font-weight: Theme.bold;
+        letter-spacing: 0.3px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Title + optional quality chip. Must be a Rectangle so absolute x/y in free
+// layouts (MediaCard) stick — a bare HorizontalLayout flows to the end.
+export component TitleWithQuality inherits Rectangle {
+    in property <string> title;
+    in property <string> quality;
+    in property <length> font-size: 15px;
+    in property <int> font-weight: Theme.medium;
+    in property <color> title-color: Theme.text;
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: root.title;
+            color: root.title-color;
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        if root.quality != "": VerticalLayout {
+            alignment: center;
+            QualityBadge {
+                tier: root.quality;
+            }
+        }
     }
 }
 
@@ -570,6 +1174,86 @@ export component DragArea inherits TouchArea {
     pointer-event(e) => {
         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
             App.drag-window();
+        }
+    }
+}
+
+// Comma-separated artist names where each name is its own link. Shows the plain `text`
+// when no artist ids are known (videos, older cached tracks).
+export component ArtistLinks inherits Rectangle {
+    in property <[ArtistLink]> artists;
+    in property <string> text;
+    in property <color> text-color: Theme.text;
+    in property <color> hover-color: Theme.text;
+    in property <length> font-size: 15px;
+    in property <int> font-weight: 500;
+    /// Fired when the pointer enters / leaves a name: index, entered, the name's absolute x.
+    callback hover(int, bool, length);
+    callback open(ArtistLink);
+    callback context-requested(length, length);
+    property <bool> linked: root.artists.length > 0;
+    preferred-width: linked ? lay.preferred-width : plain.preferred-width;
+    preferred-height: plain.preferred-height;
+    min-width: 0;
+    clip: true;
+
+    plain := Text {
+        visible: !root.linked;
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: root.text-color;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        vertical-alignment: center;
+        overflow: elide;
+        TouchArea {
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                    root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
+        }
+    }
+
+    lay := HorizontalLayout {
+        visible: root.linked;
+        alignment: start;
+        for a[i] in root.artists: HorizontalLayout {
+            name := Text {
+                text: a.name;
+                color: ta.has-hover ? root.hover-color : root.text-color;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                vertical-alignment: center;
+                overflow: elide;
+                Rectangle {
+                    x: 0;
+                    y: parent.height / 2 + root.font-size / 2 + 1px;
+                    height: 1px;
+                    background: parent.color;
+                    visible: ta.has-hover;
+                }
+
+                ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open(a); }
+                    changed has-hover => { root.hover(i, self.has-hover, self.absolute-position.x); }
+                    pointer-event(e) => {
+                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                            root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        }
+                    }
+                }
+            }
+
+            if i < root.artists.length - 1: Text {
+                text: ", ";
+                color: root.text-color;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                vertical-alignment: center;
+            }
         }
     }
 }

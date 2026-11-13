@@ -1,18 +1,19 @@
 // Window chrome: sidebar, top bar and the bottom player bar.
-import { TrackMenuButton } from "track-menu.slint";
+import { TrackMenuButton } from "context-menu.slint";
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Icon, IconButton, CircleButton, Cover, CardArt, CardData, ExplicitBadge, Slider, DragArea } from "common.slint";
+import { CreateButton, App, Theme, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle } from "common.slint";
 
 component NavItem inherits Rectangle {
     in property <string> label;
     in property <image> icon;
     in property <string> key;
     property <bool> selected: App.nav-key == key;
-    height: 44px;
+    // Official item: 8px pad, 24px icon box, 8px gap, 12px radius, 14px type.
+    height: 40px;
     Rectangle {
-        x: App.sidebar-collapsed ? 9px : 14px;
+        x: App.sidebar-collapsed ? 9px : 16px;
         width: parent.width - 2 * self.x;
-        border-radius: 13px;
+        border-radius: 12px;
         background: selected ? Theme.selected : ta.has-hover ? #141414 : transparent;
         ta := TouchArea {
             mouse-cursor: pointer;
@@ -22,18 +23,20 @@ component NavItem inherits Rectangle {
         }
 
         Icon {
-            x: App.sidebar-collapsed ? (parent.width - self.width) / 2 : 12px;
+            x: App.sidebar-collapsed ? (parent.width - self.width) / 2 : 8px + (24px - self.width) / 2;
+            y: (parent.height - self.height) / 2;
             source: root.icon;
-            size: 18px;
+            size: 16px;
             tint: selected || ta.has-hover ? Theme.text : Theme.text-secondary;
         }
 
         if !App.sidebar-collapsed: Text {
-            x: 43px;
+            x: 40px;
+            height: 100%;
             text: root.label;
             color: selected || ta.has-hover ? Theme.text : Theme.text-secondary;
-            font-size: 15px;
-            font-weight: Theme.medium;
+            font-size: 14px;
+            font-weight: Theme.demibold;
             vertical-alignment: center;
         }
     }
@@ -44,6 +47,11 @@ component SidebarPlaylist inherits Rectangle {
     height: 57px;
     ta := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
         clicked => {
             App.open-card(root.card);
         }
@@ -132,14 +140,14 @@ export component Sidebar inherits Rectangle {
 
             if App.show-collection: VerticalLayout {
                 if !App.sidebar-collapsed: Rectangle {
-                    height: 58px;
+                    height: 54px;
                     Text {
-                        x: 16px;
-                        y: 30px;
+                        x: 24px;
+                        y: 24px;
                         text: "Collection";
                         color: Theme.text-dim;
-                        font-size: 15px;
-                        font-weight: Theme.medium;
+                        font-size: 14px;
+                        font-weight: Theme.bold;
                     }
                 }
 
@@ -188,19 +196,24 @@ export component Sidebar inherits Rectangle {
             }
 
             if !App.sidebar-collapsed: Rectangle {
-                height: 62px;
+                height: 54px;
                 Text {
-                    x: 16px;
-                    y: 30px;
+                    x: 24px;
+                    y: 24px;
                     text: "All playlists";
                     color: Theme.text-dim;
-                    font-size: 15px;
+                    font-size: 14px;
                     font-weight: Theme.medium;
+                }
+
+                CreateButton {
+                    x: parent.width - 70px;
+                    y: 16px;
                 }
 
                 IconButton {
                     x: parent.width - 36px;
-                    y: 18px;
+                    y: 16px;
                     icon: @image-url("icons/sort.svg");
                     size: 16px;
                     tint: App.sidebar-ascending ? Theme.text-dim : Theme.text;
@@ -217,60 +230,504 @@ export component Sidebar inherits Rectangle {
     Rectangle {
         x: parent.width - 1px;
         width: 1px;
-        background: #111111;
+        background: #141414;
     }
 }
 
-export component TopBar inherits Rectangle {
-    height: 64px;
-    DragArea { }
+// Dev panel under the computer button: chunk download grid, recent errors and
+// the verbose log. A plain overlay, not a popup, so the rest of the window
+// stays clickable. Scrolls when it is taller than the space below the top bar.
+export component DebugPanel inherits Rectangle {
+    in property <length> limit: 600px;
+    width: 420px;
+    height: min(root.limit, panel-layout.preferred-height);
+    clip: true;
+    background: #141414;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #2a2a2a;
+    // Clicks on the panel stay on the panel.
+    TouchArea { }
 
-    // Back / forward
-    Rectangle {
-        x: 18px;
-        y: 13px;
-        width: 76px;
-        height: 39px;
-        border-radius: 19.5px;
-        background: Theme.pill;
+    Flickable {
+    content-height: panel-layout.preferred-height;
+    panel-layout := VerticalLayout {
+        padding: 14px;
+        spacing: 8px;
+        Text {
+            text: "Debug · chunks · RAM";
+            color: Theme.text;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        Text {
+            text: App.debug-title == "" ? "Nothing playing" : App.debug-title;
+            color: Theme.text-secondary;
+            font-size: 12px;
+            overflow: elide;
+        }
+
+        Text {
+            text: App.debug-status;
+            color: App.debug-active ? #f5b942 : #3dd68c;
+            font-size: 12px;
+        }
+
+        Text {
+            text: App.debug-stats;
+            color: Theme.text-secondary;
+            font-size: 12px;
+        }
+
+        Rectangle {
+            width: 100%;
+            height: chunk-grid.height;
+            chunk-grid := Rectangle {
+                property <int> cols: 16;
+                property <length> cell-w: 20px;
+                property <length> cell-h: 16px;
+                width: parent.width;
+                height: max(cell-h, Math.ceil(max(App.debug-blocks.length, 1) * 1.0 / cols) * cell-h);
+                for block[i] in App.debug-blocks: Rectangle {
+                    x: Math.mod(i, chunk-grid.cols) * chunk-grid.cell-w;
+                    y: Math.floor(i / chunk-grid.cols) * chunk-grid.cell-h;
+                    width: chunk-grid.cell-w - 4px;
+                    height: chunk-grid.cell-h - 4px;
+                    border-radius: 2px;
+                    background: block == 2 ? #3dd68c : block == 1 ? #f5b942 : #2c2c2c;
+                }
+            }
+        }
+
         HorizontalLayout {
-            padding-left: 4px;
-            padding-right: 4px;
-            alignment: center;
-            IconButton {
-                icon: @image-url("icons/chevron-left.svg");
-                size: 18px;
-                enabled: App.can-go-back;
-                tint: Theme.text;
+            spacing: 14px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #2c2c2c; }
+            }
+            Text { text: "Queued"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #f5b942; }
+            }
+            Text { text: "Downloading"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 8px; border-radius: 2px; background: #3dd68c; }
+            }
+            Text { text: "Received"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #2a2a2a;
+        }
+
+        HorizontalLayout {
+            Text {
+                text: "RAM";
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            Text {
+                horizontal-stretch: 1;
+                horizontal-alignment: right;
+                text: App.mem-total == "" ? "Measuring…" : App.mem-total + "  ·  peak " + App.mem-peak;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        // Footprint split into coloured parts.
+        mem-bar := Rectangle {
+            height: 14px;
+            border-radius: 4px;
+            clip: true;
+            background: #2c2c2c;
+            for part[i] in App.mem-parts: Rectangle {
+                property <float> before: i == 0 ? 0 : i == 1 ? App.mem-parts[0].frac : i == 2 ? App.mem-parts[0].frac + App.mem-parts[1].frac : i == 3 ? App.mem-parts[0].frac + App.mem-parts[1].frac + App.mem-parts[2].frac : App.mem-parts[0].frac + App.mem-parts[1].frac + App.mem-parts[2].frac + App.mem-parts[3].frac;
+                x: mem-bar.width * self.before;
+                width: max(0px, mem-bar.width * part.frac - (part.frac > 0.02 ? 1px : 0px));
+                height: parent.height;
+                background: part.color;
+            }
+        }
+
+        // Legend: block, name, size, share.
+        for part in App.mem-parts: HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 10px; height: 10px; border-radius: 2px; background: part.color; }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: part.label;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            Text {
+                text: part.size;
+                color: Theme.text;
+                font-size: 11px;
+                font-family: "Menlo";
+                vertical-alignment: center;
+            }
+            Text {
+                min-width: 34px;
+                horizontal-alignment: right;
+                text: Math.round(part.frac * 100) + "%";
+                color: part.color;
+                font-size: 11px;
+                font-family: "Menlo";
+                vertical-alignment: center;
+            }
+        }
+
+        // Tracker: one stacked column per second, newest on the right.
+        tracker := Rectangle {
+            property <int> slots: 90;
+            property <length> col-w: self.width / self.slots;
+            property <float> scale: max(App.mem-scale, 1.0);
+            height: 64px;
+            border-radius: 4px;
+            background: #0c0c0c;
+            clip: true;
+            for s[i] in App.mem-history: Rectangle {
+                property <length> h-art: tracker.height * s.artwork / tracker.scale;
+                property <length> h-snap: tracker.height * s.snapshots / tracker.scale;
+                property <length> h-heap: tracker.height * s.heap / tracker.scale;
+                property <length> h-win: tracker.height * s.window / tracker.scale;
+                property <length> h-other: tracker.height * s.other / tracker.scale;
+                x: (tracker.slots - App.mem-history.length + i) * tracker.col-w;
+                y: 0;
+                width: max(1px, tracker.col-w - 1px);
+                height: tracker.height;
+                if App.mem-parts.length == 5: Rectangle {
+                    y: parent.height - h-art;
+                    height: h-art;
+                    background: App.mem-parts[0].color;
+                }
+                if App.mem-parts.length == 5: Rectangle {
+                    y: parent.height - h-art - h-snap;
+                    height: h-snap;
+                    background: App.mem-parts[1].color;
+                }
+                if App.mem-parts.length == 5: Rectangle {
+                    y: parent.height - h-art - h-snap - h-heap;
+                    height: h-heap;
+                    background: App.mem-parts[2].color;
+                }
+                if App.mem-parts.length == 5: Rectangle {
+                    y: parent.height - h-art - h-snap - h-heap - h-win;
+                    height: h-win;
+                    background: App.mem-parts[3].color;
+                }
+                if App.mem-parts.length == 5: Rectangle {
+                    y: parent.height - h-art - h-snap - h-heap - h-win - h-other;
+                    height: h-other;
+                    background: App.mem-parts[4].color;
+                }
+            }
+            Text {
+                x: 4px;
+                y: 2px;
+                text: Math.round(tracker.scale) + " MB";
+                color: Theme.text-dim;
+                font-size: 9px;
+                font-family: "Menlo";
+            }
+        }
+
+        if App.mem-note != "": Text {
+            text: App.mem-note;
+            color: Theme.text-dim;
+            font-size: 10px;
+            wrap: word-wrap;
+        }
+
+        if App.debug-errors.length > 0: Rectangle {
+            height: 1px;
+            background: #2a2a2a;
+        }
+
+        if App.debug-errors.length > 0: Text {
+            text: "Recent errors";
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        for entry in App.debug-errors: VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: entry.time + " · " + entry.source;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Text {
+                text: entry.message;
+                color: #ff7a7a;
+                font-size: 12px;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 48px;
+            }
+
+            if entry.fields != "": Text {
+                text: entry.fields;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #2a2a2a;
+        }
+
+        Text {
+            text: "Log";
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        if App.debug-logs.length == 0: Text {
+            text: "Nothing logged yet";
+            color: Theme.text-secondary;
+            font-size: 11px;
+        }
+        VerticalLayout {
+            spacing: 3px;
+            for line in App.debug-logs: Text {
+                text: line.time + "  " + line.level + "  " + line.text;
+                color: line.level == "ERROR" ? #ff7a7a : line.level == "WARN" ? #f5b942 : line.level == "DEBUG" ? #7c7c7c : #b8b8b8;
+                font-family: "Menlo";
+                font-size: 10px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    }
+}
+
+// Asks for the name of a new playlist or folder, or confirms a folder delete.
+export component CreateDialog inherits Rectangle {
+    property <bool> removing: App.create-kind == "delete-folder";
+    property <bool> renaming: App.create-kind == "rename-folder";
+    background: #000000b0;
+    // Clicking outside the card cancels.
+    TouchArea {
+        clicked => {
+            App.create-kind = "";
+        }
+    }
+
+    function submit() {
+        if (root.removing) {
+            App.create-in-collection("delete-folder", App.create-name);
+            App.create-kind = "";
+            return;
+        }
+        if (name.text != "") {
+            App.create-in-collection(App.create-kind, name.text);
+            App.create-kind = "";
+        }
+    }
+
+    Rectangle {
+        width: 420px;
+        height: root.removing ? 180px : 214px;
+        border-radius: 14px;
+        background: #1c1c1c;
+        border-width: 1px;
+        border-color: #2a2a2a;
+        TouchArea { }
+
+        Text {
+            x: 24px;
+            y: 22px;
+            text: root.removing ? "Delete folder" : root.renaming ? "Rename folder" : App.create-kind == "folder" ? "Create folder" : "Create playlist";
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: Theme.bold;
+        }
+
+        if removing: Text {
+            x: 24px;
+            y: 70px;
+            width: parent.width - 48px;
+            text: "“" + App.create-name + "”";
+            color: Theme.text-secondary;
+            font-size: 15px;
+            overflow: elide;
+        }
+
+        Rectangle {
+            x: 24px;
+            y: 70px;
+            width: parent.width - 48px;
+            height: 44px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: name.has-focus ? #4a4a4a : Theme.border;
+            visible: !root.removing;
+            if name.text == "": Text {
+                x: 14px;
+                text: App.create-kind == "folder" || root.renaming ? "Folder name" : "Playlist name";
+                color: #aeafb2;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            name := EditableInput {
+                x: 14px;
+                width: parent.width - 28px;
+                height: 20px;
+                color: Theme.text;
+                font-size: 15px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                accepted => {
+                    root.submit();
+                }
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 24px - 110px - 12px - 110px;
+            y: root.removing ? 112px : 146px;
+            width: 110px;
+            height: 44px;
+            border-radius: 22px;
+            background: cancel.has-hover ? #2a2a2a : #222222;
+            cancel := TouchArea {
+                mouse-cursor: pointer;
                 clicked => {
-                    App.back();
+                    App.create-kind = "";
                 }
             }
 
-            IconButton {
-                icon: @image-url("icons/chevron-right.svg");
-                size: 18px;
-                enabled: App.can-go-forward;
-                tint: Theme.text;
+            Text {
+                text: "Cancel";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: Theme.demibold;
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 24px - 110px;
+            y: root.removing ? 112px : 146px;
+            width: 110px;
+            height: 44px;
+            border-radius: 22px;
+            background: !root.removing && name.text == "" ? #5a5a5a : create.has-hover ? #e6e6e6 : white;
+            create := TouchArea {
+                mouse-cursor: pointer;
                 clicked => {
-                    App.forward();
+                    root.submit();
                 }
+            }
+
+            Text {
+                text: root.removing ? "Delete" : root.renaming ? "Rename" : "Create";
+                color: black;
+                font-size: 15px;
+                font-weight: Theme.demibold;
             }
         }
     }
 
-    // Search
+    init => {
+        if (root.renaming) {
+            name.text = App.create-name;
+            name.select-all();
+        }
+        if (!root.removing) {
+            name.focus();
+        }
+    }
+}
+
+
+// The single error alert. Shows `App.alert-text`; a new error replaces it.
+export component ErrorAlert inherits Rectangle {
+    width: 520px;
+    height: alert-layout.preferred-height;
+    background: App.alert-error ? #2a1416 : #1c1c1c;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: App.alert-error ? #6b2a2e : #3a3a3a;
+    TouchArea { }
+
+    alert-layout := HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 4px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 8px;
+        Text {
+            text: App.alert-text;
+            color: App.alert-error ? #ffb4b4 : Theme.text;
+            font-size: 13px;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: 52px;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: @image-url("icons/x.svg");
+                size: 13px;
+                tint: App.alert-error ? #ffb4b4 : Theme.text-secondary;
+                clicked => {
+                    App.alert-text = "";
+                }
+            }
+        }
+    }
+}
+
+// Shared by the page header and full-window video player.
+export component HeaderTools inherits Rectangle {
+    in property <bool> active: true;
+    out property <bool> engaged: input.has-focus || menu.is-open || search-ta.has-hover || debug-btn.hovered || pta.has-hover;
+    callback activity();
+    width: 407px;
+    height: 64px;
+
+    // Search. Right edge sits left of the debug circle.
     Rectangle {
-        x: parent.width - 66px - self.width;
-        y: 13px;
-        width: min(306px, parent.width - 190px);
+        x: parent.width - 101px - self.width;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 101px;
         height: 39px;
         border-radius: 19.5px;
         background: Theme.pill;
         border-width: input.has-focus ? 1px : 0px;
         border-color: #3a3a3a;
+        search-ta := TouchArea {
+            enabled: root.active;
+            clicked => { input.focus(); root.activity(); }
+            changed mouse-x => { root.activity(); }
+            changed mouse-y => { root.activity(); }
+        }
         Icon {
             x: 14px;
+            y: (parent.height - self.height) / 2;
             source: @image-url("icons/search.svg");
             size: 15px;
             tint: Theme.text-secondary;
@@ -278,13 +735,17 @@ export component TopBar inherits Rectangle {
 
         if input.text == "": Text {
             x: 48px;
+            y: 0px;
+            height: parent.height;
             text: "Search";
             color: Theme.text-secondary;
             font-size: 15px;
             vertical-alignment: center;
         }
         input := EditableInput {
+            enabled: root.active;
             x: 48px;
+            y: (parent.height - self.height) / 2;
             width: parent.width - 48px - 40px;
             height: 20px;
             text <=> App.search-text;
@@ -300,12 +761,16 @@ export component TopBar inherits Rectangle {
 
         property <int> focus-request: App.focus-search;
         changed focus-request => {
-            input.focus();
-            input.select-all();
+            if (root.active) {
+                input.focus();
+                input.select-all();
+                root.activity();
+            }
         }
 
         if input.text != "": IconButton {
             x: parent.width - 40px;
+            y: (parent.height - self.height) / 2;
             icon: @image-url("icons/x.svg");
             size: 15px;
             tint: Theme.text;
@@ -316,15 +781,23 @@ export component TopBar inherits Rectangle {
         }
     }
 
+    // Dev chunk monitor
+    debug-btn := DebugButton {
+        x: parent.width - 56px - self.width;
+        y: (parent.height - self.height) / 2;
+        enabled: root.active;
+    }
+
     // Profile
     profile := Rectangle {
         x: parent.width - 13px - self.width;
-        y: 15px;
+        y: (parent.height - self.height) / 2;
         width: 35px;
         height: 35px;
         border-radius: 17.5px;
         background: pta.has-hover ? #333333 : #2a2a2a;
         pta := TouchArea {
+            enabled: root.active;
             mouse-cursor: pointer;
             clicked => {
                 menu.show();
@@ -332,6 +805,8 @@ export component TopBar inherits Rectangle {
         }
 
         Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
             source: @image-url("icons/user.svg");
             size: 18px;
         }
@@ -415,16 +890,97 @@ export component TopBar inherits Rectangle {
     }
 }
 
+export component TopBar inherits Rectangle {
+    height: 64px;
+    DragArea { }
+
+    // Back / forward
+    Rectangle {
+        x: 18px;
+        y: 13px;
+        width: 76px;
+        height: 39px;
+        border-radius: 19.5px;
+        background: Theme.pill;
+        // Chevron size, weight, spacing and colours measured from the official client.
+        HorizontalLayout {
+            alignment: center;
+            IconButton {
+                width: 38px;
+                height: 39px;
+                icon: @image-url("icons/nav-back.svg");
+                size: 24px;
+                enabled: App.can-go-back;
+                tint: #f0f0f0;
+                disabled-tint: #404040;
+                clicked => {
+                    App.back();
+                }
+            }
+
+            IconButton {
+                width: 38px;
+                height: 39px;
+                icon: @image-url("icons/nav-forward.svg");
+                size: 24px;
+                enabled: App.can-go-forward;
+                tint: #f0f0f0;
+                disabled-tint: #404040;
+                clicked => {
+                    App.forward();
+                }
+            }
+        }
+    }
+
+    HeaderTools {
+        x: parent.width - self.width;
+        active: !App.video-open;
+    }
+}
+
+// Inset "LCD" pill, as in the official client: black rim, a highlight under the
+// lower edge, and a glow in the quality colour rising from the bottom centre.
 component QualityPill inherits Rectangle {
     callback clicked();
-    width: 132px;
-    height: 43px;
-    border-radius: 21.5px;
-    background: #050505;
-    border-width: 1px;
-    border-color: #2b2b2b;
-    drop-shadow-blur: App.has-track ? 14px : 0px;
-    drop-shadow-color: App.accent.with-alpha(0.12);
+    property <color> tone: App.video-active ? Theme.text : App.quality-tier == "lossless" ? #19d8a7 : App.accent;
+    property <color> top: root.tone.mix(#141818, 0.04);
+    width: 133px;
+    height: 45px;
+    Rectangle {
+        y: 1px;
+        height: 44px;
+        border-radius: 22px;
+        background: #383838;
+    }
+
+    Rectangle {
+        y: 0px;
+        height: 44px;
+        border-radius: 22px;
+        background: black;
+        Rectangle {
+            x: 1.5px;
+            y: 1.5px;
+            width: parent.width - 3px;
+            height: parent.height - 3px;
+            border-radius: self.height / 2;
+            background: #0c1010;
+            clip: true;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height * 0.75 - self.height / 2;
+                width: 150px;
+                height: 150px;
+                background: @radial-gradient(circle, root.tone.mix(#0c1010, 0.2) 0%, #0c101000 50%);
+            }
+
+            Rectangle {
+                background: @linear-gradient(180deg, root.top 0%, root.top.with-alpha(0) 60%);
+            }
+        }
+    }
+
     TouchArea {
         mouse-cursor: pointer;
         clicked => {
@@ -433,20 +989,22 @@ component QualityPill inherits Rectangle {
     }
 
     HorizontalLayout {
+        y: 0px;
+        height: 44px;
         alignment: center;
-        spacing: 6px;
-        // Signal-path indicator: gold = bit-perfect hi-res, blue = bit-perfect lossless, green = processed, white = lossy.
+        spacing: 5px;
+        // Signal-path indicator: gold = bit-perfect hi-res, cyan = bit-perfect lossless, green = processed, white = lossy.
         if App.signal-quality != "": VerticalLayout {
             alignment: center;
             Icon {
                 source: @image-url("icons/sparkle.svg");
-                size: 11px;
+                size: 10px;
                 tint: App.signal-color(App.signal-quality);
             }
         }
         Text {
-            text: App.quality-label;
-            color: App.accent;
+            text: App.video-active ? (App.video-quality-label != "" ? App.video-quality-label : App.video-quality == "Auto" ? "AUTO" : App.video-quality) : App.quality-label;
+            color: root.tone;
             font-size: 13px;
             font-weight: 500;
             vertical-alignment: center;
@@ -455,113 +1013,242 @@ component QualityPill inherits Rectangle {
 }
 
 component SignalPathPanel inherits Rectangle {
+    // Video mode: the rendition picker as a column on the left.
+    in property <bool> show-quality: false;
+    in property <bool> show-signal: true;
+    callback quality-picked();
     background: #141416;
     border-radius: 14px;
     border-width: 1px;
     border-color: #2a2a2e;
-    VerticalLayout {
-        padding: 20px;
-        spacing: 14px;
-        HorizontalLayout {
-            alignment: start;
-            spacing: 8px;
-            Text {
-                text: "Signal path:";
-                color: Theme.text;
-                font-size: 17px;
-                font-weight: 700;
-            }
-
-            Text {
-                text: App.signal-title;
-                color: App.signal-color(App.signal-quality);
-                font-size: 17px;
-                font-weight: 500;
-            }
-
-            VerticalLayout {
-                alignment: center;
-                Icon {
-                    source: @image-url("icons/sparkle.svg");
-                    size: 13px;
-                    tint: App.signal-color(App.signal-quality);
-                }
-            }
-        }
-
-        VerticalLayout {
+    HorizontalLayout {
+        if root.show-quality: VerticalLayout {
+            width: 200px;
+            padding: 12px;
+            padding-top: 16px;
             spacing: 0px;
-            for stage[i] in App.signal-stages: Rectangle {
-                height: 58px;
-                // Connector to the next stage
-                if i + 1 < App.signal-stages.length: Rectangle {
-                    x: 16px;
-                    y: 40px;
-                    width: 1px;
-                    height: 26px;
-                    background: #4a4a50;
+            // Sits on the card's bottom edge, next to the player bar's pill.
+            alignment: end;
+            Rectangle {
+                height: 34px;
+                Text {
+                    x: 12px;
+                    text: "QUALITY";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: Theme.demibold;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
                 }
-                Rectangle {
-                    x: 0px;
-                    y: 6px;
-                    width: 34px;
-                    height: 34px;
-                    border-radius: 17px;
-                    border-width: 1px;
-                    border-color: #6a6a70;
-                    Icon {
-                        source: stage.kind == "source" ? @image-url("icons/music.svg") : stage.kind == "output" ? @image-url("icons/volume.svg") : @image-url("icons/sort.svg");
-                        size: 16px;
-                    }
+            }
+
+            if App.video-qualities.length == 0: Rectangle {
+                height: 40px;
+                Text {
+                    x: 12px;
+                    text: "Loading…";
+                    color: Theme.text-secondary;
+                    font-size: 14px;
+                    vertical-alignment: center;
                 }
-
-                HorizontalLayout {
-                    x: 48px;
-                    y: 3px;
-                    height: 20px;
-                    width: self.preferred-width;
-                    spacing: 7px;
-                    Text {
-                        text: stage.title;
-                        color: Theme.text;
-                        font-size: 14px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        Icon {
-                            source: @image-url("icons/sparkle.svg");
-                            size: 10px;
-                            tint: App.signal-color(stage.quality);
-                        }
+            }
+            for choice in App.video-qualities: Rectangle {
+                height: 40px;
+                border-radius: 8px;
+                background: row-ta.has-hover ? #2a2a2a : transparent;
+                row-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        App.set-video-quality(choice);
+                        root.quality-picked();
                     }
                 }
 
                 Text {
-                    x: 48px;
-                    y: 25px;
-                    width: parent.width - 48px;
-                    text: stage.detail;
-                    color: App.signal-color(stage.quality);
+                    x: 12px;
+                    text: choice == "Auto" && App.video-quality-label != "" ? "Auto (" + App.video-quality-label + ")" : choice;
+                    color: Theme.text;
                     font-size: 14px;
-                    overflow: elide;
+                    font-weight: choice == App.video-quality ? Theme.demibold : Theme.regular;
+                    vertical-alignment: center;
+                }
+
+                if choice == App.video-quality: Icon {
+                    x: parent.width - 12px - self.width;
+                    source: @image-url("icons/check.svg");
+                    size: 16px;
+                    tint: Theme.text;
                 }
             }
         }
 
-        Text {
-            text: App.signal-note;
-            color: Theme.text-secondary;
-            font-size: 12.5px;
-            wrap: word-wrap;
+        if root.show-quality && root.show-signal: Rectangle {
+            width: 1px;
+            background: #2a2a2e;
+        }
+
+        if root.show-signal: VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                Text {
+                    text: "Signal path:";
+                    color: Theme.text;
+                    font-size: 17px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                // Centred like the sparkle: the row can be taller than the text.
+                Text {
+                    text: App.signal-title;
+                    color: App.signal-color(App.signal-quality);
+                    font-size: 17px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/sparkle.svg");
+                        size: 13px;
+                        tint: App.signal-color(App.signal-quality);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+                for stage[i] in App.signal-stages: Rectangle {
+                    height: 58px;
+                    // Connector to the next stage
+                    if i + 1 < App.signal-stages.length: Rectangle {
+                        x: 16px;
+                        y: 40px;
+                        width: 1px;
+                        height: 26px;
+                        background: #4a4a50;
+                    }
+                    Rectangle {
+                        x: 0px;
+                        y: 6px;
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 17px;
+                        border-width: 1px;
+                        border-color: #6a6a70;
+                        Icon {
+                            source: stage.kind == "video" ? @image-url("icons/video.svg") : stage.kind == "source" ? @image-url("icons/music.svg") : stage.kind == "output" ? @image-url("icons/volume.svg") : @image-url("icons/sort.svg");
+                            size: 16px;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        x: 48px;
+                        y: 3px;
+                        height: 20px;
+                        width: self.preferred-width;
+                        spacing: 7px;
+                        Text {
+                            text: stage.title;
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                source: @image-url("icons/sparkle.svg");
+                                size: 10px;
+                                tint: App.signal-color(stage.quality);
+                            }
+                        }
+                    }
+
+                    Text {
+                        x: 48px;
+                        y: 25px;
+                        width: parent.width - 48px;
+                        text: stage.detail;
+                        color: App.signal-color(stage.quality);
+                        font-size: 14px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            Text {
+                text: App.signal-note;
+                color: Theme.text-secondary;
+                font-size: 12.5px;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #2a2a2e;
+            }
+
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 12px;
+                Text {
+                    text: "DSP";
+                    color: Theme.text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        on: App.dsp-enabled;
+                        toggled(v) => { App.dsp-set-enabled(v); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: "Bit-perfect playback";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    Text {
+                        text: "Match output sample rate";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        on: App.rate-matching;
+                        toggled(v) => {
+                            App.set-rate-matching(v);
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 // White pill tooltip shown above a hovered player-bar label.
-component HoverTip inherits Rectangle {
+export component HoverTip inherits Rectangle {
     in property <string> text;
     height: 38px;
     width: tip-label.preferred-width + 32px;
@@ -674,7 +1361,7 @@ component ArtistCard inherits Rectangle {
         x: 20px;
         y: 166px;
         width: parent.width - 40px;
-        text: App.np-artist;
+        text: App.np-artist-name;
         color: Theme.text;
         font-size: 20px;
         font-weight: 700;
@@ -741,13 +1428,143 @@ component ArtistCard inherits Rectangle {
     }
 }
 
+// TIDAL-style playback scrubber: thin muted hairline when idle; expands on hover/drag
+// with a cursor preview shade, quality-accent fill + thumb, live scrubbed timestamp,
+// and clickable total / remaining duration toggle.
+component Scrubber inherits Rectangle {
+    in property <length> bar-w;
+    callback seek(float);
+
+    property <bool> active: App.has-track && (ta.has-hover || ta.pressed);
+    property <float> drag: 0.0;
+    property <float> hover-frac: 0.0;
+    property <float> shown: ta.pressed ? root.drag : clamp(App.progress, 0.0, 1.0);
+    property <int> shown-secs: Math.round(root.shown * App.duration-secs);
+    property <length> track-h: root.active ? 4px : 2px;
+
+    height: 20px;
+
+    // Left timestamp: live scrubbed time in accent while dragging, elapsed otherwise.
+    Text {
+        x: (root.width - root.bar-w) / 2 - 14px - self.width;
+        y: (parent.height - self.height) / 2;
+        text: ta.pressed && App.duration-secs > 0 ? App.format-time(root.shown-secs) : App.elapsed;
+        color: ta.pressed ? App.accent : root.active ? Theme.text : #6e6e6e;
+        font-size: 12px;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+
+    // Track & interactive scrub bar
+    bar-area := Rectangle {
+        x: (root.width - root.bar-w) / 2;
+        y: 0px;
+        width: root.bar-w;
+        height: parent.height;
+
+        ta := TouchArea {
+            enabled: App.has-track;
+            mouse-cursor: App.has-track ? pointer : default;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                    root.drag = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                    root.hover-frac = root.drag;
+                } else if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                    root.seek(root.drag);
+                }
+            }
+            moved => {
+                root.hover-frac = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                if self.pressed {
+                    root.drag = root.hover-frac;
+                }
+            }
+        }
+
+        // Base track
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            width: parent.width;
+            height: root.track-h;
+            border-radius: self.height / 2;
+            background: root.active ? #383838 : #2e2e2e;
+            clip: true;
+            animate height, background { duration: 120ms; }
+
+            // Hover-position preview shade under cursor
+            if ta.has-hover && App.has-track: Rectangle {
+                x: 0px;
+                width: parent.width * root.hover-frac;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: #ffffff24;
+            }
+
+            // Played / scrubbed progress fill
+            Rectangle {
+                x: 0px;
+                width: parent.width * root.shown;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: root.active ? App.accent : #b3b3b3;
+                animate background { duration: 120ms; }
+            }
+        }
+
+        // Circular scrubber thumb
+        Rectangle {
+            x: clamp(parent.width * root.shown - self.width / 2, 0px, max(0px, parent.width - self.width));
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: App.accent;
+            opacity: root.active ? 1.0 : 0.0;
+            animate opacity { duration: 120ms; }
+        }
+    }
+
+    // Right timestamp: click to toggle total duration vs remaining time (-m:ss)
+    rem-label := Text {
+        x: (root.width + root.bar-w) / 2 + 14px;
+        y: (parent.height - self.height) / 2;
+        text: App.show-remaining && App.has-track && App.duration-secs > 0
+            ? "-" + App.format-time(max(0, App.duration-secs - root.shown-secs))
+            : App.total;
+        color: rem-ta.has-hover && App.has-track ? Theme.text : #6e6e6e;
+        font-size: 12px;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+
+    rem-ta := TouchArea {
+        x: rem-label.x - 4px;
+        y: 0px;
+        width: max(36px, rem-label.width + 8px);
+        height: parent.height;
+        enabled: App.has-track;
+        mouse-cursor: App.has-track ? pointer : default;
+        clicked => {
+            App.show-remaining = !App.show-remaining;
+        }
+    }
+}
+
 export component PlayerBar inherits Rectangle {
     in property <bool> overlay: false;
     height: 96px;
     background: overlay ? transparent : Theme.player-bg;
 
+    // A video's thumbnail is 16:9; the titles move right to make room.
+    property <length> art-w: App.video-active ? 100px : 62px;
+    property <length> text-x: overlay ? 32px : 16px + art-w + 15px;
+
     function open-track-menu(x: length, y: length) {
-        if (App.has-track) { more.open-at(x, y); }
+        if (App.video-active) {
+            App.request-card-menu(App.video-card, x, y);
+        } else if (App.has-track) {
+            more.open-at(x, y);
+        }
     }
 
     // Left: artwork + titles
@@ -761,11 +1578,11 @@ export component PlayerBar inherits Rectangle {
         }
     }
 
-    if !overlay: Cover {
+    if !overlay && !App.video-active: Cover {
         x: 16px;
-        y: 17px;
-        width: 62px;
-        height: 62px;
+        y: App.video-active ? 20px : 17px;
+        width: root.art-w;
+        height: App.video-active ? 56px : 62px;
         source: App.np-cover;
         TouchArea {
             mouse-cursor: pointer;
@@ -775,12 +1592,16 @@ export component PlayerBar inherits Rectangle {
                 }
             }
             clicked => {
-                App.open-now-playing();
+                if (App.video-active) {
+                    App.open-video();
+                } else {
+                    App.open-now-playing();
+                }
             }
         }
     }
     HorizontalLayout {
-        x: overlay ? 32px : 93px;
+        x: root.text-x;
         y: 0;
         width: max(120px, root.width * 0.32 - self.x);
         alignment: start;
@@ -795,6 +1616,10 @@ export component PlayerBar inherits Rectangle {
                 PlayerLink {
                     context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.has-track ? App.np-title : "Nothing playing";
+                    clickable: App.video-active;
+                    clicked => {
+                        if (App.video-active) { App.open-video(); }
+                    }
                     tip: App.has-track ? App.np-title : "";
                     text-color: Theme.text;
                     font-size: 15px;
@@ -808,13 +1633,29 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            artist-link := PlayerLink {
-                context-requested(x, y) => { root.open-track-menu(x, y); }
+            artist-link := ArtistLinks {
+                width: min(self.preferred-width, max(80px, root.width * 0.32 - 200px));
+                artists: App.has-track ? App.np-artists : [];
                 text: App.has-track ? App.np-artist : "Pick something to play";
-                clickable: App.np-artist-id != "";
-                max-w: max(80px, root.width * 0.32 - 200px);
-                clicked => {
-                    App.open-now-playing-artist();
+                text-color: Theme.text-secondary;
+                font-size: 13px;
+                font-weight: 400;
+                context-requested(x, y) => { root.open-track-menu(x, y); }
+                open(a) => {
+                    root.artist-card-open = false;
+                    App.open-artist(a);
+                }
+                hover(i, on, x) => {
+                    if (on) {
+                        root.hover-artist = i;
+                        root.card-x = x - root.absolute-position.x - 12px;
+                        // Already open: retarget the card at the newly hovered name.
+                        if (root.artist-card-open) {
+                            App.np-artist-hovered(App.np-artists[i]);
+                        }
+                    } else if (root.hover-artist == i) {
+                        root.hover-artist = -1;
+                    }
                 }
             }
 
@@ -824,7 +1665,7 @@ export component PlayerBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     Icon {
-                        source: @image-url("icons/music.svg");
+                        source: App.video-active ? @image-url("icons/video.svg") : @image-url("icons/music.svg");
                         size: 12px;
                         tint: Theme.text-secondary;
                     }
@@ -854,8 +1695,22 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
 
-                more := TrackMenuButton {
-                    track-id: App.current-id;
+                Rectangle {
+                    width: more.width;
+                    height: more.height;
+                    more := TrackMenuButton {
+                        visible: !App.video-active;
+                        track-id: App.video-active ? "" : App.current-id;
+                    }
+
+                    if App.video-active: IconButton {
+                        icon: @image-url("icons/more.svg");
+                        size: 17px;
+                        tint: Theme.text;
+                        clicked => {
+                            App.request-card-menu(App.video-card, self.absolute-position.x, self.absolute-position.y + self.height);
+                        }
+                    }
                 }
             }
         }
@@ -863,19 +1718,22 @@ export component PlayerBar inherits Rectangle {
 
     // Artist hover card: opens after a short hover on the artist name and stays while the
     // pointer is on the name or the card (with a grace period to cross the gap between them).
+    // Each credited artist is its own link; the card follows the name under the pointer.
     property <bool> artist-card-open: false;
+    property <int> hover-artist: -1;
+    property <length> card-x: root.text-x - 12px;
     Timer {
         interval: 400ms;
-        running: App.has-track && App.np-artist-id != "" && artist-link.hovered && !root.artist-card-open;
+        running: App.has-track && root.hover-artist >= 0 && root.hover-artist < App.np-artists.length && !root.artist-card-open;
         triggered => {
-            App.np-artist-hovered();
+            App.np-artist-hovered(App.np-artists[root.hover-artist]);
             root.artist-card-open = true;
         }
     }
 
     Timer {
         interval: 300ms;
-        running: root.artist-card-open && !artist-link.hovered && !artist-card.hovered;
+        running: root.artist-card-open && root.hover-artist < 0 && !artist-card.hovered;
         triggered => {
             root.artist-card-open = false;
         }
@@ -883,7 +1741,7 @@ export component PlayerBar inherits Rectangle {
 
     artist-card := ArtistCard {
         visible: root.artist-card-open;
-        x: (root.overlay ? 32px : 93px) - 12px;
+        x: root.card-x;
         y: -(self.height) - 2px;
         read-more => {
             root.artist-card-open = false;
@@ -946,39 +1804,18 @@ export component PlayerBar inherits Rectangle {
         }
     }
 
-    // Centre: timeline
-    property <length> bar-w: min(728px, root.width * 0.354);
-    Text {
-        x: (root.width - bar-w) / 2 - 16px - self.width;
-        y: 66px;
-        height: 16px;
-        text: App.elapsed;
-        color: #6e6e6e;
-        font-size: 12px;
-        vertical-alignment: center;
-    }
-
-    Slider {
-        x: (root.width - bar-w) / 2;
-        y: 66px;
-        width: bar-w;
-        value: App.progress;
-        changed(v) => {
+    // Centre: timeline scrubber
+    Scrubber {
+        x: 0px;
+        y: 64px;
+        width: root.width;
+        bar-w: min(728px, root.width * 0.354);
+        seek(v) => {
             App.seek(v);
         }
     }
 
-    Text {
-        x: (root.width + bar-w) / 2 + 16px;
-        y: 66px;
-        height: 16px;
-        text: App.total;
-        color: #6e6e6e;
-        font-size: 12px;
-        vertical-alignment: center;
-    }
-
-    // Right: queue, output, volume, now playing, quality
+    // Right: queue, output, volume, DSP, now playing, quality
     HorizontalLayout {
         x: root.width - self.width - 20px;
         width: self.preferred-width;
@@ -988,12 +1825,17 @@ export component PlayerBar inherits Rectangle {
             alignment: center;
             HorizontalLayout {
                 spacing: 8px;
+                // While a video is on screen this opens "Similar videos" instead.
                 IconButton {
                     icon: @image-url("icons/queue.svg");
                     size: 18px;
-                    tint: App.nav-key == "queue" ? Theme.text : Theme.text-secondary;
+                    tint: (App.video-open ? App.video-similar-open : App.nav-key == "queue") ? Theme.text : Theme.text-secondary;
                     clicked => {
-                        App.navigate("queue");
+                        if (App.video-open) {
+                            App.video-similar-open = !App.video-similar-open;
+                        } else {
+                            App.navigate("queue");
+                        }
                     }
                 }
 
@@ -1013,14 +1855,26 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
 
+                // DSP: magenta while an equaliser is shaping the sound.
+                IconButton {
+                    icon: @image-url("icons/eq.svg");
+                    size: 18px;
+                    tint: App.dsp-active ? Theme.enhanced : App.nav-key == "dsp" ? Theme.text : Theme.text-secondary;
+                    hover-tint: App.dsp-active ? Theme.enhanced : Theme.text;
+                    clicked => {
+                        App.navigate("dsp");
+                    }
+                }
+
                 IconButton {
                     icon: @image-url("icons/pip.svg");
                     size: 18px;
-                    tint: App.show-now-playing ? Theme.text : Theme.text-secondary;
+                    tint: App.show-now-playing || App.video-open ? Theme.text : Theme.text-secondary;
                     clicked => {
                         App.open-now-playing();
                     }
                 }
+
             }
         }
 
@@ -1032,7 +1886,7 @@ export component PlayerBar inherits Rectangle {
             alignment: center;
             QualityPill {
                 clicked => {
-                    if App.signal-quality != "" {
+                    if App.video-active || App.signal-quality != "" {
                         signal-popup.show();
                     }
                 }
@@ -1041,15 +1895,26 @@ export component PlayerBar inherits Rectangle {
     }
 
     signal-popup := PopupWindow {
-        x: root.width - 20px - 360px;
+        // Video mode adds the quality column on the left; the signal path
+        // keeps its place at the right edge.
+        property <bool> with-signal: App.signal-quality != "";
+        property <length> quality-width: App.video-active ? (self.with-signal ? 201px : 200px) : 0px;
+        close-policy: close-on-click-outside;
+        x: root.width - 20px - self.width;
         y: -(self.height + 10px);
-        width: 360px;
-        height: 150px + App.signal-stages.length * 58px;
-        SignalPathPanel { }
+        width: self.quality-width + (self.with-signal ? 360px : 0px);
+        height: max(self.with-signal ? 262px + App.signal-stages.length * 58px : 0px, App.video-active ? 68px + max(1, App.video-qualities.length) * 40px : 0px);
+        SignalPathPanel {
+            show-quality: App.video-active;
+            show-signal: signal-popup.with-signal;
+            quality-picked => {
+                signal-popup.close();
+            }
+        }
     }
 
     vol-popup := PopupWindow {
-        x: root.width - 20px - 132px - 12px - 190px;
+        x: root.width - 20px - 132px - 12px - 232px;
         y: -44px;
         width: 220px;
         height: 48px;
@@ -1089,7 +1954,7 @@ export component PlayerBar inherits Rectangle {
     }
 
     dev-popup := PopupWindow {
-        x: root.width - 20px - 132px - 12px - 250px;
+        x: root.width - 20px - 132px - 12px - 292px;
         y: -58px;
         width: 250px;
         height: 62px;

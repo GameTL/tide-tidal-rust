@@ -1,0 +1,29 @@
+// Time-grouped catalog feed (Last week / This month / Last month / Older).
+import { ScrollView } from "std-widgets.slint";
+import { App, Theme, CardData, SectionData } from "common.slint";
+import { ModulesView } from "views.slint";
+
+export component FeedView inherits Rectangle {
+    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    ScrollView {
+        content-y <=> App.scroll-y;
+        VerticalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-top: 8px;
+            padding-bottom: 48px;
+            alignment: start;
+            Rectangle {
+                height: 48px;
+                Text {
+                    text: "Feed";
+                    color: Theme.text;
+                    font-size: 28px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+            ModulesView { }
+        }
+    }
+}

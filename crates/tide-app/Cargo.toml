@@ -25,11 +25,19 @@ serde_json.workspace = true
 dirs.workspace = true
 open = "5.3"
 arboard = { version = "3.7", default-features = false }
+reqwest.workspace = true
+rfd = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+slint = { version = "1.18.1", features = ["renderer-skia"] }
+# Patched in the workspace manifest; used directly for its memory controls.
+i-slint-renderer-skia = { version = "=1.18.1", default-features = false }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSWorkspace"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSApplication", "NSEvent", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSGeometry", "NSString"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

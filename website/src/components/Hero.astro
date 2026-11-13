@@ -7,53 +7,56 @@ const { latestMacUrl } = Astro.props;
 const base = import.meta.env.BASE_URL;
 const github = 'https://github.com/GameTL/tide-tidal-rust';
 const ctaHref = latestMacUrl ?? `${github}/releases`;
-const ctaDisabled = !latestMacUrl;
 ---
 <section class="hero">
-  <div class="ornaments" aria-hidden="true">
-    <span class="badge max">MAX</span>
-    <span class="badge hires">HIRES</span>
-    <span class="badge lossless">LOSSLESS</span>
-    <span class="mark m1"><img src={`${base}brand/tide.png`} alt="" /></span>
-    <span class="mark m2"><img src={`${base}brand/tide.png`} alt="" /></span>
+  <div class="hero-float" aria-hidden="true">
+    <span class="float-tile ft-1">
+      <svg viewBox="0 0 24 24"><path d="M9 18V5l11-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="17" cy="16" r="3" /></svg>
+    </span>
+    <span class="float-tile ft-2 q-max">MAX</span>
+    <span class="float-tile ft-3 q-high">HIGH</span>
+    <span class="float-tile ft-4 sparkle">
+      <svg viewBox="0 0 24 24"><path d="M12 3c.6 4.6 3.4 7.4 8 8-4.6.6-7.4 3.4-8 8-.6-4.6-3.4-7.4-8-8 4.6-.6 7.4-3.4 8-8z" /></svg>
+    </span>
+    <span class="float-tile ft-5">
+      <svg viewBox="0 0 24 24"><path d="M3 12h2M7 8v8M11 4v16M15 7v10M19 10v4M21 12h0" /></svg>
+    </span>
+    <span class="float-tile ft-6">
+      <svg viewBox="0 0 24 24"><path d="M4 15v-3a8 8 0 0 1 16 0v3" /><rect x="3" y="14" width="4" height="6" rx="1.5" /><rect x="17" y="14" width="4" height="6" rx="1.5" /></svg>
+    </span>
   </div>
 
-  <div class="wrap">
-    <p class="eyebrow">
-      <img src={`${base}brand/tide.png`} alt="" />
-      TIDE
+  <div class="container hero-inner">
+    <div class="hero-logo">
+      <span class="hero-logo-glow" aria-hidden="true"></span>
+      <img src={`${base}brand/tide.png`} alt="TIDE" width="128" height="128" />
+    </div>
+    <h1>The native player<br />for your TIDAL<br />subscription.</h1>
+    <p class="hero-sub">
+      Pure Rust, for macOS. Bit-perfect playback, a parametric EQ, a native UI
+      that’s faster everywhere, and no telemetry.
     </p>
-    <h1>The unofficial native player for your TIDAL subscription.</h1>
-    <p class="lead">
-      Opinionated TIDAL API music player in pure Rust. Bring your own subscription.
-      Bit-perfect when the output allows. I don’t want your data.
-    </p>
-    <div class="btn-row">
-      <a
-        class="btn btn-primary"
-        href={ctaHref}
-        aria-disabled={ctaDisabled ? 'true' : undefined}
-      >
+    <div class="hero-ctas">
+      <a class="btn-primary" href={ctaHref}>
         <svg class="apple" viewBox="0 0 16 16" aria-hidden="true">
           <path d="M12.5 8.2c0-2.1 1.7-3.1 1.8-3.2-1-1.4-2.5-1.6-3-1.7-1.3-.1-2.5.8-3.1.8-.7 0-1.7-.7-2.8-.7-1.4 0-2.8.9-3.5 2.2-1.5 2.6-.4 6.4 1.1 8.5.7 1 1.6 2.2 2.7 2.1 1.1-.1 1.5-.7 2.8-.7s1.7.7 2.8.6c1.2-.1 1.9-1 2.6-2 .8-1.2 1.1-2.3 1.1-2.4-.1 0-2.2-.9-2.2-3.5zM10.3 2.6c.6-.7 1-1.7.9-2.6-.9 0-1.9.6-2.5 1.3-.6.6-1.1 1.6-.9 2.5 1 .1 1.9-.5 2.5-1.2z"></path>
         </svg>
         Download for macOS
       </a>
-      <a class="btn btn-ghost" href={github} target="_blank" rel="noreferrer">
-        GitHub ↗
+      <a class="text-link" href={github} target="_blank" rel="noreferrer">
+        Read the source <span aria-hidden="true">↗</span>
       </a>
     </div>
-    <p class="note">
-      Universal binary · unsigned build · right-click the app → Open the first time.
-      {ctaDisabled ? ' No release published yet — CTA opens GitHub Releases.' : ''}
-    </p>
+    <p class="hero-meta">Universal binary · Apple Silicon &amp; Intel · Unofficial</p>
+  </div>
 
-    <figure class="preview">
+  <div class="container">
+    <figure class="hero-shot">
       <img
         src={`${base}screenshots/app-home.png`}
         alt="TIDE desktop app showing the home library"
-        width="1600"
-        height="1000"
+        width="4336"
+        height="2802"
       />
     </figure>
   </div>

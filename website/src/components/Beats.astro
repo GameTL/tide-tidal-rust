@@ -1,48 +1,137 @@
 ---
 const base = import.meta.env.BASE_URL;
 ---
-<section class="section">
-  <div class="wrap">
-    <div class="section-head">
-      <h2>Local-first. Honest about the signal path.</h2>
-      <p>No Electron shell. No telemetry. Just your subscription and a lean native player.</p>
+<section class="sec">
+  <div class="container split">
+    <div class="split-copy">
+      <h2>Bit-perfect, when the output allows.</h2>
+      <p>
+        TIDE switches your device to the track’s sample rate, so nothing is
+        resampled. No exclusive mode, so other apps still play.
+      </p>
+      <ul class="tiers">
+        <li><span class="dot q-max"></span><strong class="q-max">MAX</strong> Up to 24-bit / 192 kHz FLAC</li>
+        <li><span class="dot q-high"></span><strong class="q-high">HIGH</strong> 16-bit / 44.1 kHz FLAC</li>
+        <li><span class="dot q-low"></span><strong class="q-low">LOW</strong> AAC, for slow connections</li>
+      </ul>
+      <p class="fine">Tap the quality pill to see the signal path, and why it is or isn’t bit-perfect.</p>
     </div>
+    <figure class="signal-shot">
+      <img
+        src={`${base}screenshots/bit-perfect.png`}
+        alt="TIDE signal path popup: a 24-bit 48 kHz FLAC source, sample rate conversion to 44.1 kHz, and MacBook Pro speakers, with the bit-perfect playback toggle"
+        width="967"
+        height="1226"
+        loading="lazy"
+      />
+    </figure>
+  </div>
+</section>
 
-    <div class="beats">
-      <div class="beat-card">
-        <h3>Bit-perfect when the output allows</h3>
-        <p>
-          Match the device sample rate to the track so nothing is resampled when the
-          hardware can do it. TIDE does not take exclusive access of the device —
-          other apps can still play sound. Bluetooth and virtual devices stay at their
-          own rate because those links re-clock anyway.
-        </p>
+<section class="sec" id="dsp">
+  <div class="container split split-rev">
+    <div class="tile eq">
+      <div class="term-bar">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>DSP · Headphones</span>
       </div>
-      <figure class="beat-shot">
-        <img
-          src={`${base}screenshots/bit-perfect.png`}
-          alt="TIDE signal path showing bit-perfect playback without exclusive device access"
-          width="1200"
-          height="900"
-        />
-      </figure>
+      <div class="eq-body">
+        <div class="eq-legend">
+          <span class="usr">USR EQ</span>
+          <span class="spk">SPK EQ</span>
+          <span class="all">Result</span>
+        </div>
+        <svg class="eq-graph" viewBox="0 0 400 160" role="img" aria-label="Equaliser response: a bass shelf from the USR EQ, a headphone correction from the SPK EQ, and their sum">
+          <g class="eq-grid">
+            <line x1="0" y1="80" x2="400" y2="80" class="zero" />
+            <line x1="0" y1="40" x2="400" y2="40" />
+            <line x1="0" y1="120" x2="400" y2="120" />
+            <line x1="93.2" y1="0" x2="93.2" y2="160" />
+            <line x1="226.5" y1="0" x2="226.5" y2="160" />
+            <line x1="359.9" y1="0" x2="359.9" y2="160" />
+          </g>
+          <path class="eq-line spk" d="M0.0 80.3L3.3 80.3L6.7 80.4L10.0 80.4L13.3 80.5L16.7 80.5L20.0 80.6L23.3 80.7L26.7 80.8L30.0 80.9L33.3 81.0L36.7 81.1L40.0 81.3L43.3 81.4L46.7 81.6L50.0 81.8L53.3 82.1L56.7 82.4L60.0 82.7L63.3 83.0L66.7 83.5L70.0 84.0L73.3 84.5L76.7 85.2L80.0 86.0L83.3 86.9L86.7 88.0L90.0 89.2L93.3 90.7L96.7 92.4L100.0 94.4L103.3 96.8L106.7 99.4L110.0 102.3L113.3 105.5L116.7 108.5L120.0 111.3L123.3 113.3L126.7 114.1L130.0 113.7L133.3 112.0L136.7 109.4L140.0 106.4L143.3 103.2L146.7 100.1L150.0 97.3L153.3 94.8L156.7 92.7L160.0 90.8L163.3 89.2L166.7 87.8L170.0 86.6L173.3 85.5L176.7 84.6L180.0 83.8L183.3 83.0L186.7 82.4L190.0 81.7L193.3 81.2L196.7 80.6L200.0 80.1L203.3 79.6L206.7 79.0L210.0 78.5L213.3 77.9L216.7 77.3L220.0 76.6L223.3 75.9L226.7 75.1L230.0 74.2L233.3 73.2L236.7 72.1L240.0 70.8L243.3 69.4L246.7 67.8L250.0 66.0L253.3 64.1L256.7 61.9L260.0 59.7L263.3 57.5L266.7 55.4L270.0 53.7L273.3 52.5L276.7 52.0L280.0 52.4L283.3 53.4L286.7 55.2L290.0 57.3L293.3 59.7L296.7 62.2L300.0 64.7L303.3 67.1L306.7 69.5L310.0 71.9L313.3 74.6L316.7 77.8L320.0 82.0L323.3 88.6L326.7 99.5L330.0 114.2L333.3 117.7L336.7 104.0L340.0 91.4L343.3 83.8L346.7 79.2L350.0 76.0L353.3 73.5L356.7 71.2L360.0 69.1L363.3 67.1L366.7 65.2L370.0 63.4L373.3 61.9L376.7 60.6L380.0 59.5L383.3 58.7L386.7 58.1L390.0 57.7L393.3 57.4L396.7 57.3L400.0 57.2" />
+          <path class="eq-line usr" d="M0.0 28.7L3.3 28.7L6.7 28.7L10.0 28.8L13.3 28.8L16.7 28.9L20.0 28.9L23.3 29.0L26.7 29.1L30.0 29.2L33.3 29.4L36.7 29.6L40.0 29.8L43.3 30.1L46.7 30.5L50.0 30.9L53.3 31.4L56.7 32.1L60.0 32.9L63.3 33.8L66.7 35.0L70.0 36.3L73.3 37.9L76.7 39.7L80.0 41.8L83.3 44.1L86.7 46.6L90.0 49.2L93.3 52.0L96.7 54.8L100.0 57.7L103.3 60.4L106.7 63.0L110.0 65.4L113.3 67.6L116.7 69.6L120.0 71.3L123.3 72.8L126.7 74.1L130.0 75.2L133.3 76.1L136.7 76.8L140.0 77.4L143.3 77.9L146.7 78.3L150.0 78.7L153.3 78.9L156.7 79.2L160.0 79.4L163.3 79.5L166.7 79.6L170.0 79.8L173.3 79.9L176.7 79.9L180.0 80.0L183.3 80.1L186.7 80.1L190.0 80.2L193.3 80.3L196.7 80.3L200.0 80.4L203.3 80.5L206.7 80.6L210.0 80.6L213.3 80.7L216.7 80.8L220.0 81.0L223.3 81.1L226.7 81.3L230.0 81.5L233.3 81.7L236.7 81.9L240.0 82.2L243.3 82.6L246.7 83.0L250.0 83.5L253.3 84.0L256.7 84.7L260.0 85.6L263.3 86.6L266.7 87.8L270.0 89.3L273.3 91.0L276.7 93.1L280.0 95.4L283.3 97.9L286.7 100.2L290.0 102.0L293.3 102.8L296.7 102.4L300.0 100.9L303.3 98.6L306.7 96.1L310.0 93.6L313.3 91.4L316.7 89.5L320.0 87.9L323.3 86.6L326.7 85.5L330.0 84.6L333.3 83.9L336.7 83.3L340.0 82.8L343.3 82.3L346.7 82.0L350.0 81.7L353.3 81.4L356.7 81.2L360.0 81.0L363.3 80.8L366.7 80.7L370.0 80.6L373.3 80.5L376.7 80.4L380.0 80.3L383.3 80.2L386.7 80.2L390.0 80.1L393.3 80.1L396.7 80.1L400.0 80.0" />
+          <path class="eq-line all" d="M0.0 29.0L3.3 29.0L6.7 29.1L10.0 29.2L13.3 29.3L16.7 29.4L20.0 29.5L23.3 29.7L26.7 29.9L30.0 30.1L33.3 30.4L36.7 30.7L40.0 31.1L43.3 31.5L46.7 32.1L50.0 32.7L53.3 33.5L56.7 34.4L60.0 35.6L63.3 36.9L66.7 38.5L70.0 40.3L73.3 42.5L76.7 44.9L80.0 47.8L83.3 51.0L86.7 54.5L90.0 58.4L93.3 62.7L96.7 67.3L100.0 72.1L103.3 77.2L106.7 82.4L110.0 87.8L113.3 93.1L116.7 98.1L120.0 102.6L123.3 106.1L126.7 108.2L130.0 108.8L133.3 108.0L136.7 106.2L140.0 103.8L143.3 101.1L146.7 98.5L150.0 96.0L153.3 93.8L156.7 91.8L160.0 90.2L163.3 88.7L166.7 87.4L170.0 86.3L173.3 85.4L176.7 84.5L180.0 83.8L183.3 83.1L186.7 82.5L190.0 82.0L193.3 81.4L196.7 81.0L200.0 80.5L203.3 80.0L206.7 79.6L210.0 79.1L213.3 78.6L216.7 78.1L220.0 77.6L223.3 77.0L226.7 76.4L230.0 75.7L233.3 74.9L236.7 74.0L240.0 73.1L243.3 72.0L246.7 70.8L250.0 69.5L253.3 68.1L256.7 66.7L260.0 65.3L263.3 64.1L266.7 63.2L270.0 63.0L273.3 63.5L276.7 65.1L280.0 67.8L283.3 71.3L286.7 75.4L290.0 79.3L293.3 82.5L296.7 84.6L300.0 85.6L303.3 85.7L306.7 85.6L310.0 85.6L313.3 86.0L316.7 87.3L320.0 90.0L323.3 95.2L326.7 105.0L330.0 118.9L333.3 121.6L336.7 107.2L340.0 94.2L343.3 86.2L346.7 81.2L350.0 77.7L353.3 74.9L356.7 72.4L360.0 70.1L363.3 67.9L366.7 65.9L370.0 64.0L373.3 62.3L376.7 60.9L380.0 59.8L383.3 58.9L386.7 58.3L390.0 57.8L393.3 57.5L396.7 57.3L400.0 57.2" />
+          <circle class="eq-dot spk" cx="127.2" cy="114.1" r="4" />
+          <circle class="eq-dot spk" cx="277.2" cy="52.0" r="4" />
+          <circle class="eq-dot spk" cx="332.2" cy="119.1" r="4" />
+          <circle class="eq-dot spk" cx="359.9" cy="69.2" r="4" />
+          <circle class="eq-dot usr" cx="96.0" cy="54.3" r="4" />
+          <circle class="eq-dot usr" cx="293.9" cy="102.9" r="4" />
+        </svg>
+        <div class="eq-axis" aria-hidden="true"><span>100</span><span>1k</span><span>10k</span></div>
+        <div class="eq-foot">
+          <span>Preamp <strong>−4.5 dB</strong></span>
+          <span class="pill-ok">Auto</span>
+        </div>
+      </div>
+    </div>
+    <div class="split-copy">
+      <h2>Two EQs per output.</h2>
+      <p>
+        SPK corrects your headphones or speakers. USR is for taste. Each output
+        remembers its own pair.
+      </p>
+      <ul class="checks">
+        <li>Search and load AutoEq profiles in the app</li>
+        <li>Import Equalizer APO and GraphicEQ files</li>
+        <li>Up to 20 peak and shelf bands, with undo</li>
+        <li>Auto preamp, so boosts don’t clip</li>
+      </ul>
+      <p class="fine">With an EQ on, the signal path says so. Turn it off for bit-perfect again.</p>
+    </div>
+  </div>
+</section>
 
-      <div class="beat-card">
-        <h3>RAM that stays out of the way</h3>
-        <p>
-          Typically under about 100&nbsp;MB resident while playing, versus
-          multi-hundred-megabyte Electron clients. Refresh-rate-first GPU UI without
-          shipping a browser.
-        </p>
+<section class="sec">
+  <div class="container split">
+    <div class="split-copy">
+      <h2>I don’t want your data.</h2>
+      <p>Tokens, cache and play counts stay on your Mac.</p>
+      <ul class="checks">
+        <li>No account besides your TIDAL login</li>
+        <li>No telemetry</li>
+        <li>Open source, so you can check</li>
+      </ul>
+    </div>
+    <div class="tile net">
+      <div class="term-bar">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>outbound connections</span>
       </div>
-      <div class="beat-card">
-        <h3>I don’t want your data</h3>
-        <p>
-          Session tokens and library cache live on your Mac. Play counts stay local.
-          There is no analytics, crash reporter, or update phoning home — TIDE only
-          talks to TIDAL’s own endpoints for music.
-        </p>
+      <div class="net-body">
+        <div class="net-row"><span class="on">●</span><code>api.tidal.com</code><span class="muted">music</span></div>
+        <div class="net-row"><span class="on">●</span><code>resources.tidal.com</code><span class="muted">artwork</span></div>
+        <div class="net-row"><span class="on">●</span><code>raw.githubusercontent.com</code><span class="muted">AutoEq, on request</span></div>
+        <div class="net-row off"><span>○</span><code>analytics</code><span>none</span></div>
+        <div class="net-row off"><span>○</span><code>crash reports</code><span>none</span></div>
+        <div class="net-row off"><span>○</span><code>update checks</code><span>none</span></div>
       </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="container split split-rev">
+    <div class="split-copy">
+      <h2>Native feels different.</h2>
+      <p>
+        Every click, scroll and search lands instantly. It’s faster than the official
+        app everywhere, because there’s no browser underneath. Pure Rust, drawn on the
+        GPU at your display’s refresh rate.
+      </p>
+    </div>
+    <div class="tile ram">
+      <div class="ram-row">
+        <div class="ram-label"><span>TIDE</span><span>200 MB – 1 GB</span></div>
+        <div class="ram-track"><span class="ram-bar tide" style="width: 83%; --lo: 20%"></span></div>
+      </div>
+      <div class="ram-row">
+        <div class="ram-label"><span class="muted">Official app (Electron)</span><span class="muted">500 MB – 1.2 GB</span></div>
+        <div class="ram-track"><span class="ram-bar electron" style="width: 100%; --lo: 42%"></span></div>
+      </div>
+      <p class="ram-note">Resident memory while playing. We’re still bringing TIDE’s number down.</p>
     </div>
   </div>
 </section>
