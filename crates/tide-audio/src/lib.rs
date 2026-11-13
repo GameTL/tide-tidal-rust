@@ -25,6 +25,9 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use thiserror::Error;
 
+pub mod eq;
+pub use eq::{Band, BandKind, EqChain, EqProfile};
+
 /// Open cache file while DASH segments are still being appended.
 /// Reports `is_seekable() == false` and `byte_len() == None` so Symphonia's ISO-MP4
 /// demuxer streams incrementally across appended `moof`+`mdat` fragments without
@@ -42,7 +45,10 @@ impl Read for GrowingFile {
 
 impl Seek for GrowingFile {
     fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "growing cache file is stream-only"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "growing cache file is stream-only",
+        ))
     }
 }
 
@@ -118,7 +124,10 @@ impl OutputKind {
     /// re-clocking them is pointless (the link re-encodes the audio) and can
     /// drop the connection.
     pub fn allows_rate_matching(self) -> bool {
-        !matches!(self, OutputKind::Bluetooth | OutputKind::Network | OutputKind::Virtual)
+        !matches!(
+            self,
+            OutputKind::Bluetooth | OutputKind::Network | OutputKind::Virtual
+        )
     }
 
     pub fn label(self) -> &'static str {
@@ -149,13 +158,73 @@ pub struct OutputInfo {
 
 impl Default for OutputInfo {
     fn default() -> Self {
-        Self { id: String::new(), name: "System Default".into(), kind: OutputKind::Unknown, sample_rate: 48_000, supported_rates: Vec::new() }
+        Self {
+            id: String::new(),
+            name: "System Default".into(),
+            kind: OutputKind::Unknown,
+            sample_rate: 48_000,
+            supported_rates: Vec::new(),
+        }
     }
 }
 
-const STANDARD_RATES: [u32; 8] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000];
+const STANDARD_RATES: [u32; 8] = [
+    44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000,
+];
+
+/// Largest integer downsample we handle with the HCF (box-average) path.
+/// 384 kHz → 48 kHz and 352.8 kHz → 44.1 kHz are both ÷8.
+const MAX_HCF_DECIM: usize = 8;
 
 const NONE: u64 = u64::MAX;
+
+/// Highest common factor. Reduces a resampling ratio `from:to` to lowest terms.
+fn hcf(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Integer downsample factor `M` when `from/to` reduces to `M:1` via HCF.
+/// `Some(2)` for 88.2→44.1 and 96→48; `None` for cross-family rates like 96→44.1.
+fn downsample_factor(from: u32, to: u32) -> Option<u32> {
+    if from <= to || to == 0 {
+        return None;
+    }
+    let g = hcf(from, to);
+    let upsample = to / g;
+    let downsample = from / g;
+    (upsample == 1 && downsample > 1 && downsample as usize <= MAX_HCF_DECIM).then_some(downsample)
+}
+
+/// Rate the device should run at for `source`. Native if the device has it;
+/// otherwise the highest supported integer-divisor (HCF) rate, so 96 kHz plays
+/// at 48 kHz rather than being interpolated down to 44.1 kHz.
+fn pick_output_rate(source: u32, supported: &[u32], current: u32) -> u32 {
+    if supported.contains(&source) {
+        return source;
+    }
+    supported
+        .iter()
+        .copied()
+        .filter(|&rate| downsample_factor(source, rate).is_some())
+        .max()
+        .unwrap_or(current)
+}
+
+fn push_box_average(frames: &[[f32; 2]], out: &mut Vec<f32>) {
+    let n = frames.len() as f32;
+    let mut l = 0.0;
+    let mut r = 0.0;
+    for frame in frames {
+        l += frame[0];
+        r += frame[1];
+    }
+    out.push(l / n);
+    out.push(r / n);
+}
+
 /// Samples (not frames) kept decoded ahead of the output callback.
 const BUFFER_AHEAD_SECS: f32 = 1.5;
 
@@ -167,9 +236,12 @@ struct AudioSource {
     bits_per_sample: u32,
     item: TrackQueueItem,
     sample_buf: Option<SampleBuffer<f32>>,
-    // Linear resampler state (only used when the device cannot run at the source rate).
+    // Linear resampler state (used when the ratio is not an integer HCF downsample).
     resample_pos: f64,
     last_frame: [f32; 2],
+    /// Leftover source frames for integer HCF downsample across packets.
+    hold: [[f32; 2]; MAX_HCF_DECIM],
+    hold_len: u8,
     /// Cache file still growing while segments download in the background.
     growing: bool,
     eof_wait: Option<Instant>,
@@ -187,7 +259,12 @@ impl AudioSource {
             MediaSourceStream::new(Box::new(file), Default::default())
         };
         let probed = symphonia::default::get_probe()
-            .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &Hint::new(),
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| AudioError::Decoder(e.to_string()))?;
 
         let reader = probed.format;
@@ -211,6 +288,8 @@ impl AudioSource {
             sample_buf: None,
             resample_pos: 0.0,
             last_frame: [0.0; 2],
+            hold: [[0.0; 2]; MAX_HCF_DECIM],
+            hold_len: 0,
             growing,
             eof_wait: None,
             frames_decoded: 0,
@@ -218,7 +297,11 @@ impl AudioSource {
     }
 
     fn format(&self) -> FormatInfo {
-        FormatInfo { bits_per_sample: self.bits_per_sample, sample_rate: self.sample_rate, bitrate_kbps: 0 }
+        FormatInfo {
+            bits_per_sample: self.bits_per_sample,
+            sample_rate: self.sample_rate,
+            bitrate_kbps: 0,
+        }
     }
 
     /// Progressive head hit EOF after the `.tmp` was renamed to `.audio`. Reopen the
@@ -228,7 +311,8 @@ impl AudioSource {
         if !complete.exists() {
             return Ok(false);
         }
-        let pos = Duration::from_secs_f64(self.frames_decoded as f64 / self.sample_rate.max(1) as f64);
+        let pos =
+            Duration::from_secs_f64(self.frames_decoded as f64 / self.sample_rate.max(1) as f64);
         let mut item = self.item.clone();
         item.file_path = complete;
         let decoded = self.frames_decoded;
@@ -251,7 +335,9 @@ impl AudioSource {
                     self.eof_wait = None;
                     break packet;
                 }
-                Err(SymphoniaError::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(SymphoniaError::IoError(err))
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     if !self.growing {
                         return Ok(false);
                     }
@@ -288,15 +374,26 @@ impl AudioSource {
         let spec = *decoded.spec();
         let channels = spec.channels.count().max(1);
         let needed = decoded.capacity() as u64;
-        if self.sample_buf.as_ref().is_none_or(|b| (b.capacity() as u64) < needed * channels as u64) {
+        if self
+            .sample_buf
+            .as_ref()
+            .is_none_or(|b| (b.capacity() as u64) < needed * channels as u64)
+        {
             self.sample_buf = Some(SampleBuffer::new(needed, spec));
         }
-        let buf = self.sample_buf.as_mut().expect("sample buffer allocated above");
+        let buf = self
+            .sample_buf
+            .as_mut()
+            .expect("sample buffer allocated above");
         buf.copy_interleaved_ref(decoded);
         let samples = buf.samples();
         let frame = |i: usize| -> [f32; 2] {
             let base = i * channels;
-            if channels == 1 { [samples[base]; 2] } else { [samples[base], samples[base + 1]] }
+            if channels == 1 {
+                [samples[base]; 2]
+            } else {
+                [samples[base], samples[base + 1]]
+            }
         };
         let frames = samples.len() / channels;
 
@@ -304,6 +401,42 @@ impl AudioSource {
             out.reserve(frames * 2);
             for i in 0..frames {
                 out.extend_from_slice(&frame(i));
+            }
+        } else if let Some(factor) = downsample_factor(self.sample_rate, out_rate) {
+            // Integer HCF downsample (88.2→44.1, 96→48, 192→48, …): box-average
+            // each group of M source frames. Cheap anti-alias vs drop-every-Mth.
+            // ponytail: box average, not a half-band FIR. Upgrade if we grow a
+            // real resampler for cross-family rates (96→44.1) as well.
+            let m = factor as usize;
+            let mut i = 0;
+            if self.hold_len > 0 {
+                while i < frames && (self.hold_len as usize) < m {
+                    self.hold[self.hold_len as usize] = frame(i);
+                    self.hold_len += 1;
+                    i += 1;
+                }
+                if self.hold_len as usize == m {
+                    push_box_average(&self.hold[..m], out);
+                    self.hold_len = 0;
+                }
+            }
+            let inv = 1.0 / factor as f32;
+            while i + m <= frames {
+                let mut l = 0.0;
+                let mut r = 0.0;
+                for k in 0..m {
+                    let f = frame(i + k);
+                    l += f[0];
+                    r += f[1];
+                }
+                out.push(l * inv);
+                out.push(r * inv);
+                i += m;
+            }
+            while i < frames {
+                self.hold[self.hold_len as usize] = frame(i);
+                self.hold_len += 1;
+                i += 1;
             }
         } else {
             // `resample_pos` is the read position in source frames relative to this
@@ -313,7 +446,11 @@ impl AudioSource {
             while pos < frames as f64 - 1.0 {
                 let idx = pos.floor();
                 let frac = (pos - idx) as f32;
-                let a = if idx < 0.0 { self.last_frame } else { frame(idx as usize) };
+                let a = if idx < 0.0 {
+                    self.last_frame
+                } else {
+                    frame(idx as usize)
+                };
                 let b = frame((idx + 1.0) as usize);
                 out.push(a[0] + (b[0] - a[0]) * frac);
                 out.push(a[1] + (b[1] - a[1]) * frac);
@@ -331,25 +468,44 @@ impl AudioSource {
     fn seek(&mut self, to: Duration) -> Result<(), AudioError> {
         if self.growing {
             let complete = self.item.file_path.with_extension("audio");
-            let reopen_path = if complete.exists() { complete } else { self.item.file_path.clone() };
+            let reopen_path = if complete.exists() {
+                complete
+            } else {
+                self.item.file_path.clone()
+            };
             let mut item = self.item.clone();
             item.file_path = reopen_path;
             let mut fresh = Self::open(item)?;
             fresh
                 .reader
-                .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(to.as_secs_f64()), track_id: Some(fresh.track_id) })
+                .seek(
+                    SeekMode::Accurate,
+                    SeekTo::Time {
+                        time: Time::from(to.as_secs_f64()),
+                        track_id: Some(fresh.track_id),
+                    },
+                )
                 .map_err(|e| AudioError::Decoder(e.to_string()))?;
             fresh.decoder.reset();
-            fresh.frames_decoded = (to.as_secs_f64() * fresh.sample_rate.max(1) as f64).round() as u64;
+            fresh.frames_decoded =
+                (to.as_secs_f64() * fresh.sample_rate.max(1) as f64).round() as u64;
             *self = fresh;
             return Ok(());
         }
         self.reader
-            .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(to.as_secs_f64()), track_id: Some(self.track_id) })
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::from(to.as_secs_f64()),
+                    track_id: Some(self.track_id),
+                },
+            )
             .map_err(|e| AudioError::Decoder(e.to_string()))?;
         self.decoder.reset();
         self.resample_pos = 0.0;
         self.last_frame = [0.0; 2];
+        self.hold = [[0.0; 2]; MAX_HCF_DECIM];
+        self.hold_len = 0;
         self.frames_decoded = (to.as_secs_f64() * self.sample_rate.max(1) as f64).round() as u64;
         self.eof_wait = None;
         Ok(())
@@ -415,6 +571,10 @@ struct Shared {
     /// The device has been handed back (paused / quitting) and must be
     /// re-clocked before playback continues.
     released: AtomicBool,
+    /// Equalisers the output callback runs, in order. The callback picks up a
+    /// change when `eq_version` moves.
+    eq: Mutex<Vec<EqProfile>>,
+    eq_version: AtomicU64,
 }
 
 pub struct AudioPlayer {
@@ -452,13 +612,24 @@ fn default_output_transport() -> Option<OutputKind> {
     const SCOPE_GLOBAL: u32 = fourcc(b"glob");
 
     let read_u32 = |object: u32, selector: u32| -> Option<u32> {
-        let address = PropertyAddress { selector, scope: SCOPE_GLOBAL, element: 0 };
+        let address = PropertyAddress {
+            selector,
+            scope: SCOPE_GLOBAL,
+            element: 0,
+        };
         let mut value = 0u32;
         let mut size = size_of::<u32>() as u32;
         // SAFETY: both properties are documented to yield a single 32-bit value,
         // and `size` tells CoreAudio how much room `value` has.
         let status = unsafe {
-            AudioObjectGetPropertyData(object, &address, 0, std::ptr::null(), &mut size, (&mut value as *mut u32).cast())
+            AudioObjectGetPropertyData(
+                object,
+                &address,
+                0,
+                std::ptr::null(),
+                &mut size,
+                (&mut value as *mut u32).cast(),
+            )
         };
         (status == 0).then_some(value)
     };
@@ -519,18 +690,33 @@ fn describe_output(device: &cpal::Device, sample_rate: u32, channels: u16) -> Ou
 }
 
 fn default_output_id() -> Option<String> {
-    cpal::default_host().default_output_device()?.id().ok().map(|id| id.to_string())
+    cpal::default_host()
+        .default_output_device()?
+        .id()
+        .ok()
+        .map(|id| id.to_string())
 }
 
 /// `force` re-clocks regardless of the rate-matching rules; it is used to put
 /// a device back to the rate it had before TIDE changed it.
-fn build_stream(shared: &Arc<Shared>, want_rate: Option<u32>, force: bool) -> Result<(Stream, OutputInfo), AudioError> {
+fn build_stream(
+    shared: &Arc<Shared>,
+    want_rate: Option<u32>,
+    force: bool,
+) -> Result<(Stream, OutputInfo), AudioError> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| AudioError::Device("No output device available".to_string()))?;
-    let default_config = device.default_output_config().map_err(|e| AudioError::Device(e.to_string()))?;
-    let described = describe_output(&device, default_config.sample_rate(), default_config.channels());
-    let may_match = force || (shared.rate_matching.load(Ordering::Relaxed) && described.kind.allows_rate_matching());
+    let default_config = device
+        .default_output_config()
+        .map_err(|e| AudioError::Device(e.to_string()))?;
+    let described = describe_output(
+        &device,
+        default_config.sample_rate(),
+        default_config.channels(),
+    );
+    let may_match = force
+        || (shared.rate_matching.load(Ordering::Relaxed) && described.kind.allows_rate_matching());
     {
         // First contact with this device: whatever it runs at now is "original".
         let mut original = shared.original.lock().unwrap();
@@ -544,9 +730,10 @@ fn build_stream(shared: &Arc<Shared>, want_rate: Option<u32>, force: bool) -> Re
         .filter(|r| may_match && *r != default_config.sample_rate())
         .and_then(|rate| {
             device.supported_output_configs().ok()?.find_map(|range| {
-                (range.sample_format() == SampleFormat::F32 && range.channels() == default_config.channels())
-                    .then(|| range.try_with_sample_rate(rate))
-                    .flatten()
+                (range.sample_format() == SampleFormat::F32
+                    && range.channels() == default_config.channels())
+                .then(|| range.try_with_sample_rate(rate))
+                .flatten()
             })
         })
         .unwrap_or(default_config);
@@ -557,15 +744,27 @@ fn build_stream(shared: &Arc<Shared>, want_rate: Option<u32>, force: bool) -> Re
     let rate = config.sample_rate();
     let channels = config.channels() as usize;
     let cb_shared = Arc::clone(shared);
+    let mut eq_seen = shared.eq_version.load(Ordering::Relaxed);
+    let mut eq = EqChain::default();
+    eq.configure(&shared.eq.lock().unwrap(), rate);
 
     let stream = device
         .build_output_stream(
             config.into(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 data.fill(0.0);
+                let eq_version = cb_shared.eq_version.load(Ordering::Relaxed);
+                if eq_version != eq_seen {
+                    // Never wait in the audio callback: a busy lock is retried next time.
+                    if let Ok(profiles) = cb_shared.eq.try_lock() {
+                        eq.configure(&profiles, rate);
+                        eq_seen = eq_version;
+                    }
+                }
                 if !cb_shared.playing.load(Ordering::Relaxed) {
                     return;
                 }
+                let equalise = eq.is_active();
                 let vol = cb_shared.volume.load(Ordering::Relaxed) as f32 / 1000.0;
                 let gain = vol * vol;
                 let mut buf = cb_shared.buffer.lock().unwrap();
@@ -574,8 +773,14 @@ fn build_stream(shared: &Arc<Shared>, want_rate: Option<u32>, force: bool) -> Re
                     if buf.samples.len() < 2 {
                         break;
                     }
-                    let l = buf.samples.pop_front().unwrap_or(0.0) * gain;
-                    let r = buf.samples.pop_front().unwrap_or(0.0) * gain;
+                    let mut frame = [
+                        buf.samples.pop_front().unwrap_or(0.0),
+                        buf.samples.pop_front().unwrap_or(0.0),
+                    ];
+                    if equalise {
+                        frame = eq.process(frame);
+                    }
+                    let [l, r] = [frame[0] * gain, frame[1] * gain];
                     if channels == 1 {
                         out[0] = (l + r) * 0.5;
                     } else {
@@ -607,8 +812,16 @@ fn build_stream(shared: &Arc<Shared>, want_rate: Option<u32>, force: bool) -> Re
             None,
         )
         .map_err(|e| AudioError::Stream(e.to_string()))?;
-    stream.play().map_err(|e| AudioError::Stream(e.to_string()))?;
-    Ok((stream, OutputInfo { sample_rate: rate, ..described }))
+    stream
+        .play()
+        .map_err(|e| AudioError::Stream(e.to_string()))?;
+    Ok((
+        stream,
+        OutputInfo {
+            sample_rate: rate,
+            ..described
+        },
+    ))
 }
 
 fn decoder_loop(shared: Arc<Shared>) {
@@ -634,7 +847,10 @@ fn decoder_loop(shared: Arc<Shared>) {
                     let mut buf = shared.buffer.lock().unwrap();
                     buf.switch_at = buf.pushed;
                     buf.end_at = NONE;
-                    buf.upcoming = Some(Playing { item: opened.item.clone(), format: opened.format() });
+                    buf.upcoming = Some(Playing {
+                        item: opened.item.clone(),
+                        format: opened.format(),
+                    });
                     *source = Some(opened);
                 }
                 Err(e) => tracing::error!("Failed to open next audio source: {e}"),
@@ -643,7 +859,11 @@ fn decoder_loop(shared: Arc<Shared>) {
         }
 
         chunk.clear();
-        let more = match source.as_mut().expect("checked above").read_stereo(device_rate, &mut chunk) {
+        let more = match source
+            .as_mut()
+            .expect("checked above")
+            .read_stereo(device_rate, &mut chunk)
+        {
             Ok(more) => more,
             Err(e) => {
                 tracing::error!("Decode error: {e}");
@@ -687,10 +907,14 @@ impl AudioPlayer {
             output: Mutex::new(OutputInfo::default()),
             original: Mutex::new(None),
             released: AtomicBool::new(false),
+            eq: Mutex::new(Vec::new()),
+            eq_version: AtomicU64::new(0),
         });
 
         let (stream, output) = build_stream(&shared, None, false)?;
-        shared.device_rate.store(output.sample_rate, Ordering::Relaxed);
+        shared
+            .device_rate
+            .store(output.sample_rate, Ordering::Relaxed);
         *shared.output.lock().unwrap() = output;
 
         let decoder_shared = Arc::clone(&shared);
@@ -699,7 +923,10 @@ impl AudioPlayer {
             .spawn(move || decoder_loop(decoder_shared))
             .map_err(AudioError::Io)?;
 
-        Ok(Self { stream: Mutex::new(Some(stream)), shared })
+        Ok(Self {
+            stream: Mutex::new(Some(stream)),
+            shared,
+        })
     }
 
     /// Open the current default output again, at `want_rate` when the device
@@ -710,13 +937,17 @@ impl AudioPlayer {
         // The old stream must be gone before CoreAudio lets us reconfigure the device.
         *stream = None;
         let rebuilt = build_stream(&self.shared, want_rate, force).or_else(|e| {
-            tracing::warn!("Could not open the output at {want_rate:?} Hz ({e}); using its default rate");
+            tracing::warn!(
+                "Could not open the output at {want_rate:?} Hz ({e}); using its default rate"
+            );
             build_stream(&self.shared, None, false)
         });
         match rebuilt {
             Ok((new_stream, output)) => {
                 tracing::info!(device = %output.name, kind = ?output.kind, requested = ?want_rate, actual = output.sample_rate, "Output stream opened");
-                self.shared.device_rate.store(output.sample_rate, Ordering::Relaxed);
+                self.shared
+                    .device_rate
+                    .store(output.sample_rate, Ordering::Relaxed);
                 let changed = output.sample_rate != before;
                 *self.shared.output.lock().unwrap() = output;
                 *stream = Some(new_stream);
@@ -737,9 +968,21 @@ impl AudioPlayer {
             && output.supported_rates.contains(&rate)
     }
 
-    /// Run the output device at `rate` if it supports it; otherwise keep the current rate.
-    fn match_device_rate(&self, rate: u32) {
+    /// Rate to run the device at for this source: native, else the highest
+    /// integer HCF downsample the device supports, else whatever it is at now.
+    fn preferred_output_rate(&self, source: u32) -> u32 {
+        let output = self.shared.output.lock().unwrap();
+        if !self.shared.rate_matching.load(Ordering::Relaxed) || !output.kind.allows_rate_matching()
+        {
+            return output.sample_rate;
+        }
+        pick_output_rate(source, &output.supported_rates, output.sample_rate)
+    }
+
+    /// Run the output at the preferred rate for this source.
+    fn match_device_rate(&self, source_rate: u32) {
         self.shared.released.store(false, Ordering::Relaxed);
+        let rate = self.preferred_output_rate(source_rate);
         if self.shared.device_rate.load(Ordering::Relaxed) != rate && self.can_match(rate) {
             self.rebuild_stream(Some(rate), false);
         }
@@ -766,7 +1009,9 @@ impl AudioPlayer {
     /// While paused, turning it on hands the device back, and turning it off
     /// takes the track's rate again.
     pub fn set_restore_sample_rate(&self, enabled: bool) {
-        self.shared.restore_sample_rate.store(enabled, Ordering::Relaxed);
+        self.shared
+            .restore_sample_rate
+            .store(enabled, Ordering::Relaxed);
         if self.is_playing() {
             return;
         }
@@ -784,7 +1029,9 @@ impl AudioPlayer {
     /// Re-open the output for the current track's rate and resume at the same position.
     fn rematch_current(&self) {
         let position = self.elapsed();
-        let want = self.format_info().map(|f| f.sample_rate);
+        let want = self
+            .format_info()
+            .map(|f| self.preferred_output_rate(f.sample_rate));
         self.shared.released.store(false, Ordering::Relaxed);
         if self.rebuild_stream(want, false) {
             // Buffered samples were produced for the old rate.
@@ -796,7 +1043,10 @@ impl AudioPlayer {
     fn rate_to_restore(&self) -> Option<u32> {
         let output = self.shared.output.lock().unwrap();
         let original = self.shared.original.lock().unwrap();
-        original.as_ref().filter(|(id, rate)| *id == output.id && *rate != output.sample_rate).map(|(_, rate)| *rate)
+        original
+            .as_ref()
+            .filter(|(id, rate)| *id == output.id && *rate != output.sample_rate)
+            .map(|(_, rate)| *rate)
     }
 
     /// Hand the device back at the sample rate it had before TIDE changed it,
@@ -808,7 +1058,9 @@ impl AudioPlayer {
         if self.is_playing() || !self.restore_sample_rate() {
             return false;
         }
-        let Some(original) = self.rate_to_restore() else { return false };
+        let Some(original) = self.rate_to_restore() else {
+            return false;
+        };
         let position = self.elapsed();
         let restored = self.rebuild_stream(Some(original), true);
         if restored {
@@ -826,7 +1078,9 @@ impl AudioPlayer {
     /// Follow the system's default output (headphones plugged in, Bluetooth
     /// connected, ...). Returns true when playback moved to another device.
     pub fn sync_output(&self) -> bool {
-        let Some(default_id) = default_output_id() else { return false };
+        let Some(default_id) = default_output_id() else {
+            return false;
+        };
         if default_id == self.shared.output.lock().unwrap().id {
             return false;
         }
@@ -841,7 +1095,9 @@ impl AudioPlayer {
         buf.switch_at = NONE;
         buf.end_at = NONE;
         buf.upcoming = None;
-        self.shared.frames_played.store(start_frames, Ordering::Relaxed);
+        self.shared
+            .frames_played
+            .store(start_frames, Ordering::Relaxed);
         self.shared.finished.store(false, Ordering::Relaxed);
     }
 
@@ -851,7 +1107,11 @@ impl AudioPlayer {
     }
 
     /// Stop whatever is playing and start `item` at `start_at`.
-    pub fn play_track_at(&self, item: TrackQueueItem, start_at: Duration) -> Result<(), AudioError> {
+    pub fn play_track_at(
+        &self,
+        item: TrackQueueItem,
+        start_at: Duration,
+    ) -> Result<(), AudioError> {
         let mut opened = AudioSource::open(item)?;
         let actual_start = if start_at.is_zero() {
             Duration::ZERO
@@ -859,7 +1119,10 @@ impl AudioPlayer {
             match opened.seek(start_at) {
                 Ok(()) => start_at,
                 Err(e) => {
-                    tracing::warn!(?start_at, "Initial seek failed; starting from beginning: {e}");
+                    tracing::warn!(
+                        ?start_at,
+                        "Initial seek failed; starting from beginning: {e}"
+                    );
                     opened = AudioSource::open(opened.item)?;
                     Duration::ZERO
                 }
@@ -874,7 +1137,10 @@ impl AudioPlayer {
         self.shared.queue.lock().unwrap().clear();
         let mut buf = self.shared.buffer.lock().unwrap();
         self.reset_buffer(&mut buf, frames_played);
-        buf.current = Some(Playing { item: opened.item.clone(), format: opened.format() });
+        buf.current = Some(Playing {
+            item: opened.item.clone(),
+            format: opened.format(),
+        });
         *source = Some(opened);
         drop(buf);
         drop(source);
@@ -890,8 +1156,8 @@ impl AudioPlayer {
     /// re-clocked and playback stays bit-perfect at the cost of a short gap.
     pub fn enqueue_next(&self, item: TrackQueueItem) -> bool {
         if let Ok(probe) = AudioSource::open(item.clone()) {
-            let rate = probe.sample_rate;
-            if rate != self.shared.device_rate.load(Ordering::Relaxed) && self.can_match(rate) {
+            let rate = self.preferred_output_rate(probe.sample_rate);
+            if rate != self.shared.device_rate.load(Ordering::Relaxed) {
                 tracing::info!(title = %item.title, rate, "Next track needs a different device rate; not queued gaplessly");
                 return false;
             }
@@ -934,7 +1200,9 @@ impl AudioPlayer {
     pub fn seek(&self, to: Duration) -> bool {
         let mut source = self.shared.source.lock().unwrap();
         let mut buf = self.shared.buffer.lock().unwrap();
-        let Some(current_item) = buf.current.as_ref().map(|c| c.item.clone()) else { return false };
+        let Some(current_item) = buf.current.as_ref().map(|c| c.item.clone()) else {
+            return false;
+        };
 
         // The decoder may already be past this track (finished or decoding the next one):
         // reopen the current file and put the pre-loaded track back in the queue.
@@ -965,7 +1233,9 @@ impl AudioPlayer {
     }
 
     pub fn resume(&self) {
-        if self.shared.buffer.lock().unwrap().current.is_some() && !self.shared.finished.load(Ordering::Relaxed) {
+        if self.shared.buffer.lock().unwrap().current.is_some()
+            && !self.shared.finished.load(Ordering::Relaxed)
+        {
             if self.shared.released.load(Ordering::Relaxed) {
                 // The device was handed back while paused: take it again at the track's rate.
                 self.rematch_current();
@@ -995,7 +1265,13 @@ impl AudioPlayer {
 
     /// Id of the track that is audible right now.
     pub fn current_id(&self) -> Option<String> {
-        self.shared.buffer.lock().unwrap().current.as_ref().map(|c| c.item.id.clone())
+        self.shared
+            .buffer
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .map(|c| c.item.id.clone())
     }
 
     /// Changes whenever playback moved on to the next queued track by itself.
@@ -1009,12 +1285,93 @@ impl AudioPlayer {
             let current = buf.current.as_ref()?;
             (current.format, current.item.clone())
         };
-        format.bitrate_kbps = average_bitrate_kbps(&item).unwrap_or(0);
+        if format.bitrate_kbps == 0 {
+            format.bitrate_kbps = average_bitrate_kbps(&item).unwrap_or(0);
+        }
         Some(format)
     }
 
+    /// Bitrate to report for the current source when its file cannot tell
+    /// (a stream being written as it plays).
+    pub fn set_source_bitrate(&self, kbps: u32) {
+        if let Some(current) = self.shared.buffer.lock().unwrap().current.as_mut() {
+            current.format.bitrate_kbps = kbps;
+        }
+    }
+
+    /// Stop and forget whatever is loaded: nothing is current afterwards.
+    pub fn stop(&self) {
+        self.shared.playing.store(false, Ordering::Relaxed);
+        let mut source = self.shared.source.lock().unwrap();
+        self.shared.queue.lock().unwrap().clear();
+        let mut buf = self.shared.buffer.lock().unwrap();
+        self.reset_buffer(&mut buf, 0);
+        buf.current = None;
+        *source = None;
+    }
+
+    /// Move what is heard by `frames` device frames without a seek, to keep
+    /// in step with a picture: positive skips ahead (drops buffered audio),
+    /// negative holds back (plays silence first). Never crosses into the next
+    /// track. Returns how many frames it actually moved.
+    pub fn nudge(&self, frames: i64) -> i64 {
+        let mut buf = self.shared.buffer.lock().unwrap();
+        if frames >= 0 {
+            let boundary = [buf.switch_at, buf.end_at]
+                .into_iter()
+                .filter(|&at| at != NONE)
+                .map(|at| at.saturating_sub(buf.consumed) / 2)
+                .min()
+                .unwrap_or(u64::MAX);
+            let n = (frames as u64)
+                .min(buf.samples.len() as u64 / 2)
+                .min(boundary);
+            buf.samples.drain(..(n * 2) as usize);
+            buf.consumed += n * 2;
+            self.shared.frames_played.fetch_add(n, Ordering::Relaxed);
+            n as i64
+        } else {
+            let n = frames.unsigned_abs();
+            for _ in 0..n * 2 {
+                buf.samples.push_front(0.0);
+            }
+            let buf = &mut *buf;
+            buf.pushed += n * 2;
+            for at in [&mut buf.switch_at, &mut buf.end_at] {
+                if *at != NONE {
+                    *at += n * 2;
+                }
+            }
+            // The silence is counted as it plays: the position stands still.
+            let _ = self.shared.frames_played.try_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |played| Some(played.saturating_sub(n)),
+            );
+            -(n as i64)
+        }
+    }
+
+    /// Replace the equalisers the output runs. Heard within one audio buffer.
+    pub fn set_eq(&self, profiles: Vec<EqProfile>) {
+        *self.shared.eq.lock().unwrap() = profiles;
+        self.shared.eq_version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// True when an equaliser is changing the samples on their way out.
+    pub fn eq_active(&self) -> bool {
+        self.shared
+            .eq
+            .lock()
+            .unwrap()
+            .iter()
+            .any(EqProfile::alters_audio)
+    }
+
     pub fn set_volume(&self, volume: f32) {
-        self.shared.volume.store((volume.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+        self.shared
+            .volume
+            .store((volume.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
     }
 
     pub fn get_volume(&self) -> f32 {
@@ -1074,17 +1431,117 @@ mod tests {
         let path = std::env::temp_dir().join("tidal_audio_resample.wav");
         write_wav(&path, 44_100, 1.0);
 
-        for (out_rate, expected_frames) in [(44_100u32, 44_100f64), (48_000, 48_000.0), (22_050, 22_050.0)] {
+        for (out_rate, expected_frames) in [
+            (44_100u32, 44_100f64),
+            (48_000, 48_000.0),
+            (22_050, 22_050.0),
+        ] {
             let mut src = AudioSource::open(item(&path, 1.0)).unwrap();
-            assert_eq!(src.format(), FormatInfo { bits_per_sample: 16, sample_rate: 44_100, bitrate_kbps: 0 });
+            assert_eq!(
+                src.format(),
+                FormatInfo {
+                    bits_per_sample: 16,
+                    sample_rate: 44_100,
+                    bitrate_kbps: 0
+                }
+            );
             let mut out = Vec::new();
             while src.read_stereo(out_rate, &mut out).unwrap() {}
             let frames = (out.len() / 2) as f64;
-            assert!((frames - expected_frames).abs() <= 2.0, "{out_rate} Hz gave {frames} frames");
+            assert!(
+                (frames - expected_frames).abs() <= 2.0,
+                "{out_rate} Hz gave {frames} frames"
+            );
             // Mono source: both channels identical, and the signal is not silent.
             assert!(out.chunks(2).all(|f| f[0] == f[1]));
             assert!(out.iter().any(|s| s.abs() > 0.1));
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hcf_reduces_same_family_rates_to_integer_downsample() {
+        assert_eq!(hcf(96_000, 48_000), 48_000);
+        assert_eq!(hcf(88_200, 44_100), 44_100);
+        assert_eq!(hcf(192_000, 48_000), 48_000);
+        assert_eq!(hcf(176_400, 44_100), 44_100);
+        assert_eq!(hcf(96_000, 44_100), 300);
+        assert_eq!(downsample_factor(96_000, 48_000), Some(2));
+        assert_eq!(downsample_factor(88_200, 44_100), Some(2));
+        assert_eq!(downsample_factor(192_000, 48_000), Some(4));
+        assert_eq!(downsample_factor(176_400, 44_100), Some(4));
+        assert_eq!(downsample_factor(96_000, 44_100), None);
+        assert_eq!(downsample_factor(88_200, 48_000), None);
+        assert_eq!(downsample_factor(44_100, 44_100), None);
+    }
+
+    #[test]
+    fn pick_output_rate_prefers_native_then_hcf_family() {
+        let dac = [44_100, 48_000];
+        assert_eq!(pick_output_rate(96_000, &dac, 44_100), 48_000);
+        assert_eq!(pick_output_rate(88_200, &dac, 48_000), 44_100);
+        assert_eq!(pick_output_rate(48_000, &dac, 44_100), 48_000);
+        assert_eq!(pick_output_rate(96_000, &[44_100], 44_100), 44_100);
+        let hi = [44_100, 48_000, 88_200, 96_000];
+        assert_eq!(pick_output_rate(96_000, &hi, 44_100), 96_000);
+        assert_eq!(pick_output_rate(192_000, &hi, 44_100), 96_000);
+        assert_eq!(pick_output_rate(176_400, &hi, 48_000), 88_200);
+    }
+
+    fn write_alternating_wav(path: &std::path::Path, rate: u32, frames: u32) {
+        let mut bytes = Vec::with_capacity(44 + frames as usize * 2);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(frames * 2).to_le_bytes());
+        for i in 0..frames {
+            let s: i16 = if i % 2 == 0 { 8000 } else { -8000 };
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn hcf_downsample_96k_and_88k2_averages_pairs() {
+        for (src_rate, out_rate, name) in [
+            (96_000, 48_000, "tidal_audio_hcf_96"),
+            (88_200, 44_100, "tidal_audio_hcf_882"),
+        ] {
+            let path = std::env::temp_dir().join(format!("{name}.wav"));
+            write_wav(&path, src_rate, 0.25);
+            let mut src = AudioSource::open(item(&path, 0.25)).unwrap();
+            let mut out = Vec::new();
+            while src.read_stereo(out_rate, &mut out).unwrap() {}
+            let expected = src_rate as f64 / (src_rate / out_rate) as f64 * 0.25;
+            let frames = (out.len() / 2) as f64;
+            assert!(
+                (frames - expected).abs() <= 2.0,
+                "{src_rate}→{out_rate} gave {frames} frames, expected {expected}"
+            );
+            assert!(out.iter().any(|s| s.abs() > 0.1));
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // Alternating +/− at 96 kHz is Nyquist. Averaging pairs → silence;
+        // drop-every-other (linear step=2) would keep a full-scale tone.
+        let path = std::env::temp_dir().join("tidal_audio_hcf_nyquist.wav");
+        write_alternating_wav(&path, 96_000, 96_000);
+        let mut src = AudioSource::open(item(&path, 1.0)).unwrap();
+        let mut out = Vec::new();
+        while src.read_stereo(48_000, &mut out).unwrap() {}
+        let peak = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(
+            peak < 0.02,
+            "96→48 HCF downsample should cancel Nyquist, peak={peak}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1097,7 +1554,10 @@ mod tests {
         let mut out = Vec::new();
         while src.read_stereo(44_100, &mut out).unwrap() {}
         let remaining = out.len() as f64 / 2.0 / 44_100.0;
-        assert!((remaining - 0.5).abs() < 0.05, "expected ~0.5s after seek, got {remaining}");
+        assert!(
+            (remaining - 0.5).abs() < 0.05,
+            "expected ~0.5s after seek, got {remaining}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1105,7 +1565,9 @@ mod tests {
     /// segments, concatenated on disk. Point TIDE_DASH_SAMPLE at such a file.
     #[test]
     fn decodes_fragmented_mp4_flac_when_sample_provided() {
-        let Some(path) = std::env::var_os("TIDE_DASH_SAMPLE").map(PathBuf::from) else { return };
+        let Some(path) = std::env::var_os("TIDE_DASH_SAMPLE").map(PathBuf::from) else {
+            return;
+        };
         let mut src = AudioSource::open(item(&path, 12.0)).unwrap();
         let format = src.format();
         let mut out = Vec::new();
@@ -1136,7 +1598,9 @@ mod tests {
     fn growing_file_is_stream_only_and_audio_source_seeks_by_reopening() {
         let path = std::env::temp_dir().join("tidal_audio_grow_src.tmp");
         write_wav(&path, 44_100, 1.0);
-        let mut src = GrowingFile { file: File::open(&path).unwrap() };
+        let mut src = GrowingFile {
+            file: File::open(&path).unwrap(),
+        };
         assert!(!MediaSource::is_seekable(&src));
         assert!(MediaSource::byte_len(&src).is_none());
         assert!(src.seek(SeekFrom::Start(0)).is_err());
@@ -1174,7 +1638,10 @@ mod tests {
         let mut out = Vec::new();
         while src.read_stereo(44_100, &mut out).unwrap() {}
         let remaining = out.len() as f64 / 2.0 / 44_100.0;
-        assert!((remaining - 0.5).abs() < 0.05, "expected ~0.5s after seek, got {remaining}");
+        assert!(
+            (remaining - 0.5).abs() < 0.05,
+            "expected ~0.5s after seek, got {remaining}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1236,7 +1703,8 @@ mod tests {
         assert_eq!(out.len() / 2, 12);
 
         // 4. Seeking backward within already-written bytes on active .tmp must succeed.
-        src.seek(Duration::ZERO).expect("seek backward within downloaded bytes");
+        src.seek(Duration::ZERO)
+            .expect("seek backward within downloaded bytes");
         let mut after_seek = Vec::new();
         for _ in 0..12 {
             assert!(src.read_stereo(48_000, &mut after_seek).unwrap());
@@ -1375,14 +1843,16 @@ mod tests {
         if !real.exists() {
             return;
         }
-        let mut src = AudioSource::open(item(&real, 12.0)).expect("real progressive DASH .tmp must open");
+        let mut src =
+            AudioSource::open(item(&real, 12.0)).expect("real progressive DASH .tmp must open");
         assert!(src.growing);
         let mut out = Vec::new();
         assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
         assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
         assert!(!out.is_empty());
         // Seek backward to 0s within downloaded bytes of the real FLAC-in-fMP4 .tmp!
-        src.seek(Duration::ZERO).expect("seeking within downloaded bytes of real DASH .tmp must succeed");
+        src.seek(Duration::ZERO)
+            .expect("seeking within downloaded bytes of real DASH .tmp must succeed");
         out.clear();
         assert!(src.read_stereo(src.format().sample_rate, &mut out).unwrap());
         assert!(!out.is_empty());
@@ -1401,10 +1871,20 @@ mod tests {
 
     #[test]
     fn wireless_and_virtual_outputs_are_never_reclocked() {
-        for kind in [OutputKind::Bluetooth, OutputKind::Network, OutputKind::Virtual] {
+        for kind in [
+            OutputKind::Bluetooth,
+            OutputKind::Network,
+            OutputKind::Virtual,
+        ] {
             assert!(!kind.allows_rate_matching(), "{kind:?}");
         }
-        for kind in [OutputKind::BuiltIn, OutputKind::Usb, OutputKind::Hdmi, OutputKind::Wired, OutputKind::Unknown] {
+        for kind in [
+            OutputKind::BuiltIn,
+            OutputKind::Usb,
+            OutputKind::Hdmi,
+            OutputKind::Wired,
+            OutputKind::Unknown,
+        ] {
             assert!(kind.allows_rate_matching(), "{kind:?}");
         }
     }
