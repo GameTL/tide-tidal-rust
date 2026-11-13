@@ -1,8 +1,8 @@
 import { App, Theme, TrackData, CardData, Cover, Icon } from "common.slint";
 
 // The one context menu of the window: right-click or "More" on a track, album,
-// playlist, mix or artist. The look is shared; the entries depend on what was
-// clicked (`App.menu-kind`). Anchors use window coordinates.
+// playlist, mix, artist or folder. The look is shared; the entries depend on
+// what was clicked (`App.menu-kind`). Anchors use window coordinates.
 
 // One trigger per track. Opens the menu for that track.
 export component TrackMenuButton inherits Rectangle {
@@ -77,6 +77,7 @@ struct CtxItem {
 component MenuEntry inherits Rectangle {
     in property <string> label;
     in property <image> icon;
+    in property <bool> has-icon: true;
     in property <bool> selected;
     in property <bool> available: true;
     in property <bool> flyout;
@@ -96,15 +97,15 @@ component MenuEntry inherits Rectangle {
         changed has-hover => { if (self.has-hover) { root.entered(); } }
         clicked => { root.activate(); }
     }
-    Icon {
+    if has-icon: Icon {
         x: 14px;
         source: root.icon;
         size: 18px;
         tint: root.available ? Theme.text-secondary : Theme.text-dim;
     }
     Text {
-        x: 46px;
-        width: parent.width - 46px - 34px;
+        x: root.has-icon ? 46px : 18px;
+        width: parent.width - self.x - 34px;
         text: root.label;
         color: root.available ? Theme.text : Theme.text-dim;
         font-size: 15px;
@@ -162,6 +163,14 @@ export component ContextMenu inherits Rectangle {
         { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
         { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "video" ? [
+        { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
+        { id: "favorite", label: collection-label, icon: collection-icon, available: true, flyout: "" },
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "folder" ? [
+        { id: "rename", label: "Rename folder", icon: @image-url("icons/folder.svg"), available: true, flyout: "" },
+        { id: "delete", label: "Delete folder", icon: @image-url("icons/folder.svg"), available: true, flyout: "" },
+        { id: "create-playlist", label: "Create playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "" },
     ] : [
         { id: "open", label: "Go to artist", icon: @image-url("icons/user.svg"), available: true, flyout: "" },
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
@@ -302,7 +311,16 @@ export component ContextMenu inherits Rectangle {
         accessible-role: groupbox;
         accessible-label: "Options";
 
-        Cover {
+        // Folders have no artwork: a solid teal swatch, not a hashed tint or the tile glyph.
+        if kind == "folder": Rectangle {
+            x: 22px;
+            y: 18px;
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            background: Theme.folder;
+        }
+        if kind != "folder": Cover {
             x: 22px;
             y: 14px;
             width: 48px;
@@ -313,9 +331,9 @@ export component ContextMenu inherits Rectangle {
         }
 
         Text {
-            x: 82px;
+            x: root.kind == "folder" ? 74px : 82px;
             y: 17px;
-            width: parent.width - 82px - 16px;
+            width: parent.width - self.x - 16px;
             text: root.kind == "track" ? root.track.title : root.card.title;
             color: Theme.text;
             font-size: 16px;
@@ -324,9 +342,9 @@ export component ContextMenu inherits Rectangle {
         }
 
         Text {
-            x: 82px;
+            x: root.kind == "folder" ? 74px : 82px;
             y: 40px;
-            width: parent.width - 82px - 16px;
+            width: parent.width - self.x - 16px;
             text: root.kind == "track" ? root.track.artist : root.card.subtitle;
             color: Theme.text-secondary;
             font-size: 14px;
@@ -340,6 +358,7 @@ export component ContextMenu inherits Rectangle {
             width: parent.width - 16px;
             label: entry.label;
             icon: entry.icon;
+            has-icon: root.kind != "folder";
             available: entry.available;
             selected: root.selected == index;
             flyout: entry.flyout != "";

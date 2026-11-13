@@ -2,13 +2,124 @@
 import { ScrollView } from "std-widgets.slint";
 import { TrackMenuButton } from "context-menu.slint";
 import { MaxLogin } from "settings.slint";
-import { App, Theme, EditableInput, Icon, IconButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, TitleWithQuality, PillButton, DragArea, MenuPanel, MenuRow, CreateButton } from "common.slint";
+import { App, Theme, EditableInput, Icon, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
 
 // ---------------------------------------------------------------- cards
 
+// Heart / More on cover: circular hover plate. Folders keep a filled plate.
+component OverlayAction inherits Rectangle {
+    in property <image> icon;
+    in property <length> diameter: 40px;
+    in property <length> icon-size: 16px;
+    in property <bool> plate: false;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked();
+    callback context-requested(length, length);
+    width: diameter;
+    height: diameter;
+    border-radius: diameter / 2;
+    background: plate ? (ta.has-hover ? #3a3a3a : #2a2a2ae6) : (ta.pressed ? #3a3a3a : ta.has-hover ? #2a2a2ae6 : transparent);
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        size: root.icon-size;
+        tint: white;
+    }
+}
+
+// Play / My Collection / More on artwork. Folders keep the teal tile and only show More.
+component CoverHover inherits Rectangle {
+    in property <CardData> card;
+    in property <bool> show: false;
+    in property <bool> enabled: true;
+    in property <length> play-d: 40px;
+    in property <length> inset: 10px;
+    property <bool> folder: card.kind == "folder";
+    property <bool> playing: App.playing-card-id == card.id && App.playing-card-kind == card.kind;
+    property <bool> heart: card.kind == "album" || card.kind == "video" || (card.kind == "playlist" && card.by != "Me" && card.by != "");
+    property <bool> more: folder || card.kind == "album" || card.kind == "playlist" || card.kind == "mix" || card.kind == "artist" || card.kind == "video";
+    property <bool> playing-now: root.playing && App.playing;
+    property <length> action-d: folder ? max(28px, min(36px, root.play-d * 0.8)) : root.play-d;
+    property <length> action-icon: max(16px, root.action-d * 0.45);
+    // Child buttons steal parent hover; keep the overlay up while any of them is hot.
+    out property <bool> hovered: play-ta.has-hover || more-btn.hovered || heart-btn.hovered;
+    property <bool> on: show || hovered;
+    visible: enabled && on && card.kind != "page";
+    background: folder ? transparent : #00000099;
+    clip: true;
+
+    play-btn := Rectangle {
+        visible: root.on && !root.folder;
+        x: root.inset;
+        y: parent.height - root.inset - root.play-d;
+        width: root.play-d;
+        height: root.play-d;
+        border-radius: root.play-d / 2;
+        background: white;
+        transform-scale: play-ta.has-hover ? 1.12 : 1;
+        animate transform-scale {
+            duration: 150ms;
+            easing: ease-out;
+        }
+        play-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                if (root.playing) {
+                    App.toggle-play();
+                } else {
+                    App.play-card(root.card);
+                }
+            }
+        }
+        Icon {
+            source: root.playing-now ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+            size: root.play-d * 0.45;
+            tint: black;
+        }
+    }
+
+    more-btn := OverlayAction {
+        visible: root.on && root.more;
+        x: parent.width - root.inset - self.width - (!root.folder && root.heart ? self.width + 4px : 0px);
+        y: parent.height - root.inset - self.height;
+        diameter: root.action-d;
+        icon-size: root.action-icon;
+        icon: @image-url("icons/more.svg");
+        plate: root.folder;
+        clicked => {
+            App.request-card-menu(root.card, self.absolute-position.x, self.absolute-position.y + self.height);
+        }
+        context-requested(x, y) => { App.request-card-menu(root.card, x, y); }
+    }
+
+    heart-btn := OverlayAction {
+        visible: root.on && root.heart;
+        x: parent.width - root.inset - self.width;
+        y: parent.height - root.inset - self.height;
+        diameter: root.action-d;
+        icon-size: root.action-icon;
+        icon: card.favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+        clicked => { App.toggle-card-favorite(root.card); }
+        context-requested(x, y) => { App.request-card-menu(root.card, x, y); }
+    }
+}
+
 component MediaCard inherits Rectangle {
     in property <CardData> card;
-    height: self.width + 76px;
+    // Videos are 16:9 stills with a length line ("2 MIN") under the artists.
+    property <bool> wide: card.kind == "video";
+    property <length> art-h: wide ? self.width * 9 / 16 : self.width;
+    height: self.art-h + (wide ? 100px : 76px);
     ta := TouchArea {
         mouse-cursor: pointer;
         pointer-event(e) => {
@@ -25,9 +136,19 @@ component MediaCard inherits Rectangle {
         x: 0;
         y: 0;
         width: root.width;
-        height: root.width;
+        height: root.art-h;
         card: root.card;
-        opacity: ta.has-hover ? 0.8 : 1.0;
+    }
+
+    CoverHover {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.art-h;
+        card: root.card;
+        show: ta.has-hover;
+        play-d: root.wide ? min(56px, root.art-h * 0.36) : min(44px, root.width * 0.28);
+        inset: max(8px, root.width * 0.05);
     }
 
     if card.kind == "artist": Text {
@@ -44,21 +165,21 @@ component MediaCard inherits Rectangle {
 
     if card.kind != "artist": TitleWithQuality {
         x: 0;
-        y: root.width + 12px;
+        y: root.art-h + 12px;
         width: root.width;
         height: 20px;
         title: card.title;
-        // Grid / carousel: Max only — High / Low / Lossless stay on the album page.
+        // Grid / carousel: Max only — High / Low stay on the album page.
         quality: card.kind == "album" && card.quality == "MAX" ? card.quality : "";
         font-size: 15px;
         font-weight: Theme.medium;
     }
 
-    Text {
+    subtitle := Text {
         x: 0;
-        y: root.width + 35px;
+        y: root.art-h + 35px;
         width: root.width;
-        height: 42px;
+        height: root.wide ? min(42px, self.preferred-height) : 42px;
         text: card.subtitle;
         color: Theme.text-secondary;
         font-size: 15px;
@@ -67,6 +188,17 @@ component MediaCard inherits Rectangle {
         vertical-alignment: top;
         horizontal-alignment: card.kind == "artist" ? center : left;
     }
+
+    if card.detail != "": Text {
+        x: 0;
+        y: subtitle.y + subtitle.height + 6px;
+        width: root.width;
+        text: card.detail;
+        color: Theme.text-secondary;
+        font-size: 12px;
+        font-weight: Theme.demibold;
+        letter-spacing: 1px;
+    }
 }
 
 // Compact tile: artwork left, two lines of text.
@@ -74,9 +206,13 @@ component RowCard inherits Rectangle {
     in property <CardData> card;
     in property <bool> tile: false;
     in property <length> art: 48px;
+    // Home shortcuts keep CoverHover. Feed compact rows do not.
+    in property <bool> overlay: true;
+    // Feed rows play on click; tiles / search / artist rows open the page.
+    in property <bool> play-on-click: false;
     height: tile ? 66px : 62px;
     border-radius: 4px;
-    background: tile ? (ta.has-hover ? #1e1e1e : Theme.surface) : (ta.has-hover ? #111111 : transparent);
+    background: tile ? ((ta.has-hover || hover.hovered) ? #1e1e1e : Theme.surface) : ((ta.has-hover || hover.hovered) ? #111111 : transparent);
     ta := TouchArea {
         mouse-cursor: pointer;
         pointer-event(e) => {
@@ -85,7 +221,11 @@ component RowCard inherits Rectangle {
             }
         }
         clicked => {
-            App.open-card(root.card);
+            if (root.play-on-click) {
+                App.play-card(root.card);
+            } else {
+                App.open-card(root.card);
+            }
         }
     }
 
@@ -95,6 +235,19 @@ component RowCard inherits Rectangle {
         height: root.art;
         card: root.card;
         radius: 3px;
+    }
+
+    hover := CoverHover {
+        x: tile ? 9px : 0px;
+        y: (parent.height - root.art) / 2;
+        width: root.art;
+        height: root.art;
+        border-radius: 3px;
+        card: root.card;
+        enabled: root.overlay;
+        show: ta.has-hover;
+        play-d: min(28px, root.art * 0.5);
+        inset: 4px;
     }
 
     VerticalLayout {
@@ -255,21 +408,42 @@ component SectionHeader inherits Rectangle {
     }
 }
 
-// Reports once (and on paging) that a home section is near the viewport, so
-// artwork is only fetched and decoded for what can actually be seen.
+// Reports the visible card range [from, upto) while this block is near the
+// viewport, and (0, 0) once it has scrolled away so artwork can be dropped.
 component ArtRequest inherits Rectangle {
-    in property <int> upto;
+    in property <int> from: 0;
+    in property <int> upto: 0;
     callback request(int, int);
     in property <length> window-height: 1200px;
-    property <bool> near: self.absolute-position.y < window-height + 300px && self.absolute-position.y + self.height > -300px;
-    property <int> reported: 0;
-    public function reset() { reported = 0; }
+    // One extra pane of covers, so scrolling onto the next page is already painted.
+    out property <length> overscan: max(window-height, 1px);
+    property <bool> near: self.absolute-position.y < window-height + overscan && self.absolute-position.y + self.height > -overscan;
+    property <int> sent-from: -1;
+    property <int> sent-upto: -1;
+    property <bool> sent-near: false;
+    public function reset() {
+        sent-from = -1;
+        sent-upto = -1;
+        sent-near = false;
+    }
     Timer {
-        interval: 150ms;
-        running: near && reported < upto;
+        // The first request after a page is built goes out at once, so a page
+        // restored behind a back / forward snapshot has its artwork loading
+        // before the snapshot lifts. Later range changes (scrolling) debounce.
+        interval: sent-near ? 150ms : 16ms;
+        running: (near && (sent-from != from || sent-upto != upto)) || (sent-near && !near);
         triggered => {
-            root.request(reported, upto);
-            reported = upto;
+            if (root.near) {
+                root.request(root.from, root.upto);
+                sent-from = root.from;
+                sent-upto = root.upto;
+                sent-near = true;
+            } else {
+                root.request(0, 0);
+                sent-from = 0;
+                sent-upto = 0;
+                sent-near = false;
+            }
         }
     }
 }
@@ -277,6 +451,7 @@ component ArtRequest inherits Rectangle {
 component Carousel inherits Rectangle {
     in property <SectionData> section;
     in property <bool> view-all: true;
+    callback show-all();
     callback request-art(int, int);
     changed section => { artwork.reset(); }
     property <length> gap: 17px;
@@ -286,7 +461,9 @@ component Carousel inherits Rectangle {
     property <int> max-offset: max(0, section.cards.length - per-page);
     height: 34px + 16px + card-w + 76px;
     artwork := ArtRequest {
-        upto: min(root.offset, root.max-offset) + root.per-page + 1;
+        window-height: App.pane-height;
+        from: max(0, min(root.offset, root.max-offset) - root.per-page);
+        upto: min(section.cards.length, min(root.offset, root.max-offset) + 2 * root.per-page);
         request(from, upto) => { root.request-art(from, upto); }
     }
 
@@ -294,7 +471,7 @@ component Carousel inherits Rectangle {
         y: 0;
         title: section.title;
         arrows: true;
-        view-all: root.view-all;
+        view-all: root.view-all && section.cards.length > per-page;
         can-prev: root.offset > 0;
         can-next: root.offset < root.max-offset;
         prev => {
@@ -302,6 +479,9 @@ component Carousel inherits Rectangle {
         }
         next => {
             root.offset = min(root.max-offset, root.offset + root.per-page);
+        }
+        show-all => {
+            root.show-all();
         }
     }
 
@@ -337,9 +517,15 @@ component RowGrid inherits Rectangle {
     property <int> count: section.layout == "tracks" ? section.tracks.length : section.cards.length;
     property <length> head: tiles ? 0px : 50px;
     height: head + ceil(count / cols) * row-h - (tiles ? 9px : 17px);
-    ArtRequest {
-        upto: 1000;
-        request(from, upto) => { App.section-visible(root.section-index, upto); }
+    property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan) / row-h));
+    property <int> vis-rows: max(1, ceil((art.overscan + max(App.pane-height, 1px) + art.overscan) / row-h));
+    art := ArtRequest {
+        width: 100%;
+        height: 100%;
+        window-height: App.pane-height;
+        from: first-row * cols;
+        upto: min(count, (first-row + vis-rows) * cols);
+        request(from, upto) => { App.section-visible(root.section-index, from, upto); }
     }
 
     if !tiles: SectionHeader {
@@ -367,6 +553,8 @@ component RowGrid inherits Rectangle {
             card: card;
             tile: root.tiles;
             art: root.tiles ? 48px : 62px;
+            overlay: root.tiles;
+            play-on-click: !root.tiles;
         }
     }
 }
@@ -377,6 +565,142 @@ component Spinner inherits Rectangle {
         text: "Loading…";
         color: Theme.text-secondary;
         font-size: 15px;
+    }
+}
+
+component LinkRow inherits Rectangle {
+    in property <SectionData> section;
+    property <length> gap: 8px;
+    property <int> cols: max(2, floor((self.width + gap) / (118px + gap)));
+    property <length> col-w: (self.width - (cols - 1) * gap) / cols;
+    property <int> count: section.cards.length;
+    property <length> row-h: 44px;
+    height: 50px + ceil(count / cols) * row-h;
+    SectionHeader {
+        y: 0;
+        title: section.title;
+        view-all: false;
+    }
+    for card[i] in section.cards: Rectangle {
+        x: mod(i, cols) * (col-w + gap);
+        y: 50px + floor(i / cols) * row-h;
+        width: min(col-w - 4px, chip-label.preferred-width + 28px);
+        height: 36px;
+        border-radius: 18px;
+        background: chip-ta.has-hover ? #2a2a2a : #1c1c1c;
+        chip-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { App.open-card(card); }
+        }
+        chip-label := Text {
+            text: card.title;
+            color: Theme.text;
+            font-size: 14px;
+            font-weight: Theme.medium;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Explore genres / moods / decades: wrapping image (or tint) tiles, not chips.
+component TileGrid inherits Rectangle {
+    in property <SectionData> section;
+    in property <int> section-index;
+    property <length> gap: 12px;
+    property <int> cols: max(3, floor((self.width + gap) / (176px + gap)));
+    property <length> tile-w: (self.width - (cols - 1) * gap) / cols;
+    property <length> tile-h: tile-w * 0.62;
+    property <int> count: section.cards.length;
+    height: 50px + ceil(count / cols) * (tile-h + gap) - gap;
+    art := ArtRequest {
+        width: 100%;
+        height: 100%;
+        window-height: App.pane-height;
+        from: 0;
+        upto: count;
+        request(from, upto) => { App.section-visible(root.section-index, from, upto); }
+    }
+    SectionHeader {
+        y: 0;
+        title: section.title;
+        view-all: false;
+    }
+    for card[i] in section.cards: Rectangle {
+        x: mod(i, cols) * (tile-w + gap);
+        y: 50px + floor(i / cols) * (tile-h + gap);
+        width: tile-w;
+        height: tile-h;
+        border-radius: 4px;
+        clip: true;
+        background: tile-ta.has-hover ? card.tint.brighter(20%) : card.tint;
+        if card.image.width > 0: Image {
+            width: 100%;
+            height: 100%;
+            source: card.image;
+            image-fit: cover;
+        }
+        Rectangle {
+            y: parent.height * 0.45;
+            width: 100%;
+            height: parent.height * 0.55;
+            background: @linear-gradient(180deg, #00000000 0%, #00000099 100%);
+        }
+        Text {
+            x: 12px;
+            y: parent.height - 40px;
+            width: parent.width - 24px;
+            height: 32px;
+            text: card.title;
+            color: white;
+            font-size: 15px;
+            font-weight: 700;
+            wrap: word-wrap;
+            overflow: elide;
+            vertical-alignment: bottom;
+        }
+        tile-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { App.open-card(card); }
+        }
+    }
+}
+
+export component ModulesView inherits Rectangle {
+    VerticalLayout {
+        alignment: start;
+        if App.sections.length == 0 && App.loading: Rectangle {
+            height: 280px;
+            TideLoader { }
+        }
+        if App.sections.length == 0 && !App.loading: Text {
+            text: "Nothing here yet";
+            color: Theme.text-secondary;
+            font-size: 15px;
+        }
+        for section[i] in App.sections: VerticalLayout {
+            padding-bottom: section.layout == "shortcuts" ? 44px : 38px;
+            if section.layout == "shortcuts": RowGrid {
+                section: section;
+                section-index: i;
+                tiles: true;
+            }
+            if section.layout == "tiles": TileGrid {
+                section: section;
+                section-index: i;
+            }
+            if section.layout == "links": LinkRow {
+                section: section;
+            }
+            if section.layout == "cards": Carousel {
+                section: section;
+                request-art(from, upto) => { App.section-visible(i, from, upto); }
+            }
+            if section.layout == "rows" || section.layout == "tracks": RowGrid {
+                section: section;
+                section-index: i;
+            }
+        }
     }
 }
 
@@ -391,7 +715,6 @@ export component HomeView inherits Rectangle {
             padding-bottom: 48px;
             spacing: 0px;
             alignment: start;
-            // Tabs
             Rectangle {
                 height: 44px;
                 HorizontalLayout {
@@ -401,16 +724,20 @@ export component HomeView inherits Rectangle {
                         width: label.preferred-width;
                         label := Text {
                             text: tab;
-                            color: i == 0 ? Theme.text : Theme.text-secondary;
+                            color: i == App.home-tab ? Theme.text : Theme.text-secondary;
                             font-size: 15px;
                             font-weight: 500;
                             vertical-alignment: center;
                         }
 
-                        if i == 0: Rectangle {
+                        if i == App.home-tab: Rectangle {
                             y: parent.height - 2px;
                             height: 2px;
                             background: white;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { App.set-home-tab(i); }
                         }
                     }
                 }
@@ -426,23 +753,35 @@ export component HomeView inherits Rectangle {
                 height: 35px;
             }
 
-            if App.sections.length == 0: Spinner { }
-            for section[i] in App.sections: VerticalLayout {
-                padding-bottom: section.layout == "shortcuts" ? 44px : 38px;
-                if section.layout == "shortcuts": RowGrid {
-                    section: section;
-                    section-index: i;
-                    tiles: true;
-                }
-                if section.layout == "cards": Carousel {
-                    section: section;
-                    request-art(from, upto) => { App.section-visible(i, upto); }
-                }
-                if section.layout == "rows" || section.layout == "tracks": RowGrid {
-                    section: section;
-                    section-index: i;
+            ModulesView { }
+        }
+    }
+}
+
+export component ModulesPage inherits Rectangle {
+    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    ScrollView {
+        content-y <=> App.scroll-y;
+        VerticalLayout {
+            padding-left: root.pad;
+            padding-right: root.pad;
+            padding-top: 8px;
+            padding-bottom: 48px;
+            alignment: start;
+            Rectangle {
+                height: 48px;
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: App.page-title;
+                    color: Theme.text;
+                    font-size: 28px;
+                    font-weight: 700;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
                 }
             }
+            ModulesView { }
         }
     }
 }
@@ -577,13 +916,15 @@ component TrackRow inherits Rectangle {
         }
     }
 
-    LinkedCell {
+    ArtistLinks {
         x: x-artist;
-        width: (album-page ? x-time : x-album) - x-artist - 24px;
+        width: min(self.preferred-width, (album-page ? x-time : x-album) - x-artist - 24px);
+        height: root.height;
+        artists: track.artists;
         text: track.artist;
-        link-enabled: !track.artist-id.is-empty;
+        font-weight: Theme.demibold;
         context-requested(x, y) => { more.open-at(x, y); }
-        activated => { App.open-track-artist(track); }
+        open(a) => { App.open-artist(a); }
     }
 
     if !album-page: LinkedCell {
@@ -726,15 +1067,105 @@ component ActionButton inherits Rectangle {
     @children
 }
 
+component CatalogTabs inherits Rectangle {
+    in property <[string]> tabs;
+    in-out property <int> selected;
+    height: 46px;
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+    HorizontalLayout {
+        alignment: start;
+        spacing: 24px;
+        for tab[index] in root.tabs: Rectangle {
+            width: label.preferred-width;
+            label := Text {
+                text: tab;
+                font-size: 14px;
+                font-weight: Theme.medium;
+                color: root.selected == index ? Theme.text : Theme.text-secondary;
+                vertical-alignment: center;
+            }
+            if root.selected == index: Rectangle {
+                y: parent.height - 2px;
+                height: 2px;
+                background: Theme.text;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.selected = index;
+                    App.scroll-y = 0px;
+                }
+            }
+        }
+    }
+}
+
+component VideoGrid inherits Rectangle {
+    in property <[CardData]> cards;
+    in property <string> status;
+    in property <string> empty-text;
+    callback request-art(int, int);
+    property <length> gap: 18px;
+    property <int> cols: max(1, floor((self.width + gap) / (240px + gap)));
+    property <length> card-w: (self.width - (cols - 1) * gap) / cols;
+    property <length> row-h: card-w * 9 / 16 + 100px + gap;
+    property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan - 50px) / row-h));
+    property <int> visible-rows: max(1, ceil((art.overscan * 2 + App.pane-height) / row-h) + 1);
+    height: cards.length > 0 ? 50px + ceil(cards.length / cols) * row-h - gap : 132px;
+    changed cards => { art.reset(); }
+    art := ArtRequest {
+        width: 100%;
+        height: 100%;
+        window-height: App.pane-height;
+        from: first-row * cols;
+        upto: min(cards.length, (first-row + visible-rows) * cols);
+        request(from, upto) => { root.request-art(from, upto); }
+    }
+    SectionHeader {
+        title: "Videos";
+        view-all: false;
+    }
+    for slot in root.visible-rows * root.cols: Rectangle {
+        property <int> index: root.first-row * root.cols + slot;
+        x: mod(slot, root.cols) * (root.card-w + root.gap);
+        y: 50px + (root.first-row + floor(slot / root.cols)) * root.row-h;
+        width: root.card-w;
+        height: root.row-h - root.gap;
+        if index < root.cards.length: MediaCard {
+            width: parent.width;
+            card: root.cards[parent.index];
+        }
+    }
+    if cards.length == 0 && status == "loading": TideLoader {
+        x: (root.width - self.width) / 2;
+        y: 64px;
+    }
+    if cards.length == 0 && status != "loading": Text {
+        y: 62px;
+        width: root.width;
+        text: root.status == "error" ? "Couldn’t load videos. Try opening this page again." : root.empty-text;
+        color: Theme.text-secondary;
+        font-size: 15px;
+        wrap: word-wrap;
+    }
+}
+
 export component TracksView inherits Rectangle {
     property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 89px);
     property <length> w: self.width - 2 * pad;
     property <bool> album-page: App.view == "album";
     property <bool> artist-page: App.view == "artist";
-    property <bool> about: artist-page && App.artist-tab == 2;
+    property <bool> search-page: App.view == "search";
+    property <bool> about: artist-page && App.artist-tab == 3;
     property <bool> music-tab: artist-page && App.artist-tab == 1;
-    property <bool> track-placeholders: artist-page && !about && App.loading && App.tracks.length < 5;
-    property <int> row-count: artist-page ? (about || music-tab ? 0 : track-placeholders ? 5 : min(5, App.tracks.length)) : App.tracks.length;
+    property <bool> video-tab: (artist-page && App.artist-tab == 2) || (search-page && App.search-tab == 1);
+    property <bool> show-tracks: !about && !music-tab && !video-tab;
+    property <bool> track-placeholders: artist-page && show-tracks && App.loading && App.tracks.length < 5;
+    property <int> row-count: !show-tracks ? 0 : artist-page ? (track-placeholders ? 5 : min(5, App.tracks.length)) : App.tracks.length;
     property <bool> wide: w > 980px && !album-page;
     property <bool> show-bpm: wide && App.bpm-available && App.show-audio-metadata;
     property <bool> show-date: App.tracks-show-date && w > 760px;
@@ -745,11 +1176,12 @@ export component TracksView inherits Rectangle {
     property <length> top-inset: album-page || artist-page ? 64px : 0px;
     property <length> y-title: top-inset + (has-cover ? 4px : 8px);
     property <int> search-cols: w >= 900px ? 3 : 2;
-    property <length> search-height: App.view == "search" && App.search-cards.length > 0
+    property <length> search-height: search-page && !video-tab && App.search-cards.length > 0
         ? 44px + ceil(App.search-cards.length / search-cols) * 66px : 0px;
     property <length> cover-size: album-page ? clamp(w * 0.25, 180px, 256px) : 218px;
     property <length> hero-h: artist-page ? clamp(w * 0.28, 218px, 352px) : has-cover ? cover-size : 38px;
-    property <length> y-buttons: artist-page ? top-inset + hero-h - 46px : y-title + hero-h + (has-cover ? 28px : 24px) + search-height;
+    property <length> search-tabs-y: y-title + hero-h + 12px;
+    property <length> y-buttons: artist-page ? top-inset + hero-h - 46px : y-title + hero-h + (has-cover ? 28px : 24px) + search-height + (search-page ? 58px : 0px);
     property <length> y-filter: y-buttons + 53px + 36px;
     property <length> y-tabs: top-inset + hero-h + 22px;
     property <length> y-top-tracks: y-tabs + 70px;
@@ -773,7 +1205,7 @@ export component TracksView inherits Rectangle {
     sv := ScrollView {
         content-y <=> App.scroll-y;
         content-width: root.width;
-        content-height: artist-page || album-page ? artist-content.y + artist-content.preferred-height + 48px
+        content-height: artist-page || album-page || search-page ? artist-content.y + artist-content.preferred-height + 48px
             : header-h + row-count * row-h + 48px;
         if artist-page || album-page: Rectangle {
             y: 0;
@@ -829,29 +1261,17 @@ export component TracksView inherits Rectangle {
                 clicked => { App.open-card(App.page-artist); }
             }
         }
-        if has-cover && !artist-page: Text {
-            property <bool> linked: album-page && App.page-artist.id != "";
-            x: pad + cover-size + 32px + (linked ? 34px : 0px);
+        if has-cover && !artist-page: ArtistLinks {
+            property <bool> linked: album-page && App.page-artists.length > 0;
+            x: pad + cover-size + 32px + (album-page && App.page-artist.id != "" ? 34px : 0px);
             y: album-page ? y-title + cover-size * 0.23 + 48px : y-title + 124px;
-            width: root.width - self.x - pad;
+            width: min(self.preferred-width, root.width - self.x - pad);
+            height: self.preferred-height;
+            artists: linked ? App.page-artists : [];
             text: App.page-subtitle;
-            color: linked ? Theme.text : Theme.text-secondary;
-            font-size: 15px;
+            text-color: linked ? Theme.text : Theme.text-secondary;
             font-weight: Theme.medium;
-            overflow: elide;
-            if linked && artist-link.has-hover: Rectangle {
-                x: 0;
-                y: parent.height - 1px;
-                width: artist-link.width;
-                height: 1px;
-                background: Theme.text;
-            }
-            artist-link := TouchArea {
-                width: min(parent.width, parent.preferred-width);
-                enabled: parent.linked;
-                mouse-cursor: pointer;
-                clicked => { App.open-card(App.page-artist); }
-            }
+            open(a) => { App.open-artist(a); }
         }
         if album-page: VerticalLayout {
             x: pad + cover-size + 32px;
@@ -884,9 +1304,16 @@ export component TracksView inherits Rectangle {
                 }
             }
         }
+        if search-page: CatalogTabs {
+            x: pad;
+            y: search-tabs-y;
+            width: w;
+            tabs: ["All", "Videos"];
+            selected <=> App.search-tab;
+        }
         if search-height > 0px: Rectangle {
             x: pad;
-            y: y-title + hero-h + 12px;
+            y: search-tabs-y + 58px;
             width: w;
             height: search-height;
             property <length> tile-w: (w - (search-cols - 1) * 12px) / search-cols;
@@ -921,7 +1348,7 @@ export component TracksView inherits Rectangle {
                 clicked => { App.play-all(false); }
             }
         }
-        if !artist-page: PillButton {
+        if !artist-page && !video-tab: PillButton {
             x: pad;
             y: y-buttons;
             text: "Play";
@@ -932,7 +1359,7 @@ export component TracksView inherits Rectangle {
             }
         }
 
-        if !artist-page: PillButton {
+        if !artist-page && !video-tab: PillButton {
             x: pad + 176px + 18px;
             y: y-buttons;
             text: "Shuffle";
@@ -1063,41 +1490,14 @@ export component TracksView inherits Rectangle {
             }
         }
 
-        if artist-page: Rectangle {
+        if artist-page: CatalogTabs {
             x: pad;
             y: y-tabs;
             width: w;
-            height: 46px;
-            Rectangle {
-                y: parent.height - 1px;
-                height: 1px;
-                background: Theme.border;
-            }
-            HorizontalLayout {
-                alignment: start;
-                spacing: 24px;
-                for tab[i] in ["All", "Music", "About"]: Rectangle {
-                    width: artist-label.preferred-width;
-                    artist-label := Text {
-                        text: tab;
-                        font-size: 14px;
-                        font-weight: Theme.medium;
-                        color: App.artist-tab == i ? Theme.text : Theme.text-secondary;
-                        vertical-alignment: center;
-                    }
-                    if App.artist-tab == i: Rectangle {
-                        y: parent.height - 2px;
-                        height: 2px;
-                        background: Theme.text;
-                    }
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { App.artist-tab = i; }
-                    }
-                }
-            }
+            tabs: ["All", "Music", "Videos", "About"];
+            selected <=> App.artist-tab;
         }
-        if artist-page && !about && !music-tab: SectionHeader {
+        if artist-page && show-tracks: SectionHeader {
             x: pad;
             y: y-top-tracks;
             width: w;
@@ -1142,7 +1542,7 @@ export component TracksView inherits Rectangle {
                 }
             }
         }
-        if !about: Rectangle {
+        if show-tracks: Rectangle {
             x: pad;
             y: y-columns;
             width: w;
@@ -1218,19 +1618,29 @@ export component TracksView inherits Rectangle {
                 x-time: root.x-time;
             }
         }
-        if !about && App.tracks.length == 0 && !root.track-placeholders: Text {
+        if show-tracks && App.tracks.length == 0 && !root.track-placeholders && App.loading: TideLoader {
+            x: pad + (w - self.width) / 2;
+            y: header-h + 72px;
+        }
+        if show-tracks && App.tracks.length == 0 && !root.track-placeholders && !App.loading: Text {
             x: pad;
             y: header-h + 24px;
-            text: App.loading ? "Loading…" : App.catalog-error ? "Couldn’t load tracks" : "Nothing here yet";
+            text: App.catalog-error ? "Couldn’t load tracks" : "Nothing here yet";
             color: Theme.text-secondary;
             font-size: 15px;
         }
         artist-content := VerticalLayout {
             x: pad;
-            y: about || music-tab ? y-tabs + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
+            y: artist-page && !show-tracks ? y-tabs + 62px : search-page && video-tab ? search-tabs-y + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
             width: w;
             height: self.preferred-height;
             spacing: 16px;
+            if (artist-page && video-tab) || search-page: VideoGrid {
+                cards: root.artist-page ? App.artist-videos : App.search-videos;
+                status: root.artist-page ? App.artist-videos-status : App.search-videos-status;
+                empty-text: root.artist-page ? "No videos available for this artist" : "No videos found";
+                request-art(from, upto) => { App.catalog-video-art(root.artist-page, from, upto); }
+            }
             if album-page && App.page-release-line != "": VerticalLayout {
                 padding-top: 4px;
                 padding-bottom: 46px;
@@ -1254,7 +1664,7 @@ export component TracksView inherits Rectangle {
             }
             if album-page && App.artist-albums.length > 0: Carousel {
                 section: { title: "More Albums by " + App.page-artist.title, cards: App.artist-albums };
-                view-all: false;
+                show-all => { App.show-artist-releases(false); }
                 request-art(from, upto) => { App.artist-release-art(false, from, upto); }
             }
             if album-page && App.related-artists.length > 0: Carousel {
@@ -1281,22 +1691,22 @@ export component TracksView inherits Rectangle {
                     card: card;
                 }
             }
-            if artist-page && !about && !music-tab && App.artist-albums.length > 0: Carousel {
+            if artist-page && show-tracks && App.artist-albums.length > 0: Carousel {
                 section: { title: "Albums", cards: App.artist-albums };
-                view-all: false;
+                show-all => { App.show-artist-releases(false); }
                 request-art(from, upto) => { App.artist-release-art(false, from, upto); }
             }
-            if artist-page && !about && !music-tab && App.artist-singles.length > 0: Carousel {
+            if artist-page && show-tracks && App.artist-singles.length > 0: Carousel {
                 section: { title: "EPs & Singles", cards: App.artist-singles };
-                view-all: false;
+                show-all => { App.show-artist-releases(true); }
                 request-art(from, upto) => { App.artist-release-art(true, from, upto); }
             }
-            if artist-page && !about && !music-tab && App.related-artists.length > 0: Carousel {
+            if artist-page && show-tracks && App.related-artists.length > 0: Carousel {
                 section: { title: "Related Artists", cards: App.related-artists };
                 view-all: false;
                 request-art(from, upto) => { App.related-art(from, upto); }
             }
-            if artist-page && App.artist-tab != 1 && (about || App.page-biography != ""): VerticalLayout {
+            if artist-page && (about || (show-tracks && App.page-biography != "")): VerticalLayout {
                 spacing: 12px;
                 SectionHeader {
                     title: "Biography";
@@ -1323,7 +1733,10 @@ component ChoiceButton inherits Rectangle {
     in property <[string]> options;
     in property <string> current;
     in property <bool> highlighted: false;
+    in property <string> toggle-label: "";
+    in property <bool> toggle-on: false;
     callback chosen(string);
+    callback toggled(bool);
     width: 34px;
     height: 34px;
     border-radius: 17px;
@@ -1363,18 +1776,117 @@ component ChoiceButton inherits Rectangle {
                     root.chosen(option);
                 }
             }
+
+            if root.toggle-label != "": Rectangle {
+                height: 8px;
+                Rectangle {
+                    y: 4px;
+                    height: 1px;
+                    background: #3a3a3a;
+                }
+            }
+            if root.toggle-label != "": Rectangle {
+                height: 44px;
+                Text {
+                    x: 14px;
+                    width: parent.width - 76px;
+                    text: root.toggle-label;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: Theme.demibold;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Toggle {
+                    x: parent.width - 54px;
+                    y: 8px;
+                    on: root.toggle-on;
+                    toggled(v) => {
+                        root.toggled(v);
+                    }
+                }
+            }
         }
+    }
+}
+
+// Discrete artwork-size control. Left is smaller covers, right is larger.
+component StepSlider inherits Rectangle {
+    in property <int> value;
+    callback chosen(int);
+    width: 128px;
+    height: 34px;
+    accessible-role: slider;
+    accessible-label: "Artwork size";
+
+    property <length> track-x: 22px;
+    property <length> track-w: 84px;
+    property <float> t: max(0, min(4, value)) / 4;
+
+    function pick(mx: length) -> int {
+        return max(0, min(4, Math.round((mx - track-x) / track-w * 4)));
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down || e.kind == PointerEventKind.up {
+                root.chosen(root.pick(self.mouse-x));
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.chosen(root.pick(self.mouse-x));
+            }
+        }
+    }
+
+    // Small 2×2 grid.
+    Rectangle { x: 1px; y: 11px; width: 5px; height: 5px; border-radius: 0.5px; background: Theme.text-secondary; }
+    Rectangle { x: 8px; y: 11px; width: 5px; height: 5px; border-radius: 0.5px; background: Theme.text-secondary; }
+    Rectangle { x: 1px; y: 18px; width: 5px; height: 5px; border-radius: 0.5px; background: Theme.text-secondary; }
+    Rectangle { x: 8px; y: 18px; width: 5px; height: 5px; border-radius: 0.5px; background: Theme.text-secondary; }
+
+    Rectangle {
+        x: track-x;
+        y: 16px;
+        width: track-w;
+        height: 2px;
+        border-radius: 1px;
+        background: #404040;
+    }
+
+    Rectangle {
+        x: track-x + t * track-w - 6px;
+        y: 11px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: white;
+    }
+
+    // Large single square.
+    Rectangle {
+        x: parent.width - 14px;
+        y: 10px;
+        width: 14px;
+        height: 14px;
+        border-radius: 2px;
+        border-width: 1.5px;
+        border-color: Theme.text-secondary;
+        background: transparent;
     }
 }
 
 export component GridView inherits Rectangle {
     property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 90px);
     property <length> w: self.width - 2 * pad;
-    property <length> gap: 18px;
-    property <int> cols: max(2, floor((w + gap) / (236px + gap)));
+    property <length> gap: App.grid-size <= 1 ? 12px : 18px;
+    property <length> min-card: App.grid-size <= 0 ? 120px : App.grid-size == 1 ? 152px : App.grid-size == 2 ? 188px : App.grid-size == 3 ? 236px : 292px;
+    property <int> cols: max(2, floor((w + gap) / (min-card + gap)));
     property <length> card-w: (w - (cols - 1) * gap) / cols;
     // Profiles have no subtitle line under the name.
-    property <length> cell-h: card-w + (App.grid-kind == "profiles" ? 40px : 76px) + 64px;
+    property <length> cell-h: App.grid-kind == "videos" ? card-w * 9 / 16 + 100px + gap : card-w + (App.grid-kind == "profiles" ? 40px : 76px) + gap;
     ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
@@ -1387,46 +1899,63 @@ export component GridView inherits Rectangle {
             Rectangle {
                 height: 38px;
                 HorizontalLayout {
-                    x: 0px;
-                    width: self.preferred-width;
-                    spacing: 6px;
-                    Text {
-                        text: App.page-title;
-                        color: Theme.text;
-                        font-size: 28px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
+                    width: 100%;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        spacing: 6px;
+                        Text {
+                            text: App.page-title;
+                            color: Theme.text;
+                            font-size: 28px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
 
+                        Rectangle {
+                            width: 10px;
+                        }
+
+                        if App.grid-sort-options.length > 0: VerticalLayout {
+                            alignment: center;
+                            ChoiceButton {
+                                icon: @image-url("icons/sort.svg");
+                                heading: "SORT BY";
+                                options: App.grid-sort-options;
+                                current: App.grid-sort;
+                                chosen(option) => { App.set-grid-sort(option); }
+                            }
+                        }
+                        if App.grid-group-options.length > 1: VerticalLayout {
+                            alignment: center;
+                            ChoiceButton {
+                                icon: @image-url("icons/group.svg");
+                                heading: "GROUP BY";
+                                options: App.grid-group-options;
+                                current: App.grid-group;
+                                highlighted: App.grid-group != "None";
+                                toggle-label: App.grid-kind == "playlists" ? "Combine other users" : "";
+                                toggle-on: App.grid-combine-others;
+                                chosen(option) => { App.set-grid-group(option); }
+                                toggled(v) => { App.set-grid-combine-others(v); }
+                            }
+                        }
+                        if App.grid-can-create: VerticalLayout {
+                            alignment: center;
+                            CreateButton {
+                                size: 18px;
+                            }
+                        }
+                    }
                     Rectangle {
-                        width: 10px;
+                        horizontal-stretch: 1;
                     }
-
-                    if App.grid-sort-options.length > 0: VerticalLayout {
+                    VerticalLayout {
+                        horizontal-stretch: 0;
                         alignment: center;
-                        ChoiceButton {
-                            icon: @image-url("icons/sort.svg");
-                            heading: "SORT BY";
-                            options: App.grid-sort-options;
-                            current: App.grid-sort;
-                            chosen(option) => { App.set-grid-sort(option); }
-                        }
-                    }
-                    if App.grid-group-options.length > 0: VerticalLayout {
-                        alignment: center;
-                        ChoiceButton {
-                            icon: @image-url("icons/group.svg");
-                            heading: "GROUP BY";
-                            options: App.grid-group-options;
-                            current: App.grid-group;
-                            highlighted: App.grid-group != "None";
-                            chosen(option) => { App.set-grid-group(option); }
-                        }
-                    }
-                    if App.grid-can-create: VerticalLayout {
-                        alignment: center;
-                        CreateButton {
-                            size: 18px;
+                        StepSlider {
+                            value: App.grid-size;
+                            chosen(step) => { App.set-grid-size(step); }
                         }
                     }
                 }
@@ -1474,12 +2003,16 @@ export component GridView inherits Rectangle {
                 height: 36px;
             }
 
-            if App.grid-cards.length == 0: Text {
-                text: App.loading ? "Loading…" : App.filter-text != "" ? "Nothing matches “" + App.filter-text + "”" : "Nothing here yet";
+            if App.grid-cards.length == 0 && App.loading: Rectangle {
+                height: 280px;
+                TideLoader { }
+            }
+            if App.grid-cards.length == 0 && !App.loading: Text {
+                text: App.filter-text != "" ? "Nothing matches “" + App.filter-text + "”" : "Nothing here yet";
                 color: Theme.text-secondary;
                 font-size: 15px;
             }
-            for group in App.grid-groups: VerticalLayout {
+            for group[g] in App.grid-groups: VerticalLayout {
                 // Group header in the style of a library "group by" view:
                 // a rule, the group name and how many items it holds.
                 if group.title != "": Rectangle {
@@ -1514,7 +2047,18 @@ export component GridView inherits Rectangle {
                     }
                 }
                 Rectangle {
-                    height: ceil(group.cards.length / root.cols) * root.cell-h - (group.title != "" ? 28px : 0px);
+                    property <int> n: group.cards.length;
+                    property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan) / root.cell-h));
+                    property <int> vis-rows: max(1, ceil((art.overscan + max(App.pane-height, 1px) + art.overscan) / root.cell-h));
+                    height: ceil(n / root.cols) * root.cell-h;
+                    art := ArtRequest {
+                        width: 100%;
+                        height: 100%;
+                        window-height: App.pane-height;
+                        from: first-row * root.cols;
+                        upto: min(n, (first-row + vis-rows) * root.cols);
+                        request(from, upto) => { App.grid-art(g, from, upto); }
+                    }
                     for card[i] in group.cards: MediaCard {
                         x: mod(i, root.cols) * (root.card-w + root.gap);
                         y: floor(i / root.cols) * root.cell-h;
@@ -1605,6 +2149,10 @@ export component NowPlayingView inherits Rectangle {
         width: self.preferred-width;
         height: 40px;
         spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            DebugButton { }
+        }
         VerticalLayout {
             alignment: center;
             Rectangle {

@@ -348,6 +348,33 @@ export component SettingsView inherits Rectangle {
                     }
 
                     Row {
+                        title: "DSP";
+                        detail: App.dsp-active ? "On for " + App.dsp-device + ". DSP is shaping the sound, so playback is Enhanced rather than bit-perfect." : App.dsp-enabled ? "On for " + App.dsp-device + ". The current settings leave the sound unchanged." : "DSP is off for " + App.dsp-device + ".";
+                        HorizontalLayout {
+                            x: parent.width - self.width;
+                            width: self.preferred-width;
+                            height: 38px;
+                            spacing: 10px;
+                            SmallButton {
+                                text: "Open";
+                                clicked => { App.navigate("dsp"); }
+                            }
+                            Rectangle {
+                                width: 1px;
+                                height: 26px;
+                                background: #3a3a3e;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Toggle {
+                                    on: App.dsp-enabled;
+                                    toggled(v) => { App.dsp-set-enabled(v); }
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
                         title: "Restore original sample rate";
                         detail: "Gives the device back the sample rate it had before TIDE changed it, after a pause and when TIDE quits. Turn off to leave it at the track's rate.";
                         divider: false;
@@ -440,8 +467,8 @@ export component SettingsView inherits Rectangle {
                                     App.set-cache-max(self.text);
                                     self.clear-focus();
                                 }
-                                changed has-focus => {
-                                    if !self.has-focus {
+                                focused(on) => {
+                                    if !on {
                                         App.set-cache-max(self.text);
                                     }
                                 }
@@ -460,12 +487,24 @@ export component SettingsView inherits Rectangle {
                     Row {
                         title: "Keep most played offline";
                         detail: "Re-downloads your most played tracks in the background if they are missing from the cache.";
-                        divider: false;
                         Toggle {
                             x: parent.width - self.width;
                             on: App.keep-most-played;
                             toggled(v) => {
                                 App.set-keep-most-played(v);
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Low RAM mode";
+                        detail: "Uses less memory: no page snapshots or sliding back / forward transitions, a smaller graphics cache and fewer window buffers.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.low-ram;
+                            toggled(v) => {
+                                App.set-low-ram(v);
                             }
                         }
                     }
