@@ -1,13 +1,19 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
+use tidlers::TidalClient;
 use tidlers::auth::TidalAuth;
 use tidlers::client::models::playback::AudioQuality;
 use tidlers::client::models::search::config::{SearchConfig, SearchType};
-use tidlers::TidalClient;
 
+pub mod catalog;
+pub mod hls;
 pub mod web;
-pub use web::{ApiHandle, Card, CatalogDetail, Credit, Lyrics, Section, StreamInfo};
+pub use catalog::{LaterItems, feed_group, feed_group_on};
+pub use web::{
+    ApiHandle, Card, CatalogDetail, Credit, FavoriteIds, Lyrics, Section, StreamInfo, VideoStream,
+    VideoVariant, plain_bio,
+};
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -28,7 +34,11 @@ pub enum ApiError {
 /// The request never got an HTTP answer (DNS, connect, TLS, timeout).
 fn is_transport_error(e: &tidlers::TidalError) -> bool {
     use tidlers::requests::RequestClientError as R;
-    matches!(e, tidlers::TidalError::Request(_) | tidlers::TidalError::RequestClient(R::RequestError(_) | R::Timeout))
+    matches!(
+        e,
+        tidlers::TidalError::Request(_)
+            | tidlers::TidalError::RequestClient(R::RequestError(_) | R::Timeout)
+    )
 }
 
 /// An error with its causes, since tidlers' own messages stop at "failed to do request".
@@ -46,12 +56,21 @@ fn error_chain(e: &dyn std::error::Error) -> String {
     text
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistRef {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrackItem {
     pub id: String,
     pub title: String,
     pub artist: String,
     pub artist_id: Option<String>,
+    /// Every credited artist, in billing order. Empty when only `artist` / `artist_id` are known.
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
     pub album: String,
     pub album_id: Option<String>,
     pub duration_secs: u32,
@@ -97,18 +116,28 @@ impl TidalService {
         let auth = TidalAuth::with_pkce();
         let client = TidalClient::new(&auth);
         let session_file = default_session_path()?;
-        Ok(Self { client, session_file })
+        Ok(Self {
+            client,
+            session_file,
+        })
     }
 
     pub fn with_device_auth() -> Result<Self, ApiError> {
         let auth = TidalAuth::with_oauth();
         let client = TidalClient::new(&auth);
         let session_file = default_session_path()?;
-        Ok(Self { client, session_file })
+        Ok(Self {
+            client,
+            session_file,
+        })
     }
 
     pub async fn start_device_auth(&mut self) -> Result<DeviceAuthInfo, ApiError> {
-        let link = self.client.get_oauth_link().await.map_err(|e| ApiError::Client(e.to_string()))?;
+        let link = self
+            .client
+            .get_oauth_link()
+            .await
+            .map_err(|e| ApiError::Client(e.to_string()))?;
         Ok(DeviceAuthInfo {
             verification_uri: link.verification_uri,
             verification_uri_complete: link.verification_uri_complete,
@@ -119,11 +148,21 @@ impl TidalService {
         })
     }
 
-    pub async fn poll_device_auth(&mut self, device_code: &str, expires_in: u64, interval: u64) -> Result<String, ApiError> {
-        self.client.wait_for_oauth(device_code, expires_in, interval, None)
+    pub async fn poll_device_auth(
+        &mut self,
+        device_code: &str,
+        expires_in: u64,
+        interval: u64,
+    ) -> Result<String, ApiError> {
+        self.client
+            .wait_for_oauth(device_code, expires_in, interval, None)
             .await
             .map_err(|e| ApiError::Client(e.to_string()))?;
-        let user = self.client.get_user_info().await.map_err(|e| ApiError::Client(e.to_string()))?;
+        let user = self
+            .client
+            .get_user_info()
+            .await
+            .map_err(|e| ApiError::Client(e.to_string()))?;
         let username = user.attributes.username;
         let _ = self.client.refresh_user_info().await;
         self.save_session()?;
@@ -131,7 +170,9 @@ impl TidalService {
     }
 
     pub fn start_pkce_login(&mut self) -> Result<String, ApiError> {
-        self.client.initiate_pkce_login().map_err(|e| ApiError::Client(e.to_string()))
+        self.client
+            .initiate_pkce_login()
+            .map_err(|e| ApiError::Client(e.to_string()))
     }
 
     pub async fn finish_pkce_login(&mut self, redirect_url: &str) -> Result<String, ApiError> {
@@ -142,7 +183,10 @@ impl TidalService {
                 Ok(()) => break,
                 Err(e) if is_transport_error(&e) && attempt < 3 => {
                     attempt += 1;
-                    tracing::warn!("PKCE token exchange failed ({}), retry {attempt}/3", error_chain(&e));
+                    tracing::warn!(
+                        "PKCE token exchange failed ({}), retry {attempt}/3",
+                        error_chain(&e)
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(600 * attempt)).await;
                 }
                 Err(e) => return Err(ApiError::Client(error_chain(&e))),
@@ -153,8 +197,15 @@ impl TidalService {
         let username = match self.client.get_user_info().await {
             Ok(user) => user.attributes.username,
             Err(e) => {
-                tracing::warn!("logged in, but the profile lookup failed: {}", error_chain(&e));
-                self.client.user_info.as_ref().map(|u| u.username.clone()).unwrap_or_default()
+                tracing::warn!(
+                    "logged in, but the profile lookup failed: {}",
+                    error_chain(&e)
+                );
+                self.client
+                    .user_info
+                    .as_ref()
+                    .map(|u| u.username.clone())
+                    .unwrap_or_default()
             }
         };
         let _ = self.client.refresh_user_info().await;
@@ -197,7 +248,10 @@ impl TidalService {
 
     /// Refresh the access token if it is close to expiry and persist the session.
     pub async fn refresh(&mut self) -> Result<(), ApiError> {
-        self.client.refresh_access_token(false).await.map_err(|e| ApiError::Auth(e.to_string()))?;
+        self.client
+            .refresh_access_token(false)
+            .await
+            .map_err(|e| ApiError::Auth(e.to_string()))?;
         self.save_session()
     }
 
@@ -213,15 +267,24 @@ impl TidalService {
     /// Display name of the logged-in account.
     pub fn username(&self) -> Option<String> {
         let info = serde_json::to_value(self.client.user_info.as_ref()?).ok()?;
-        ["username", "email", "firstName"]
-            .iter()
-            .find_map(|k| info.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from))
+        ["username", "email", "firstName"].iter().find_map(|k| {
+            info.get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
     }
 
     pub fn country_code(&self) -> String {
-        self.client.user_info.as_ref()
+        self.client
+            .user_info
+            .as_ref()
             .and_then(|u| serde_json::to_value(u).ok())
-            .and_then(|v| v.get("countryCode").and_then(|c| c.as_str()).map(String::from))
+            .and_then(|v| {
+                v.get("countryCode")
+                    .and_then(|c| c.as_str())
+                    .map(String::from)
+            })
             .unwrap_or_else(|| "US".into())
     }
 
@@ -231,7 +294,10 @@ impl TidalService {
 
     /// Ask TIDAL to invalidate the current access token (best effort).
     pub async fn revoke(&self) -> Result<(), ApiError> {
-        self.client.logout().await.map_err(|e| ApiError::Auth(e.to_string()))
+        self.client
+            .logout()
+            .await
+            .map_err(|e| ApiError::Auth(e.to_string()))
     }
 
     pub fn logout(&mut self) -> Result<(), ApiError> {
@@ -241,15 +307,33 @@ impl TidalService {
         Ok(())
     }
 
-    pub async fn get_favorite_tracks(&mut self, limit: Option<u32>) -> Result<Vec<TrackItem>, ApiError> {
-        let resp = self.client.get_collection_track_favorites(limit, None).await.map_err(|e| ApiError::Client(e.to_string()))?;
+    pub async fn get_favorite_tracks(
+        &mut self,
+        limit: Option<u32>,
+    ) -> Result<Vec<TrackItem>, ApiError> {
+        let resp = self
+            .client
+            .get_collection_track_favorites(limit, None)
+            .await
+            .map_err(|e| ApiError::Client(e.to_string()))?;
         let mut tracks = Vec::new();
         for entry in resp.items {
             let track = entry.item;
-            let cover_url = track.album.as_ref().and_then(|a| a.cover.as_ref()).map(|c| {
-                format!("https://resources.tidal.com/images/{}/640x640.jpg", c.replace('-', "/"))
-            });
-            let album_name = track.album.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+            let cover_url = track
+                .album
+                .as_ref()
+                .and_then(|a| a.cover.as_ref())
+                .map(|c| {
+                    format!(
+                        "https://resources.tidal.com/images/{}/640x640.jpg",
+                        c.replace('-', "/")
+                    )
+                });
+            let album_name = track
+                .album
+                .as_ref()
+                .map(|a| a.title.clone())
+                .unwrap_or_default();
             let album_id = track.album.as_ref().map(|a| a.id.to_string());
             tracks.push(TrackItem {
                 id: track.id.to_string(),
@@ -269,12 +353,15 @@ impl TidalService {
 
     pub async fn get_stream_urls(&mut self, track_id: &str) -> Result<PlaybackStream, ApiError> {
         self.client.set_audio_quality(AudioQuality::HiRes);
-        let playback = self.client
+        let playback = self
+            .client
             .get_track_postpaywall_playback_info(track_id, None)
             .await
             .map_err(|e| ApiError::Client(e.to_string()))?;
-        
-        let urls = playback.get_stream_urls().ok_or_else(|| ApiError::NoStream(track_id.to_string()))?;
+
+        let urls = playback
+            .get_stream_urls()
+            .ok_or_else(|| ApiError::NoStream(track_id.to_string()))?;
         Ok(PlaybackStream {
             track_id: track_id.to_string(),
             quality: format!("{:?}", playback.audio_quality),
@@ -287,11 +374,26 @@ impl TidalService {
     }
 
     pub async fn get_track(&mut self, track_id: &str) -> Result<TrackItem, ApiError> {
-        let track = self.client.get_track(track_id).await.map_err(|e| ApiError::Client(e.to_string()))?;
-        let cover_url = track.album.as_ref().and_then(|a| a.cover.as_ref()).map(|c| {
-            format!("https://resources.tidal.com/images/{}/640x640.jpg", c.replace('-', "/"))
-        });
-        let album_name = track.album.as_ref().map(|a| a.title.clone()).unwrap_or_default();
+        let track = self
+            .client
+            .get_track(track_id)
+            .await
+            .map_err(|e| ApiError::Client(e.to_string()))?;
+        let cover_url = track
+            .album
+            .as_ref()
+            .and_then(|a| a.cover.as_ref())
+            .map(|c| {
+                format!(
+                    "https://resources.tidal.com/images/{}/640x640.jpg",
+                    c.replace('-', "/")
+                )
+            });
+        let album_name = track
+            .album
+            .as_ref()
+            .map(|a| a.title.clone())
+            .unwrap_or_default();
         let album_id = track.album.as_ref().map(|a| a.id.to_string());
         Ok(TrackItem {
             id: track.id.to_string(),
@@ -314,14 +416,20 @@ impl TidalService {
             limit: 25,
             ..Default::default()
         };
-        let results = self.client.search(config).await.map_err(|e| ApiError::Client(e.to_string()))?;
+        let results = self
+            .client
+            .search(config)
+            .await
+            .map_err(|e| ApiError::Client(e.to_string()))?;
         let mut tracks = Vec::new();
         if let Some(track_list) = results.tracks {
             for track in track_list.items {
-                let cover_url = track
-                    .album
-                    .as_ref()
-                    .map(|a| format!("https://resources.tidal.com/images/{}/640x640.jpg", a.cover.replace('-', "/")));
+                let cover_url = track.album.as_ref().map(|a| {
+                    format!(
+                        "https://resources.tidal.com/images/{}/640x640.jpg",
+                        a.cover.replace('-', "/")
+                    )
+                });
                 let artist_name = track
                     .artists
                     .first()
@@ -332,25 +440,35 @@ impl TidalService {
                     .first()
                     .and_then(|a| a.id)
                     .map(|id| id.to_string());
+                let artists = track
+                    .artists
+                    .iter()
+                    .filter_map(|a| {
+                        Some(ArtistRef {
+                            id: a.id?.to_string(),
+                            name: a.name.clone()?,
+                        })
+                    })
+                    .collect();
                 let album_name = track
                     .album
                     .as_ref()
                     .map(|a| a.title.clone())
                     .unwrap_or_default();
-                let album_id = track
-                    .album
-                    .as_ref()
-                    .map(|a| a.id.to_string());
+                let album_id = track.album.as_ref().map(|a| a.id.to_string());
                 tracks.push(TrackItem {
                     id: track.id.to_string(),
                     title: track.title,
                     artist: artist_name,
                     artist_id,
+                    artists,
                     album: album_name,
                     album_id,
                     duration_secs: track.duration as u32,
                     cover_url,
-                    audio_quality: track.audio_quality.unwrap_or_else(|| "LOSSLESS".to_string()),
+                    audio_quality: track
+                        .audio_quality
+                        .unwrap_or_else(|| "LOSSLESS".to_string()),
                     ..Default::default()
                 });
             }
@@ -386,7 +504,11 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         // world-readable and a crash cannot leave a half-written session.
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)?;
@@ -399,6 +521,11 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn default_session_path() -> Result<PathBuf, ApiError> {
-    let base = dirs::data_dir().ok_or_else(|| ApiError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "No data dir found")))?;
+    let base = dirs::data_dir().ok_or_else(|| {
+        ApiError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No data dir found",
+        ))
+    })?;
     Ok(base.join("tidal-rust").join("session.json"))
 }
