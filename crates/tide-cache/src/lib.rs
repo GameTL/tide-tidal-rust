@@ -1,6 +1,6 @@
+use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use rusqlite::{params, Connection};
 use thiserror::Error;
 use tide_api::TrackItem;
 
@@ -43,7 +43,13 @@ async fn write_url_range(
         for (i, url) in window.iter().enumerate() {
             let (client, url) = (client.clone(), url.clone());
             set.spawn(async move {
-                let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+                let bytes = client
+                    .get(&url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .bytes()
+                    .await?;
                 Ok::<_, reqwest::Error>((i, bytes))
             });
         }
@@ -97,14 +103,18 @@ impl MetadataCache {
         let conn = Connection::open(&db_path)?;
         // Library and listening history are personal: owner-only access.
         tide_api::restrict_to_owner(&db_path);
-        let cache = Self { conn: std::sync::Mutex::new(conn) };
+        let cache = Self {
+            conn: std::sync::Mutex::new(conn),
+        };
         cache.init_schema()?;
         Ok(cache)
     }
 
     pub fn in_memory() -> Result<Self, CacheError> {
         let conn = Connection::open_in_memory()?;
-        let cache = Self { conn: std::sync::Mutex::new(conn) };
+        let cache = Self {
+            conn: std::sync::Mutex::new(conn),
+        };
         cache.init_schema()?;
         Ok(cache)
     }
@@ -175,16 +185,24 @@ impl MetadataCache {
                 play_pos INTEGER PRIMARY KEY,
                 queue_idx INTEGER NOT NULL REFERENCES playback_queue(queue_idx)
             );
-            "
+            ",
         )?;
         // Upgrade older databases that predate `tracks.explicit`.
-        let _ = conn.execute("ALTER TABLE tracks ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute(
+            "ALTER TABLE tracks ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // Every credited artist as JSON `[{"id","name"}]` (older rows keep only the first).
+        let _ = conn.execute("ALTER TABLE tracks ADD COLUMN artists TEXT", []);
         Ok(())
     }
 
     /// Store an arbitrary JSON document (home feed, playlists, ...) for instant offline boot.
     pub fn put_json(&self, key: &str, json: &str) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3)
@@ -196,25 +214,34 @@ impl MetadataCache {
 
     pub fn get_json(&self, key: &str) -> Option<String> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| r.get(0)).ok()
+        conn.query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .ok()
     }
 
     pub fn clear_json(&self) -> Result<(), CacheError> {
         // Account data goes; app preferences stay.
-        self.conn.lock().unwrap().execute("DELETE FROM kv WHERE key != 'settings'", [])?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM kv WHERE key != 'settings'", [])?;
         Ok(())
     }
 
     pub fn upsert_track(&self, track: &TrackItem) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let conn = self.conn.lock().unwrap();
         Self::upsert_track_conn(&conn, track, now)
     }
 
     fn upsert_track_conn(conn: &Connection, track: &TrackItem, now: i64) -> Result<(), CacheError> {
         conn.execute(
-            "INSERT INTO tracks (id, title, artist, artist_id, album, album_id, duration_secs, cover_url, audio_quality, explicit, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO tracks (id, title, artist, artist_id, album, album_id, duration_secs, cover_url, audio_quality, explicit, cached_at, artists)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title,
                 artist=excluded.artist,
@@ -225,7 +252,8 @@ impl MetadataCache {
                 cover_url=excluded.cover_url,
                 audio_quality=excluded.audio_quality,
                 explicit=excluded.explicit,
-                cached_at=excluded.cached_at",
+                cached_at=excluded.cached_at,
+                artists=excluded.artists",
             params![
                 track.id,
                 track.title,
@@ -238,6 +266,9 @@ impl MetadataCache {
                 track.audio_quality,
                 i32::from(track.explicit),
                 now,
+                (!track.artists.is_empty())
+                    .then(|| serde_json::to_string(&track.artists).ok())
+                    .flatten(),
             ],
         )?;
         Ok(())
@@ -255,6 +286,12 @@ impl MetadataCache {
             cover_url: row.get(7)?,
             audio_quality: row.get(8)?,
             explicit: row.get::<_, i32>(9).unwrap_or(0) != 0,
+            artists: row
+                .get::<_, Option<String>>(10)
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -262,7 +299,7 @@ impl MetadataCache {
     pub fn get_track(&self, track_id: &str) -> Result<Option<TrackItem>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, artist, artist_id, album, album_id, duration_secs, cover_url, audio_quality, explicit
+            "SELECT id, title, artist, artist_id, album, album_id, duration_secs, cover_url, audio_quality, explicit, artists
              FROM tracks WHERE id = ?1"
         )?;
         let mut rows = stmt.query(params![track_id])?;
@@ -274,7 +311,10 @@ impl MetadataCache {
     }
 
     pub fn save_favorites(&self, tracks: &[TrackItem]) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         for track in tracks {
             self.upsert_track(track)?;
             let conn = self.conn.lock().unwrap();
@@ -290,7 +330,7 @@ impl MetadataCache {
     pub fn get_favorites(&self) -> Result<Vec<TrackItem>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit
+            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit, t.artists
              FROM favorites f
              JOIN tracks t ON f.track_id = t.id
              ORDER BY f.added_at DESC"
@@ -304,7 +344,10 @@ impl MetadataCache {
     }
 
     pub fn record_play(&self, track_id: &str) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO history (track_id, played_at) VALUES (?1, ?2)",
@@ -328,9 +371,11 @@ impl MetadataCache {
     /// Total (hits, misses) of the audio cache since the stats began.
     pub fn cache_hit_stats(&self) -> (u64, u64) {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COALESCE(SUM(hits), 0), COALESCE(SUM(misses), 0) FROM cache_stats", [], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
-        })
+        conn.query_row(
+            "SELECT COALESCE(SUM(hits), 0), COALESCE(SUM(misses), 0) FROM cache_stats",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        )
         .unwrap_or((0, 0))
     }
 
@@ -338,15 +383,21 @@ impl MetadataCache {
     /// play loses half its weight every [`SCORE_HALF_LIFE_DAYS`] days, so the
     /// score follows what you listen to now rather than years ago.
     pub fn play_scores(&self) -> std::collections::HashMap<String, f64> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         self.play_scores_at(now)
     }
 
     pub fn play_scores_at(&self, now: i64) -> std::collections::HashMap<String, f64> {
         let mut scores = std::collections::HashMap::new();
         let conn = self.conn.lock().unwrap();
-        let Ok(mut stmt) = conn.prepare("SELECT track_id, played_at FROM history") else { return scores };
-        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) else {
+        let Ok(mut stmt) = conn.prepare("SELECT track_id, played_at FROM history") else {
+            return scores;
+        };
+        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        else {
             return scores;
         };
         for (track_id, played_at) in rows.flatten() {
@@ -360,10 +411,14 @@ impl MetadataCache {
     pub fn top_played(&self, limit: usize, min_plays: u32) -> Vec<TrackItem> {
         let counts: std::collections::HashMap<String, u32> = {
             let conn = self.conn.lock().unwrap();
-            let Ok(mut stmt) = conn.prepare("SELECT track_id, COUNT(*) FROM history GROUP BY track_id") else {
+            let Ok(mut stmt) =
+                conn.prepare("SELECT track_id, COUNT(*) FROM history GROUP BY track_id")
+            else {
                 return Vec::new();
             };
-            let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))) else {
+            let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))
+            else {
                 return Vec::new();
             };
             rows.flatten().collect()
@@ -374,13 +429,17 @@ impl MetadataCache {
             .filter(|(id, _)| counts.get(id).copied().unwrap_or(0) >= min_plays)
             .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        ranked.into_iter().take(limit).filter_map(|(id, _)| self.get_track(&id).ok().flatten()).collect()
+        ranked
+            .into_iter()
+            .take(limit)
+            .filter_map(|(id, _)| self.get_track(&id).ok().flatten())
+            .collect()
     }
 
     pub fn get_recently_played(&self, limit: u32) -> Result<Vec<TrackItem>, CacheError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit
+            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit, t.artists
              FROM history h
              JOIN tracks t ON h.track_id = t.id
              ORDER BY h.played_at DESC
@@ -396,7 +455,10 @@ impl MetadataCache {
 
     /// Persist the full playback queue, play order, and transport/volume state in one transaction.
     pub fn save_playback_queue(&self, state: &SavedPlayback) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         for track in &state.queue {
@@ -405,13 +467,15 @@ impl MetadataCache {
         tx.execute("DELETE FROM playback_order", [])?;
         tx.execute("DELETE FROM playback_queue", [])?;
         {
-            let mut ins_q = tx.prepare("INSERT INTO playback_queue (queue_idx, track_id) VALUES (?1, ?2)")?;
+            let mut ins_q =
+                tx.prepare("INSERT INTO playback_queue (queue_idx, track_id) VALUES (?1, ?2)")?;
             for (idx, track) in state.queue.iter().enumerate() {
                 ins_q.execute(params![idx as i64, track.id])?;
             }
         }
         {
-            let mut ins_o = tx.prepare("INSERT INTO playback_order (play_pos, queue_idx) VALUES (?1, ?2)")?;
+            let mut ins_o =
+                tx.prepare("INSERT INTO playback_order (play_pos, queue_idx) VALUES (?1, ?2)")?;
             for (play_pos, &queue_idx) in state.order.iter().enumerate() {
                 ins_o.execute(params![play_pos as i64, queue_idx as i64])?;
             }
@@ -444,13 +508,21 @@ impl MetadataCache {
     }
 
     /// Persist play order + session state when shuffle toggles without rewriting `playback_queue`.
-    pub fn update_playback_order(&self, order: &[usize], cursor: PlaybackCursor) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    pub fn update_playback_order(
+        &self,
+        order: &[usize],
+        cursor: PlaybackCursor,
+    ) -> Result<(), CacheError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM playback_order", [])?;
         {
-            let mut ins_o = tx.prepare("INSERT INTO playback_order (play_pos, queue_idx) VALUES (?1, ?2)")?;
+            let mut ins_o =
+                tx.prepare("INSERT INTO playback_order (play_pos, queue_idx) VALUES (?1, ?2)")?;
             for (play_pos, &queue_idx) in order.iter().enumerate() {
                 ins_o.execute(params![play_pos as i64, queue_idx as i64])?;
             }
@@ -462,12 +534,19 @@ impl MetadataCache {
 
     /// Lightweight single-row update for transport cursor, timestamp, repeat, volume, and mute.
     pub fn update_playback_cursor(&self, cursor: PlaybackCursor) -> Result<(), CacheError> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let conn = self.conn.lock().unwrap();
         Self::upsert_cursor_conn(&conn, cursor, now)
     }
 
-    fn upsert_cursor_conn(conn: &Connection, cursor: PlaybackCursor, now: i64) -> Result<(), CacheError> {
+    fn upsert_cursor_conn(
+        conn: &Connection,
+        cursor: PlaybackCursor,
+        now: i64,
+    ) -> Result<(), CacheError> {
         conn.execute(
             "INSERT INTO playback_session (id, pos, elapsed_ms, context, shuffle, repeat_mode, volume, muted, updated_at)
              VALUES (1, ?1, ?2, '', ?3, ?4, ?5, ?6, ?7)
@@ -514,7 +593,7 @@ impl MetadataCache {
         };
 
         let mut stmt_q = conn.prepare(
-            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit
+            "SELECT t.id, t.title, t.artist, t.artist_id, t.album, t.album_id, t.duration_secs, t.cover_url, t.audio_quality, t.explicit, t.artists
              FROM playback_queue q
              JOIN tracks t ON q.track_id = t.id
              ORDER BY q.queue_idx ASC",
@@ -523,7 +602,8 @@ impl MetadataCache {
             .query_map([], Self::row_to_track)?
             .collect::<rusqlite::Result<_>>()?;
 
-        let mut stmt_o = conn.prepare("SELECT queue_idx FROM playback_order ORDER BY play_pos ASC")?;
+        let mut stmt_o =
+            conn.prepare("SELECT queue_idx FROM playback_order ORDER BY play_pos ASC")?;
         let mut order: Vec<usize> = stmt_o
             .query_map([], |r| Ok(r.get::<_, i64>(0)?.max(0) as usize))?
             .filter_map(Result::ok)
@@ -532,7 +612,11 @@ impl MetadataCache {
         if !queue.is_empty() && order.len() != queue.len() {
             order = (0..queue.len()).collect();
         }
-        let clamped_pos = if order.is_empty() { 0 } else { pos.min(order.len() - 1) };
+        let clamped_pos = if order.is_empty() {
+            0
+        } else {
+            pos.min(order.len() - 1)
+        };
 
         Ok(Some(SavedPlayback {
             queue,
@@ -549,7 +633,10 @@ impl MetadataCache {
 
     /// Flush only the live playback elapsed time on process exit (safe from `atexit`).
     pub fn update_playback_elapsed(&self, elapsed_ms: u64) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         if let Ok(conn) = self.conn.try_lock() {
             let _ = conn.execute(
                 "UPDATE playback_session SET elapsed_ms = ?1, updated_at = ?2 WHERE id = 1",
@@ -601,20 +688,30 @@ impl AudioCache {
     }
 
     pub fn mark_partial_live(&self, track_id: &str, quality: &str) {
-        self.live_partials.lock().unwrap().insert(partial_key(track_id, quality));
+        self.live_partials
+            .lock()
+            .unwrap()
+            .insert(partial_key(track_id, quality));
     }
 
     pub fn clear_partial_live(&self, track_id: &str, quality: &str) {
-        self.live_partials.lock().unwrap().remove(&partial_key(track_id, quality));
+        self.live_partials
+            .lock()
+            .unwrap()
+            .remove(&partial_key(track_id, quality));
     }
 
     fn is_partial_live(&self, track_id: &str, quality: &str) -> bool {
-        self.live_partials.lock().unwrap().contains(&partial_key(track_id, quality))
+        self.live_partials
+            .lock()
+            .unwrap()
+            .contains(&partial_key(track_id, quality))
     }
 
     pub fn file_path(&self, track_id: &str, quality: &str) -> PathBuf {
         let safe_quality = quality.replace([' ', '/'], "_");
-        self.base_dir.join(format!("{}_{}.audio", track_id, safe_quality))
+        self.base_dir
+            .join(format!("{}_{}.audio", track_id, safe_quality))
     }
 
     pub fn get_cached(&self, track_id: &str, quality: &str) -> Option<PathBuf> {
@@ -658,7 +755,14 @@ impl AudioCache {
         quality: &str,
         urls: &[String],
     ) -> Result<PathBuf, CacheError> {
-        self.fetch_or_cache_with(track_id, quality, urls, false, std::sync::Arc::new(|_, _, _| {})).await
+        self.fetch_or_cache_with(
+            track_id,
+            quality,
+            urls,
+            false,
+            std::sync::Arc::new(|_, _, _| {}),
+        )
+        .await
     }
 
     /// `on_chunk(index, state, bytes_so_far)` — state `1` in flight, `2` received.
@@ -704,7 +808,16 @@ impl AudioCache {
         let mut total_bytes = 0u64;
         let hook = on_chunk.as_ref();
 
-        write_url_range(&client, &mut file, urls, 0, ready_end, hook, &mut total_bytes).await?;
+        write_url_range(
+            &client,
+            &mut file,
+            urls,
+            0,
+            ready_end,
+            hook,
+            &mut total_bytes,
+        )
+        .await?;
 
         let streaming = stream_for_playback && ready_end < num_segments;
         if streaming {
@@ -778,7 +891,11 @@ impl AudioCache {
         std::fs::rename(&tmp, &dest)?;
         let elapsed = start.elapsed();
         let mb = total_bytes as f64 / (1024.0 * 1024.0);
-        let speed_mb_s = if elapsed.as_secs_f64() > 0.0 { mb / elapsed.as_secs_f64() } else { 0.0 };
+        let speed_mb_s = if elapsed.as_secs_f64() > 0.0 {
+            mb / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
         tracing::info!(
             track_id = %track_id,
             bytes = total_bytes,
@@ -818,7 +935,8 @@ impl AudioCache {
     }
 
     pub fn set_max_bytes(&self, max_bytes: u64) {
-        self.max_bytes.store(max_bytes, std::sync::atomic::Ordering::Relaxed);
+        self.max_bytes
+            .store(max_bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Track id of a cache file named `<track id>_<QUALITY>.audio`.
@@ -826,12 +944,16 @@ impl AudioCache {
         if path.extension().and_then(|s| s.to_str()) != Some("audio") {
             return None;
         }
-        path.file_stem()?.to_str()?.rsplit_once('_').map(|(id, _)| id.to_string())
+        path.file_stem()?
+            .to_str()?
+            .rsplit_once('_')
+            .map(|(id, _)| id.to_string())
     }
 
     /// Bring the cache back under its size limit, least recently used first.
     pub fn enforce_quota(&self) -> Result<(), CacheError> {
-        self.evict(&std::collections::HashMap::new(), &[]).map(|_| ())
+        self.evict(&std::collections::HashMap::new(), &[])
+            .map(|_| ())
     }
 
     /// Bring the cache back under its size limit, deleting the tracks that are
@@ -849,11 +971,19 @@ impl AudioCache {
         for entry in std::fs::read_dir(&self.base_dir)? {
             let entry = entry?;
             let path = entry.path();
-            let Some(track_id) = Self::track_id_of(&path) else { continue };
+            let Some(track_id) = Self::track_id_of(&path) else {
+                continue;
+            };
             let meta = entry.metadata()?;
             total_size += meta.len();
             let score = scores.get(&track_id).copied().unwrap_or(0.0);
-            files.push((path, meta.len(), score, meta.accessed().unwrap_or(UNIX_EPOCH), track_id));
+            files.push((
+                path,
+                meta.len(),
+                score,
+                meta.accessed().unwrap_or(UNIX_EPOCH),
+                track_id,
+            ));
         }
         if total_size <= max_bytes {
             return Ok(0);
@@ -968,7 +1098,10 @@ mod tests {
         std::fs::write(&tmp, vec![1u8; 64]).unwrap();
 
         assert!(cache.get_playable("560201309", "MAX").is_none());
-        assert!(!tmp.exists(), "orphan .tmp must be deleted so the next fetch starts clean");
+        assert!(
+            !tmp.exists(),
+            "orphan .tmp must be deleted so the next fetch starts clean"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1002,7 +1135,9 @@ mod tests {
             write_cached(&cache, id, 100);
         }
         let scores: std::collections::HashMap<String, f64> =
-            [("fav".to_string(), 9.0), ("rare".to_string(), 0.4)].into_iter().collect();
+            [("fav".to_string(), 9.0), ("rare".to_string(), 0.4)]
+                .into_iter()
+                .collect();
 
         // 400 bytes on disk, limit 250: two files must go. "never" (score 0) and
         // "playing" (score 0) are the cheapest, but "playing" is protected, so
@@ -1026,12 +1161,21 @@ mod tests {
         let now = 1_800_000_000i64;
         let day = 86_400i64;
         for id in ["old-hit", "current", "once"] {
-            cache.upsert_track(&TrackItem { id: id.into(), ..Default::default() }).unwrap();
+            cache
+                .upsert_track(&TrackItem {
+                    id: id.into(),
+                    ..Default::default()
+                })
+                .unwrap();
         }
         {
             let conn = cache.conn.lock().unwrap();
             let add = |id: &str, at: i64| {
-                conn.execute("INSERT INTO history (track_id, played_at) VALUES (?1, ?2)", params![id, at]).unwrap();
+                conn.execute(
+                    "INSERT INTO history (track_id, played_at) VALUES (?1, ?2)",
+                    params![id, at],
+                )
+                .unwrap();
             };
             add("old-hit", now - 300 * day); // three plays, but ten half-lives ago
             add("old-hit", now - 300 * day);
@@ -1068,7 +1212,11 @@ mod tests {
             ..Default::default()
         };
         // Includes duplicate track IDs ("1" appears twice) and shuffled order.
-        let queue = vec![mk("1", "One", true), mk("2", "Two", false), mk("1", "One", true)];
+        let queue = vec![
+            mk("1", "One", true),
+            mk("2", "Two", false),
+            mk("1", "One", true),
+        ];
         let order = vec![1, 2, 0];
         cache
             .save_playback_queue(&SavedPlayback {
