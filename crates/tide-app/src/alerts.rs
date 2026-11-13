@@ -64,13 +64,15 @@ impl<S: Subscriber> Layer<S> for AlertLayer {
         let mut fields = Fields::default();
         event.record(&mut fields);
         let line = Line {
-            time: utc_clock(),
+            time: wall_clock(),
             level: *event.metadata().level(),
             source: event.metadata().target().to_string(),
             message: fields.message,
             fields: fields.rest,
         };
-        let Ok(mut pending) = PENDING.lock() else { return };
+        let Ok(mut pending) = PENDING.lock() else {
+            return;
+        };
         pending.push(line);
         // A burst before the UI is up must not grow without bound.
         if pending.len() > KEPT_LOGS * 4 {
@@ -79,7 +81,8 @@ impl<S: Subscriber> Layer<S> for AlertLayer {
         }
         drop(pending);
         // One hop to the UI thread carries every line logged until it runs.
-        if !SCHEDULED.swap(true, Ordering::SeqCst) && slint::invoke_from_event_loop(flush).is_err() {
+        if !SCHEDULED.swap(true, Ordering::SeqCst) && slint::invoke_from_event_loop(flush).is_err()
+        {
             SCHEDULED.store(false, Ordering::SeqCst);
         }
     }
@@ -114,10 +117,47 @@ impl Visit for Fields {
     }
 }
 
-/// Wall-clock time as the log lines print it (UTC).
-fn utc_clock() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86_400;
+/// Laptop local time as the log lines print it.
+fn wall_clock() -> String {
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    format_clock(unix)
+}
+
+fn format_clock(unix_secs: i64) -> String {
+    #[cfg(unix)]
+    if let Some(hms) = local_hms(unix_secs) {
+        return hms;
+    }
+    let secs = unix_secs.rem_euclid(86_400) as u64;
     format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+#[cfg(unix)]
+fn local_hms(unix_secs: i64) -> Option<String> {
+    let t = unix_secs as libc::time_t;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    // SAFETY: `tm` is zeroed; `localtime_r` writes the broken-down local time into it.
+    if unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null return means hour/min/sec were written.
+    let (hour, min, sec) = unsafe {
+        let tm = tm.as_ptr();
+        ((*tm).tm_hour, (*tm).tm_min, (*tm).tm_sec)
+    };
+    Some(format!("{hour:02}:{min:02}:{sec:02}"))
+}
+
+/// Console timestamps match the debug panel: the laptop's local clock.
+pub struct LocalTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", wall_clock())
+    }
 }
 
 /// Move pending lines into the panel. UI thread only.
@@ -125,7 +165,10 @@ fn flush() {
     SCHEDULED.store(false, Ordering::SeqCst);
     // Until the window exists the lines stay pending; the next event retries.
     let _ = with_ui(|ui| {
-        let lines = PENDING.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
+        let lines = PENDING
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
         let app = ui.app();
         LOGS.with(|logs| {
             for line in &lines {
@@ -133,7 +176,14 @@ fn flush() {
                 if !line.fields.is_empty() {
                     let _ = write!(text, "  {}", line.fields);
                 }
-                logs.insert(0, LogEntry { time: line.time.as_str().into(), level: line.level.as_str().into(), text: text.into() });
+                logs.insert(
+                    0,
+                    LogEntry {
+                        time: line.time.as_str().into(),
+                        level: line.level.as_str().into(),
+                        text: text.into(),
+                    },
+                );
             }
             while logs.row_count() > KEPT_LOGS {
                 logs.remove(logs.row_count() - 1);
@@ -154,7 +204,7 @@ fn show_error(app: &App<'_>, line: Line) {
         errors.insert(
             0,
             ErrorEntry {
-                time: format!("{} UTC", line.time).into(),
+                time: line.time.as_str().into(),
                 source: line.source.into(),
                 message: line.message.as_str().into(),
                 fields: line.fields.into(),
@@ -191,4 +241,45 @@ fn post(app: &App<'_>, text: &str, error: bool) {
             on_ui(|ui| ui.app().set_alert_text("".into()));
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn with_tz<T>(tz: &str, f: impl FnOnce() -> T) -> T {
+        unsafe extern "C" {
+            fn tzset();
+        }
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let old = std::env::var("TZ").ok();
+        // SAFETY: `LOCK` keeps TZ mutations to one test at a time in this process.
+        unsafe {
+            std::env::set_var("TZ", tz);
+            tzset();
+        }
+        let out = f();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("TZ", v),
+                None => std::env::remove_var("TZ"),
+            }
+            tzset();
+        }
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_clock_uses_the_laptop_timezone() {
+        // 2025-01-04 14:13:20 UTC → 22:13:20 in Singapore.
+        with_tz("Asia/Singapore", || {
+            assert_eq!(format_clock(1_736_000_000), "22:13:20");
+        });
+        with_tz("UTC", || {
+            assert_eq!(format_clock(1_736_000_000), "14:13:20");
+        });
+    }
 }

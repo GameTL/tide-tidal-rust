@@ -1,6 +1,6 @@
 use tide_api::{TidalService, TrackItem};
-use tide_cache::{AudioCache, MetadataCache};
 use tide_audio::AudioPlayer;
+use tide_cache::{AudioCache, MetadataCache};
 
 #[tokio::test]
 async fn test_services_initialization() {
@@ -36,7 +36,10 @@ async fn test_services_initialization() {
 
     // Verify AudioPlayer CoreAudio initialization
     let player = AudioPlayer::new();
-    assert!(player.is_ok(), "AudioPlayer must initialize default output device");
+    assert!(
+        player.is_ok(),
+        "AudioPlayer must initialize default output device"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_cache_dir);
 }

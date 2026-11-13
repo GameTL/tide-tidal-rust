@@ -25,7 +25,9 @@ fn player_menu_targets_the_original_track_and_restores_focus() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
     app.set_logged_in(true);
     app.set_has_track(true);
     app.set_current_id("123".into());
@@ -38,7 +40,11 @@ fn player_menu_targets_the_original_track_and_restores_focus() {
             requests.set(requests.get() + 1);
             let ui = weak.unwrap();
             let app = ui.global::<App>();
-            app.set_menu_track(TrackData { id, title: "A track".into(), ..Default::default() });
+            app.set_menu_track(TrackData {
+                id,
+                title: "A track".into(),
+                ..Default::default()
+            });
             app.set_menu_x(x);
             app.set_menu_y(y);
             app.set_menu_open(true);
@@ -59,7 +65,10 @@ fn player_menu_targets_the_original_track_and_restores_focus() {
     click(win, 30., 850., PointerEventButton::Left);
     assert!(!app.get_menu_open());
     press(win, Key::Return);
-    assert!(app.get_menu_open(), "closing the menu should return focus to More");
+    assert!(
+        app.get_menu_open(),
+        "closing the menu should return focus to More"
+    );
     assert_eq!(open_requests.get(), 2);
 
     // The next track can start while the menu is open. Sharing still targets
@@ -70,7 +79,10 @@ fn player_menu_targets_the_original_track_and_restores_focus() {
     press(win, Key::DownArrow); // Share (album and artist are unavailable)
     press(win, Key::RightArrow);
     press(win, Key::Escape);
-    assert!(app.get_menu_open(), "Escape closes Share before the track menu");
+    assert!(
+        app.get_menu_open(),
+        "Escape closes Share before the track menu"
+    );
     press(win, Key::RightArrow);
     press(win, Key::Return);
     assert_eq!(copied.borrow().as_deref(), Some("123"));
@@ -90,7 +102,9 @@ fn scrubber_seeks_on_release_and_toggles_remaining_time() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
 
     assert_eq!(app.invoke_format_time(0), "0:00");
     assert_eq!(app.invoke_format_time(5), "0:05");
@@ -113,18 +127,30 @@ fn scrubber_seeks_on_release_and_toggles_remaining_time() {
     let start = LogicalPosition::new(500., 878.);
     let drag_to = LogicalPosition::new(720., 878.); // ~50% across bar
     win.dispatch_event(WindowEvent::PointerMoved { position: start });
-    win.dispatch_event(WindowEvent::PointerPressed { position: start, button: PointerEventButton::Left });
+    win.dispatch_event(WindowEvent::PointerPressed {
+        position: start,
+        button: PointerEventButton::Left,
+    });
     win.dispatch_event(WindowEvent::PointerMoved { position: drag_to });
-    assert!(sought.get().is_none(), "Scrubber should preview while dragging and seek only on release");
+    assert!(
+        sought.get().is_none(),
+        "Scrubber should preview while dragging and seek only on release"
+    );
 
-    win.dispatch_event(WindowEvent::PointerReleased { position: drag_to, button: PointerEventButton::Left });
+    win.dispatch_event(WindowEvent::PointerReleased {
+        position: drag_to,
+        button: PointerEventButton::Left,
+    });
     let frac = sought.get().expect("seek emitted on release");
     assert!((frac - 0.5).abs() < 0.02, "expected ~0.5, got {frac}");
 
     // Right timestamp sits at (1440 + 509.76)/2 + 14 ≈ 988.88, y=878.
     assert!(!app.get_show_remaining());
     click(win, 998., 878., PointerEventButton::Left);
-    assert!(app.get_show_remaining(), "clicking total duration toggles remaining-time mode");
+    assert!(
+        app.get_show_remaining(),
+        "clicking total duration toggles remaining-time mode"
+    );
 }
 
 #[test]
@@ -135,11 +161,18 @@ fn right_click_on_a_card_opens_the_shared_menu_with_its_own_entries() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
     app.set_logged_in(true);
     app.set_view("grid".into());
     app.set_grid_kind("albums".into());
-    let album = CardData { id: "9".into(), kind: "album".into(), title: "An album".into(), ..Default::default() };
+    let album = CardData {
+        id: "9".into(),
+        kind: "album".into(),
+        title: "An album".into(),
+        ..Default::default()
+    };
     let cards = ModelRc::new(VecModel::from(vec![album]));
     app.set_grid_cards(cards.clone());
     app.set_grid_groups(ModelRc::new(VecModel::from(vec![SectionData {
@@ -147,7 +180,12 @@ fn right_click_on_a_card_opens_the_shared_menu_with_its_own_entries() {
         cards,
         ..Default::default()
     }])));
-    let playlist = CardData { id: "p1".into(), kind: "playlist".into(), title: "Mine".into(), ..Default::default() };
+    let playlist = CardData {
+        id: "p1".into(),
+        kind: "playlist".into(),
+        title: "Mine".into(),
+        ..Default::default()
+    };
     app.set_own_playlists(ModelRc::new(VecModel::from(vec![playlist])));
 
     app.on_request_card_menu({
@@ -166,13 +204,24 @@ fn right_click_on_a_card_opens_the_shared_menu_with_its_own_entries() {
     let actions = Rc::new(RefCell::new(Vec::new()));
     app.on_menu_action({
         let actions = actions.clone();
-        move |action, arg| actions.borrow_mut().push((action.to_string(), arg.to_string()))
+        move |action, arg| {
+            actions
+                .borrow_mut()
+                .push((action.to_string(), arg.to_string()))
+        }
     });
 
-    win.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(1., 1.) });
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
     let (pane_x, top) = (app.get_pane_x(), app.get_pane_y());
     // First card of the grid: below the title, filter box and spacing.
-    click(win, pane_x + 200., top + 64. + 8. + 38. + 26. + 44. + 36. + 100., PointerEventButton::Right);
+    click(
+        win,
+        pane_x + 200.,
+        top + 64. + 8. + 38. + 26. + 44. + 36. + 100.,
+        PointerEventButton::Right,
+    );
     assert!(app.get_menu_open());
     assert_eq!(app.get_menu_kind(), "album");
     assert_eq!(app.get_menu_card().id, "9");
@@ -180,15 +229,91 @@ fn right_click_on_a_card_opens_the_shared_menu_with_its_own_entries() {
     // Play now is the first entry.
     press(win, Key::Return);
     assert!(!app.get_menu_open());
-    assert_eq!(actions.borrow().last().cloned(), Some(("play".to_string(), String::new())));
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("play".to_string(), String::new()))
+    );
 
     // Add to playlist opens a flyout listing the user's playlists.
-    click(win, pane_x + 200., top + 64. + 8. + 38. + 26. + 44. + 36. + 100., PointerEventButton::Right);
+    click(
+        win,
+        pane_x + 200.,
+        top + 64. + 8. + 38. + 26. + 44. + 36. + 100.,
+        PointerEventButton::Right,
+    );
     press(win, Key::DownArrow);
     press(win, Key::DownArrow);
     press(win, Key::RightArrow);
     assert_eq!(app.get_menu_sub(), "playlists");
     press(win, Key::Return);
-    assert_eq!(actions.borrow().last().cloned(), Some(("add-to-playlist".to_string(), "p1".to_string())));
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("add-to-playlist".to_string(), "p1".to_string()))
+    );
     assert!(!app.get_menu_open());
+}
+
+#[test]
+fn folder_menu_is_rename_delete_create_without_opening_the_folder() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
+    app.set_logged_in(true);
+    app.set_menu_kind("folder".into());
+    app.set_menu_card(CardData {
+        id: "f1".into(),
+        kind: "folder".into(),
+        title: "Other/Archive".into(),
+        subtitle: "3 playlists".into(),
+        ..Default::default()
+    });
+    app.set_menu_x(400.);
+    app.set_menu_y(200.);
+    app.on_open_card(|_| panic!("folder menu must not open the folder"));
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    app.on_menu_action({
+        let actions = actions.clone();
+        move |action, arg| {
+            actions
+                .borrow_mut()
+                .push((action.to_string(), arg.to_string()))
+        }
+    });
+
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
+    app.set_menu_open(true);
+    press(win, Key::Return);
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("rename".to_string(), String::new()))
+    );
+    assert!(!app.get_menu_open());
+
+    app.set_menu_open(true);
+    press(win, Key::DownArrow);
+    press(win, Key::Return);
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("delete".to_string(), String::new()))
+    );
+
+    app.set_menu_open(true);
+    press(win, Key::DownArrow);
+    press(win, Key::DownArrow);
+    press(win, Key::Return);
+    assert_eq!(
+        actions.borrow().as_slice(),
+        [
+            ("rename".to_string(), String::new()),
+            ("delete".to_string(), String::new()),
+            ("create-playlist".to_string(), String::new()),
+        ]
+    );
 }

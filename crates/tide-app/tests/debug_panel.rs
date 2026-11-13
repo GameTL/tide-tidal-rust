@@ -21,7 +21,9 @@ fn debug_button_toggles_and_leaves_the_window_clickable() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
     app.set_logged_in(true);
     app.set_can_go_back(true);
     let backs = Rc::new(Cell::new(0));
@@ -32,7 +34,9 @@ fn debug_button_toggles_and_leaves_the_window_clickable() {
 
     // The page pane starts below the in-window menu bar the test backend
     // draws; its geometry is published once the first event lays the window out.
-    win.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(1., 1.) });
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
     let (pane_x, top) = (app.get_pane_x(), app.get_pane_y());
     assert!(pane_x > 0.);
 
@@ -52,6 +56,22 @@ fn debug_button_toggles_and_leaves_the_window_clickable() {
 
     click(win, debug_x, debug_y);
     assert!(!app.get_debug_open());
+
+    app.set_show_now_playing(true);
+    // The same debug circle is immediately left of Lyrics in Now Playing.
+    let now_playing_debug_x = 1440. - 16. - 34. - 10. - 68. - 10. - 17.5;
+    click(win, now_playing_debug_x, top + 32.);
+    assert!(app.get_debug_open());
+    assert!(app.get_show_now_playing());
+    click(win, 1200., top + 100.);
+    assert!(app.get_debug_open(), "the panel stays above Now Playing");
+    click(win, now_playing_debug_x, top + 32.);
+    assert!(!app.get_debug_open());
+    click(win, 1440. - 16. - 17., top + 32.);
+    assert!(
+        !app.get_show_now_playing(),
+        "the collapse control still works"
+    );
 }
 
 #[test]
@@ -61,7 +81,9 @@ fn error_alert_shows_one_message_and_dismisses() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
     app.set_logged_in(true);
 
     app.set_alert_text("Could not play Dream Alone: Decoder error".into());
@@ -82,12 +104,19 @@ fn grid_page_filters_and_new_playlist_dialog_submits() {
     let app = ui.global::<App>();
     let win = ui.window();
     ui.show().unwrap();
-    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
     app.set_logged_in(true);
     app.set_view("grid".into());
     app.set_page_title("Playlists".into());
     app.set_grid_kind("playlists".into());
-    let card = |title: &str| CardData { id: title.into(), kind: "playlist".into(), title: title.into(), ..Default::default() };
+    let card = |title: &str| CardData {
+        id: title.into(),
+        kind: "playlist".into(),
+        title: title.into(),
+        ..Default::default()
+    };
     let cards = ModelRc::new(VecModel::from(vec![card("One"), card("Two")]));
     app.set_grid_cards(cards.clone());
     app.set_grid_groups(ModelRc::new(VecModel::from(vec![SectionData {
@@ -102,8 +131,23 @@ fn grid_page_filters_and_new_playlist_dialog_submits() {
         let opened = opened.clone();
         move |_| opened.set(opened.get() + 1)
     });
-    win.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(1., 1.) });
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
     let (pane_x, top) = (app.get_pane_x(), app.get_pane_y());
+
+    // Artwork-size slider sits on the right of the title row; the leftmost tick is 0.
+    let size = Rc::new(Cell::new(-1i32));
+    app.on_set_grid_size({
+        let size = size.clone();
+        move |step| size.set(step)
+    });
+    let pane_w = app.get_pane_width();
+    let pad = ((pane_w - 900.0) * 0.12).clamp(24.0, 90.0);
+    let slider_left = pane_x + pane_w - pad - 128.0;
+    let slider_y = top + 64.0 + 8.0 + 19.0;
+    click(win, slider_left + 22.0, slider_y);
+    assert_eq!(size.get(), 0);
 
     // Typing in the filter box reports the text.
     let filtered = Rc::new(std::cell::RefCell::new(String::new()));
@@ -119,7 +163,11 @@ fn grid_page_filters_and_new_playlist_dialog_submits() {
     assert_eq!(app.get_filter_text(), "t");
 
     // A card under the group header opens.
-    click(win, pane_x + 200., top + 64. + 8. + 38. + 26. + 44. + 36. + 58. + 100.);
+    click(
+        win,
+        pane_x + 200.,
+        top + 64. + 8. + 38. + 26. + 44. + 36. + 58. + 100.,
+    );
     assert_eq!(opened.get(), 1);
 
     // The name dialog creates on Return and closes.
@@ -129,13 +177,22 @@ fn grid_page_filters_and_new_playlist_dialog_submits() {
         move |kind, name| *created.borrow_mut() = Some((kind.to_string(), name.to_string()))
     });
     app.set_create_kind("folder".into());
-    win.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(2., 2.) });
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(2., 2.),
+    });
     for key in ["R", "o", "c", "k"] {
         win.dispatch_event(WindowEvent::KeyPressed { text: key.into() });
         win.dispatch_event(WindowEvent::KeyReleased { text: key.into() });
     }
-    win.dispatch_event(WindowEvent::KeyPressed { text: slint::platform::Key::Return.into() });
-    win.dispatch_event(WindowEvent::KeyReleased { text: slint::platform::Key::Return.into() });
-    assert_eq!(created.borrow().clone(), Some(("folder".to_string(), "Rock".to_string())));
+    win.dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Return.into(),
+    });
+    win.dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Return.into(),
+    });
+    assert_eq!(
+        created.borrow().clone(),
+        Some(("folder".to_string(), "Rock".to_string()))
+    );
     assert_eq!(app.get_create_kind(), "");
 }

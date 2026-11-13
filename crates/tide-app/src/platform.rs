@@ -13,12 +13,18 @@ pub fn configure_backend() {
     {
         use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
         let mut selector = slint::BackendSelector::new().backend_name("winit".into());
-        // Default to GPU (femtovg); TIDE_RENDERER=femtovg|software overrides it.
-        let renderer = std::env::var("TIDE_RENDERER").unwrap_or_else(|_| "femtovg".to_string());
+        let renderer = std::env::var("TIDE_RENDERER").unwrap_or_else(|_| "skia".to_string());
+        tracing::info!(%renderer, "Selecting UI renderer");
+        if renderer == "skia" {
+            selector = selector.require_metal();
+        }
         selector = selector.renderer_name(renderer);
         let selected = selector
             .with_winit_window_attributes_hook(|attrs| {
-                attrs.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
+                attrs
+                    .with_titlebar_transparent(true)
+                    .with_fullsize_content_view(true)
+                    .with_title_hidden(true)
             })
             .select();
         if let Err(e) = selected {
@@ -27,18 +33,419 @@ pub fn configure_backend() {
     }
 }
 
-/// Start a native window move; called when empty chrome is pressed.
+// ---------------------------------------------------------------- close / reopen
+//
+// Closing the window (⌘W or the close button) keeps TIDE running, like Music:
+// playback, media keys and Now Playing carry on, and the Dock icon brings the
+// window back. ⌘Q quits. A plain hide would keep the NSWindow, its Metal
+// drawables and Skia's GPU caches alive, so Slint is asked to destroy the
+// native window instead and build a fresh one when it is shown again.
+
+// ---------------------------------------------------------------- memory
+//
+// Skia keeps GPU resources (artwork textures, layers, glyph atlases, video
+// frames) in a cache that upstream leaves at 256 MB and never trims, so the
+// footprint only ever grows. TIDE's patched renderer gives it a budget and
+// frees what no frame has used for a while.
+
+/// Set the renderer's memory budget. Safe to call before the window exists
+/// and again whenever the Low RAM setting changes.
+pub fn apply_memory_profile(low_ram: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use i_slint_renderer_skia::memory;
+        use std::time::Duration;
+        const MB: usize = 1024 * 1024;
+        let (limit, idle) = if low_ram {
+            (32 * MB, Duration::from_secs(3))
+        } else {
+            (96 * MB, Duration::from_secs(15))
+        };
+        memory::set_gpu_cache_limit(limit);
+        memory::set_idle_purge(idle);
+        memory::set_two_drawables(low_ram);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = low_ram;
+}
+
+/// Drop every GPU resource that is not on screen, after the next frame.
+pub fn purge_gpu_cache() {
+    #[cfg(target_os = "macos")]
+    i_slint_renderer_skia::memory::purge_now();
+}
+
+/// Bytes in the renderer's GPU cache as of the last frame.
+pub fn gpu_cache_bytes() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        i_slint_renderer_skia::memory::gpu_cache_usage() as u64
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
+/// Make hiding the window destroy it. Call first thing in `main`, before any
+/// thread could be reading the environment.
+pub fn destroy_window_on_hide() {
+    // SAFETY: called before TIDE starts any thread of its own; the runtime's
+    // idle worker threads don't read the environment.
+    unsafe { std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1") };
+}
+
+/// Bring the window back when the Dock icon is clicked while it is closed.
+/// Call after the main window exists, so winit's app delegate is registered.
+#[cfg(target_os = "macos")]
+pub fn install_reopen_handler() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use objc2::sel;
+
+    unsafe extern "C-unwind" fn should_handle_reopen(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _app: *mut AnyObject,
+        has_visible_windows: Bool,
+    ) -> Bool {
+        if !has_visible_windows.as_bool() {
+            // Leave AppKit's callback before Slint creates the new window.
+            crate::controller::on_ui(|ui| ui.reopen_window());
+        }
+        // AppKit then deminiaturizes a minimized window.
+        Bool::YES
+    }
+
+    // winit 0.30 doesn't let the app replace its delegate, so add the method
+    // to winit's delegate class (Slint does the same for shortcut localization).
+    let sel = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
+    let Some(cls) = AnyClass::get(c"WinitApplicationDelegate") else {
+        tracing::warn!("No winit app delegate; the Dock icon can't reopen the window");
+        return;
+    };
+    if cls.instance_method(sel).is_some() {
+        return;
+    }
+    // SAFETY: the function matches the selector's signature (BOOL, id self,
+    // SEL, NSApplication *, BOOL) and lives for the whole process.
+    unsafe {
+        objc2::ffi::class_addMethod(
+            (cls as *const AnyClass).cast_mut(),
+            sel,
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+                Imp,
+            >(should_handle_reopen),
+            c"B@:@B".as_ptr(),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// The window was rebuilt and still has the default title bar.
+    static NEEDS_CHROME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The window was shown again after being closed. Slint rebuilds the native
+/// window from its default attributes, without the backend's hook, so put
+/// the transparent title bar back; the menu bar is rebuilt as well.
+#[cfg(target_os = "macos")]
+pub fn window_reopened(win: &MainWindow) {
+    NEEDS_CHROME.set(true);
+    // Normally the window's first event applies it; this covers a window that
+    // gets none before it is drawn.
+    let weak = win.as_weak();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(win) = weak.upgrade() {
+            restore_chrome(win.window());
+        }
+    });
+    configure_menu();
+}
+
+#[cfg(target_os = "macos")]
+fn restore_chrome(window: &slint::Window) {
+    use objc2_app_kit::{NSWindowStyleMask, NSWindowTitleVisibility};
+
+    if !NEEDS_CHROME.get() {
+        return;
+    }
+    let Some(ns) = window.with_winit_window(ns_window).flatten() else {
+        return;
+    };
+    NEEDS_CHROME.set(false);
+    ns.setTitlebarAppearsTransparent(true);
+    ns.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    ns.setStyleMask(ns.styleMask() | NSWindowStyleMask::FullSizeContentView);
+    tracing::debug!("Restored the window's transparent title bar");
+}
+
+/// Called when empty chrome is pressed: a double-click zooms the window to fill
+/// the screen (and back), like a native title bar; any other press starts
+/// moving the window.
 pub fn drag_window(win: &MainWindow) {
     use slint::winit_030::WinitWindowAccessor;
     win.window().with_winit_window(|w| {
-        let _ = w.drag_window();
+        if w.fullscreen().is_some() {
+            return;
+        }
+        if is_double_click() {
+            zoom(w);
+        } else {
+            start_window_move(w);
+        }
     });
 }
 
-/// Use the system's momentum for trackpads and other precise scrolling devices.
+/// Toggle between the window's own frame and filling the screen (Window ▸ Zoom),
+/// without entering a full-screen Space.
+///
+/// AppKit's `zoom:` animates in a blocking loop, so the UI can't re-lay out
+/// until it ends: the old frame is stretched, then snaps. Stepping the frame
+/// from a timer instead keeps the event loop running, so every intermediate
+/// size is laid out and drawn.
 #[cfg(target_os = "macos")]
-pub fn configure_scrolling(window: &slint::Window) {
-    window.on_winit_window_event(macos_scroll_filter());
+fn zoom(w: &slint::winit_030::winit::window::Window) {
+    let Some(window) = ns_window(w) else {
+        w.set_maximized(!w.is_maximized());
+        return;
+    };
+    let Some(filled) = window.screen().map(|s| s.visibleFrame()) else {
+        window.zoom(None);
+        return;
+    };
+    // While an animation runs, a double-click reverses it.
+    let to_filled = match ZOOM.with_borrow(|z| {
+        z.as_ref()
+            .filter(|z| z.timer.running())
+            .map(|z| z.to_filled)
+    }) {
+        Some(was_filling) => !was_filling,
+        None => !same_frame(window.frame(), filled),
+    };
+    let target = if to_filled {
+        if ZOOM.with_borrow(|z| z.as_ref().is_none_or(|z| !z.timer.running())) {
+            UNZOOMED.set(Some(window.frame()));
+        }
+        filled
+    } else {
+        match UNZOOMED.get() {
+            Some(frame) => frame,
+            // Filled by hand, so there is no frame to return to: let AppKit pick one.
+            None => return window.zoom(None),
+        }
+    };
+    animate_frame(window, target, to_filled);
+}
+
+#[cfg(target_os = "macos")]
+struct ZoomAnimation {
+    timer: slint::Timer,
+    to_filled: bool,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// The frame to return to when the window is zoomed back.
+    static UNZOOMED: std::cell::Cell<Option<objc2_foundation::NSRect>> =
+        const { std::cell::Cell::new(None) };
+    static ZOOM: std::cell::RefCell<Option<ZoomAnimation>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+fn same_frame(a: objc2_foundation::NSRect, b: objc2_foundation::NSRect) -> bool {
+    (a.origin.x - b.origin.x).abs() < 1.0
+        && (a.origin.y - b.origin.y).abs() < 1.0
+        && (a.size.width - b.size.width).abs() < 1.0
+        && (a.size.height - b.size.height).abs() < 1.0
+}
+
+/// Move the window to `target` with an ease-out over about a quarter second.
+#[cfg(target_os = "macos")]
+fn animate_frame(
+    window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    target: objc2_foundation::NSRect,
+    to_filled: bool,
+) {
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use std::time::{Duration, Instant};
+
+    const DURATION: Duration = Duration::from_millis(250);
+    if reduce_motion() {
+        ZOOM.set(None);
+        window.setFrame_display(target, true);
+        return;
+    }
+    let from = window.frame();
+    let started = Instant::now();
+    let step = move || {
+        let t = (started.elapsed().as_secs_f64() / DURATION.as_secs_f64()).min(1.0);
+        let e = 1.0 - (1.0 - t).powi(3);
+        let lerp = |a: f64, b: f64| (a + (b - a) * e).round();
+        let frame = if t >= 1.0 {
+            target
+        } else {
+            NSRect::new(
+                NSPoint::new(
+                    lerp(from.origin.x, target.origin.x),
+                    lerp(from.origin.y, target.origin.y),
+                ),
+                NSSize::new(
+                    lerp(from.size.width, target.size.width),
+                    lerp(from.size.height, target.size.height),
+                ),
+            )
+        };
+        window.setFrame_display(frame, true);
+        if t >= 1.0 {
+            ZOOM.with_borrow(|z| {
+                if let Some(z) = z {
+                    z.timer.stop();
+                }
+            });
+        }
+    };
+    let timer = slint::Timer::default();
+    // Faster than any display refresh; each tick lands on the curve by wall time.
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(4), step);
+    ZOOM.set(Some(ZoomAnimation { timer, to_filled }));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn zoom(w: &slint::winit_030::winit::window::Window) {
+    w.set_maximized(!w.is_maximized());
+}
+
+// ---------------------------------------------------------------- window move
+//
+// AppKit's `performWindowDragWithEvent` moves the window by the pointer's
+// deltas. When the pointer crosses onto another display, macOS remaps it into
+// that display's coordinates and the deltas no longer add up to where it
+// lands, so the window falls behind the pointer. Instead, TIDE pins the
+// window to the pointer's absolute screen position for the whole drag.
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// Pointer position relative to the window's origin while a move is in progress.
+    static WINDOW_MOVE: std::cell::Cell<Option<objc2_foundation::NSPoint>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+fn start_window_move(w: &slint::winit_030::winit::window::Window) {
+    use objc2_app_kit::NSEvent;
+    use objc2_foundation::NSPoint;
+
+    let Some(window) = ns_window(w) else {
+        let _ = w.drag_window();
+        return;
+    };
+    let mouse = NSEvent::mouseLocation();
+    let origin = window.frame().origin;
+    WINDOW_MOVE.set(Some(NSPoint::new(mouse.x - origin.x, mouse.y - origin.y)));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_window_move(w: &slint::winit_030::winit::window::Window) {
+    let _ = w.drag_window();
+}
+
+/// Follow the pointer while a window move is in progress; ends it on release.
+#[cfg(target_os = "macos")]
+fn follow_window_move(window: &slint::Window, event: &WindowEvent) {
+    use objc2_app_kit::{NSEvent, NSScreen};
+    use objc2_foundation::{MainThreadMarker, NSPoint};
+    use slint::winit_030::winit::event::{ElementState, MouseButton};
+
+    let Some(offset) = WINDOW_MOVE.get() else {
+        return;
+    };
+    match event {
+        WindowEvent::CursorMoved { .. } => {}
+        WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button: MouseButton::Left,
+            ..
+        }
+        | WindowEvent::Focused(false) => {
+            WINDOW_MOVE.set(None);
+            return;
+        }
+        _ => return,
+    }
+    // A release that never reached the window (e.g. it went to a menu).
+    if NSEvent::pressedMouseButtons() & 1 == 0 {
+        WINDOW_MOVE.set(None);
+        return;
+    }
+    let Some(ns) = window.with_winit_window(ns_window).flatten() else {
+        return;
+    };
+    let mouse = NSEvent::mouseLocation();
+    let mut origin = NSPoint::new(mouse.x - offset.x, mouse.y - offset.y);
+    // Like a native title bar, the window's top never goes under the menu bar
+    // of the display the pointer is on.
+    if let Some(mtm) = MainThreadMarker::new() {
+        let screens = NSScreen::screens(mtm);
+        let under_pointer = screens.iter().find(|s| {
+            let f = s.frame();
+            (f.origin.x..f.origin.x + f.size.width).contains(&mouse.x)
+                && (f.origin.y..f.origin.y + f.size.height).contains(&mouse.y)
+        });
+        if let Some(screen) = under_pointer {
+            let visible = screen.visibleFrame();
+            let top = visible.origin.y + visible.size.height;
+            let height = ns.frame().size.height;
+            origin.y = origin.y.min(top - height);
+        }
+    }
+    ns.setFrameOrigin(origin);
+}
+
+#[cfg(target_os = "macos")]
+fn ns_window(
+    w: &slint::winit_030::winit::window::Window,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::AppKit(handle) = w.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit's AppKit handle is a live NSView for as long as the window exists.
+    let view: &objc2_app_kit::NSView = unsafe { handle.ns_view.cast().as_ref() };
+    view.window()
+}
+
+/// True when the press being handled is the second (or later) click of a double-click.
+#[cfg(target_os = "macos")]
+fn is_double_click() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventType};
+
+    MainThreadMarker::new()
+        .and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent())
+        // Click counts only exist on mouse events; asking any other event raises.
+        .filter(|e| e.r#type() == NSEventType::LeftMouseDown)
+        .is_some_and(|e| e.clickCount() >= 2)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_double_click() -> bool {
+    false
+}
+
+/// Use the system's momentum for trackpads and other precise scrolling devices,
+/// and drive window moves started from the chrome.
+#[cfg(target_os = "macos")]
+pub fn configure_input(window: &slint::Window) {
+    let mut scroll = macos_scroll_filter();
+    window.on_winit_window_event(move |window, event| {
+        restore_chrome(window);
+        follow_window_move(window, event);
+        scroll(window, event)
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -51,7 +458,11 @@ fn macos_scroll_filter() -> impl FnMut(&slint::Window, &WindowEvent) -> EventRes
         match *event {
             // Winit reports the scroll event's location as CursorMoved before MouseWheel.
             WindowEvent::CursorMoved { position, .. } => cursor = Some(position),
-            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(delta), phase, .. } => {
+            WindowEvent::MouseWheel {
+                delta: MouseScrollDelta::PixelDelta(delta),
+                phase,
+                ..
+            } => {
                 let scale = f64::from(window.scale_factor());
                 let delta = delta.to_logical::<f32>(scale);
                 if swipe.handle(scroll_phase(phase), delta.x, delta.y) {
@@ -102,7 +513,8 @@ fn scroll_phase(winit_phase: slint::winit_030::winit::event::TouchPhase) -> Scro
     use objc2_app_kit::{NSApplication, NSEventPhase, NSEventType};
     use slint::winit_030::winit::event::TouchPhase;
 
-    let event = MainThreadMarker::new().and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent());
+    let event = MainThreadMarker::new()
+        .and_then(|mtm| NSApplication::sharedApplication(mtm).currentEvent());
     // Phases only exist on scroll events; asking any other event raises.
     if let Some(event) = event.filter(|e| e.r#type() == NSEventType::ScrollWheel) {
         let (phase, momentum) = (event.phase(), event.momentumPhase());
@@ -160,7 +572,10 @@ impl SwipeTracker {
                 false
             }
             ScrollPhase::Changed => match self {
-                Self::Deciding { dx: sum_x, dy: sum_y } => {
+                Self::Deciding {
+                    dx: sum_x,
+                    dy: sum_y,
+                } => {
                     *sum_x += dx;
                     *sum_y += dy;
                     let (x, y) = (*sum_x, *sum_y);
@@ -170,7 +585,10 @@ impl SwipeTracker {
                     // Mostly sideways, with a page in that direction: content
                     // moving right uncovers the previous page.
                     let sideways = x.abs() > 2.0 * y.abs();
-                    if sideways && swipe_between_pages() && with_ui(|ui| ui.swipe_begin(x > 0.0)) == Some(true) {
+                    if sideways
+                        && swipe_between_pages()
+                        && with_ui(|ui| ui.swipe_begin(x > 0.0)) == Some(true)
+                    {
                         with_ui(|ui| ui.swipe_move(x));
                         *self = Self::Swiping;
                         true
@@ -224,6 +642,13 @@ pub fn configure_app_icon() {
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
+    // The app bundle already has this icon. Setting it again makes AppKit
+    // keep a 33 MB bitmap of it for as long as TIDE runs.
+    let bundled = std::env::current_exe()
+        .is_ok_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"));
+    if bundled {
+        return;
+    }
     let main_thread = MainThreadMarker::new().expect("TIDE starts its GUI on the main thread");
     let data = NSData::with_bytes(include_bytes!("../assets/TIDE.icns"));
     let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) else {
@@ -347,7 +772,11 @@ mod tests {
         {
             clock.set(i as u64 * 16);
             let delta = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, dy));
-            let wheel = WindowEvent::MouseWheel { device_id, delta, phase };
+            let wheel = WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+            };
             assert_eq!(filter(window, &wheel), EventResult::PreventDefault);
             assert_eq!(probe.get_scroll_y(), expected_y);
         }
@@ -357,7 +786,11 @@ mod tests {
         assert_eq!(probe.get_scroll_y(), -95.0);
 
         let delta = MouseScrollDelta::LineDelta(0.0, -1.0);
-        let wheel = WindowEvent::MouseWheel { device_id, delta, phase: Moved };
+        let wheel = WindowEvent::MouseWheel {
+            device_id,
+            delta,
+            phase: Moved,
+        };
         assert_eq!(filter(window, &wheel), EventResult::Propagate);
     }
 }
@@ -398,18 +831,26 @@ pub fn default_browser_id() -> Option<String> {
     let script = r#"ObjC.import("AppKit");
         var app = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://tidal.com"));
         app.isNil() ? "" : $.NSBundle.bundleWithURL(app).bundleIdentifier.js"#;
-    let out = std::process::Command::new("osascript").args(["-l", "JavaScript", "-e", script]).output().ok()?;
+    let out = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", script])
+        .output()
+        .ok()?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     is_bundle_id(&id).then_some(id)
 }
 
 fn is_bundle_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 /// True when TIDE can ask this browser for the login redirect itself.
 pub fn browser_is_scriptable(bundle_id: &str) -> bool {
-    bundle_id == SAFARI || bundle_id == "com.apple.SafariTechnologyPreview" || CHROMIUM_BROWSERS.contains(&bundle_id)
+    bundle_id == SAFARI
+        || bundle_id == "com.apple.SafariTechnologyPreview"
+        || CHROMIUM_BROWSERS.contains(&bundle_id)
 }
 
 fn redirect_script(bundle_id: &str) -> String {
@@ -469,13 +910,17 @@ pub fn redirect_from_clipboard(last_change: &mut i64) -> Option<String> {
     let (count, url) = text.split_once('\n')?;
     *last_change = count.trim().parse().ok()?;
     let url = url.trim();
-    url.starts_with(LOGIN_REDIRECT_PREFIX).then(|| url.to_string())
+    url.starts_with(LOGIN_REDIRECT_PREFIX)
+        .then(|| url.to_string())
 }
 
 /// Open `url` in a specific browser instead of the default one.
 pub fn open_in_browser(bundle_id: &str, url: &str) -> bool {
     is_bundle_id(bundle_id)
-        && std::process::Command::new("open").args(["-b", bundle_id, url]).status().is_ok_and(|s| s.success())
+        && std::process::Command::new("open")
+            .args(["-b", bundle_id, url])
+            .status()
+            .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
