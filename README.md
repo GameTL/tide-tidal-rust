@@ -12,6 +12,7 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 ## Features
 
 - Home feed, favourite tracks, playlists (with folders), mixes, artist pages, album details, and catalog search
+- Music video search and a Videos tab on each artist page, with playback and collection controls
 - Lossless FLAC playback at the track's native sample rate, with seek,
   shuffle, repeat and gapless hand-over to the next track
 - Synced lyrics in the full-screen now-playing view
@@ -36,6 +37,28 @@ open target/release/TIDE.app
 
 Pass `debug` to build `target/debug/TIDE.app`.
 
+### Graphics memory
+
+macOS defaults to the GPU-accelerated Skia/Metal renderer. To troubleshoot a
+graphics issue, run with `TIDE_RENDERER=femtovg` for the previous OpenGL renderer,
+or `TIDE_RENDERER=software` to render on the CPU instead.
+
+The debug panel's **Graphics, driver & system** category is the process footprint
+left after counted artwork, snapshots, malloc allocations and estimated window
+buffers. It includes more than GPU textures; it is not a GPU-memory counter.
+
+Compare renderers with the same offline, synthetic artwork workload (no login,
+network requests or audio playback):
+
+```bash
+cargo run -p tide-app --example renderer_memory -- femtovg
+cargo run -p tide-app --example renderer_memory -- skia
+```
+
+Append a step count (for example `skia 60`) for a longer run; each step takes
+one second. Both runs use the real UI at the same window size, replace 48
+synthetic covers and alternate between the artwork grid and settings.
+
 ### Desktop typography
 
 For the desktop client's Nationale font, extract the `Fonts` folder from the
@@ -53,5 +76,6 @@ these optional local files use Helvetica Neue.
 | `crates/tide-macos` | Media keys and Now Playing |
 | `crates/tide-app` | The Slint application (`TIDE` binary) |
 
-See [Goal.md](Goal.md) for the design goals and [SECURITY.md](SECURITY.md) for how
-login tokens and local data are handled.
+See [Goal.md](Goal.md) for the design goals, [Bit-Perfect.md](Bit-Perfect.md) for
+sample-rate matching, and [SECURITY.md](SECURITY.md) for how login tokens and
+local data are handled.

@@ -53,7 +53,7 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
   - "Match output sample rate" is on by default (Settings → Playback). While a track plays and it is on, the output device is switched to the track's sample rate, so nothing is resampled. Tracks with a different rate are not joined gaplessly; the device is re-clocked between them.
   - The same switch is the "Bit-perfect playback" toggle at the bottom of the signal path popup.
   - Never for Bluetooth, AirPlay or virtual devices: those links re-encode or re-clock the audio anyway, so the device is left at its own rate and the track is resampled.
-  - If the device does not support the track's rate, the track is resampled and the UI says so.
+  - If the device does not support the track's rate, TIDE switches to the highest integer-related rate it does support (HCF downsample: 88.2→44.1, 96→48, and the same families at 176.4/192) instead of interpolating across clock families. The UI still shows a conversion step. Details: [Bit-Perfect.md](Bit-Perfect.md).
   - TIDE does not take exclusive (hog) access; other apps can still play sound.
 - **Respect other apps**: the sample rate a device had before TIDE changed it is remembered. "Restore original sample rate" is on by default and lives only in Settings → Playback. When it is on, that rate is restored when playback has been paused for a few seconds and whenever TIDE quits (window close, Quit, Ctrl+C), and taken again on resume. When it is off, TIDE leaves the device at the track's sample rate across pause and quit.
 - **Signal path indicator** (in the style of Roon): the quality badge opens a signal path showing source format, any sample-rate conversion or software volume step, and the output device. Purple "Lossless" means bit-perfect, green "High quality" means a lossless source that is processed on the way, yellow "Low quality" means a lossy step (AAC source or Bluetooth). It states why bit-perfect is or isn't possible. Under that note, a divider and a "Bit-perfect playback" toggle turn sample-rate matching on or off without leaving the player.
@@ -62,6 +62,17 @@ Primary user milestone: **Able to log in (OAuth PKCE in the browser, device code
   - Double-buffered audio stream preloader.
   - When track $N$ is within 25 seconds of completion, track $N+1$ is fetched from cache or network, decoded ahead of time, and buffered into a ring buffer.
   - Seamless boundary handover with zero clicks, pops, or audio gaps.
+
+### C2. Music Videos (`tide-macos::video` + `tide-app`)
+- **Decoding**: AVFoundation's `AVPlayer` streams TIDAL's HLS playlists and decodes them in hardware through VideoToolbox (the same path IINA and VLC use on macOS). No ffmpeg / libmpv / libvlc to bundle, so the app stays small and needs no extra libraries.
+- **Drawing**: frames are pulled from an `AVPlayerItemVideoOutput` as BGRA pixel buffers whenever a new one is due (checked every 8 ms, enough for 120 Hz displays) and drawn by Slint, so the player's own controls sit on top of the picture. Frames are only copied while the video is on screen. Video audio goes through TIDE's own signal path: AVFoundation ignores audio taps on HLS, so AVPlayer is muted and the app fetches the same rendition's MPEG-TS segments, pulls out the AAC (ADTS) stream (`tide_api::hls`) and plays it in `tide-audio` with DSP and sample-rate matching, nudged to stay within a few ms of the picture. If that fails, AVPlayer plays its own audio. The signal-path card shows the picture (codec, size, bitrate) and the soundtrack (AAC rate, bitrate); in video mode it gains a quality column on its left. Music and video never play at once.
+- **Videos page** (sidebar → Videos): the user's favourite videos as a grid of 16:9 stills with title, artists and length ("4 MIN"). It keeps the collection-grid features of Albums: filter box, sort (Date added, A-Z, Artist, Release date), group-by (Artist, Year, Title), card size, all remembered.
+- **Cover hover**: Play (bottom-left), More and Add/Remove My Collection (bottom-right), as on album cards. Right-click or More opens the shared context menu: Play now, Add to / Remove from My Collection, Share › Copy link.
+- **Full-window player**: clicking a video plays it filling the whole window (sidebar, top bar and player bar hidden), letterboxed on black. Moving the mouse brings up the player bar and a close button over a light dark gradient at the bottom and top edges; the picture itself is never dimmed. While playing, the controls and the pointer hide after 2.5 s without movement. Click toggles play/pause; double-click, the close button or Esc leaves the view and the video keeps playing in the player bar.
+- **Player bar in video mode**: a 16:9 thumbnail (click to return to the video), title, artists, "▶ My Videos" (or wherever it was started), heart, More, the usual transport and scrubber, and the rendition on screen in the quality pill ("1080P", white). Next / Previous step through the videos on the page it was started from; repeat applies.
+- **Quality gear**: a gear button next to the pill (and the pill itself) opens a quality menu like a web video player's: Auto, then every rendition the stream offers (1080p, 720p, 480p, 360p, 180p). Switching reopens the stream at the same position. The pick is remembered; with none, the best rendition is used, since adaptive HLS starts at its lowest rendition and takes seconds to climb.
+- **Similar videos**: the queue button in the full-window player moves the picture to the left half and lists TIDAL's recommendations on the right; clicking one plays it with that list as the queue.
+- **Now Playing / media keys** follow the video while it plays.
 
 ### D. Full macOS Integration (`tide-macos`)
 - **Media Keys**: Native listener for Play/Pause, Previous, Next, Stop via `MPRemoteCommandCenter`.
@@ -80,7 +91,7 @@ tidal-rust/
 │   ├── tide-api/                 # Tidal API v1/v2, PKCE & Device Auth, DASH Parser, Playback Info
 │   ├── tide-cache/               # SQLite metadata DB & play-count-ranked audio disk store
 │   ├── tide-audio/               # Symphonia decoder + cpal CoreAudio engine + gapless preloader
-│   ├── tide-macos/               # objc2 bridge for MPRemoteCommandCenter & Now Playing
+│   ├── tide-macos/               # objc2 bridge for MPRemoteCommandCenter, Now Playing & AVFoundation video
 │   └── tide-app/                 # Native desktop client (Slint) implementing 1:1 Tidal UI
 ```
 
@@ -126,15 +137,21 @@ tidal-rust/
   - The artist name carries the artist's picture, underlines on hover and opens the artist page.
   - Under the track list: release date, track count and length, the copyright line, "More Albums by …" and "Related Artists".
 - [x] Playlist and mix pages carry the same buttons: Share and More, plus Add / Added for playlists made by someone else (the user's own are always in the collection).
-- [x] One context menu for everything (`context-menu.slint`): right-click a track, album, playlist, mix or artist wherever it is shown (track rows, the player bar, grids, carousels, home tiles, search results, the sidebar), or press its More button. The look is shared (cover, title and subtitle on top, then entries with their icons, flyouts to the side, full keyboard control); the entries depend on what was clicked:
+- [x] One context menu for everything (`context-menu.slint`): right-click a track, album, playlist, mix, artist or folder wherever it is shown (track rows, the player bar, grids, carousels, home tiles, search results, the sidebar), or press its More button. The look is shared (cover, title and subtitle on top, then entries with their icons, flyouts to the side, full keyboard control); the entries depend on what was clicked:
   - Track: Play next, Add to playlist ›, Add to / Remove from My Collection, Go to album, Go to artist, Share › Copy link.
   - Album: Play now, Play next, Add to playlist ›, Add to / Remove from My Collection, Go to artist, Share › Copy link.
   - Playlist: Play now, Play next, Add to playlist ›, Add to / Remove from My Collection (other people's playlists only), Share › Copy link.
   - Mix: Play now, Play next, Add to playlist ›, Share › Copy link. Artist: Go to artist, Share › Copy link.
-  - "Add to playlist" lists the user's own top-level playlists. Folders have no menu.
+  - Folder: Rename folder, Delete folder, Create playlist. Header is a teal swatch (no artwork).
+  - "Add to playlist" lists the user's own top-level playlists.
 - [x] Artist page: a Follow / Following button and a "Related Artists" row.
 - [x] Error alerts: every error-level log line (playback failure, expired token, audio stream error) shows as one alert above the player bar. A new one replaces the one on screen; it dismisses itself after 8 seconds. Confirmations ("Album link copied") use the same slot in a neutral style.
 - [x] Debug panel (computer button in the top bar): a plain overlay that toggles with the button and never blocks the window. It shows the chunk download grid, the last 4 errors with their log fields, and a verbose log tail (the last 60 lines, newest first; TIDE's own crates down to DEBUG, everything else from INFO).
 - [x] `TIDE --get <url> [key=value …]` prints the JSON of a TIDAL API GET, for checking response shapes during development.
 
-Explore, Feed, Videos, and Save for Later remain navigation placeholders.
+- [x] Cover hover on catalog cards (Play, Add/Remove My Collection, More). Mixes omit the heart; artist portraits play top tracks and leave Follow on the artist page; folders keep the teal tile and only show More.
+- [x] Explore: Featured carousels with promo art, plus genre/mood/decade tiles from the v1 explore page (nested pages still open).
+- [x] Feed: time-grouped list (Last week / This month / Last month / Older) from v2 activities.
+- [x] Save for Later: mixed bookmarks when the account endpoint exists; empty state when it does not.
+- [x] Home Staff Picks and Uploads tabs (no extra history).
+- [x] Music videos (section C2): Videos page with 16:9 grid and album-style filter/sort/group, cover hover, full-window hardware-decoded player with auto-hiding controls over a light gradient, quality gear (Auto + each rendition), Similar videos, and a video mode for the player bar. Verified with real playback through the snapshot tour (`TIDE --snapshot <dir> --play`). Picture-in-picture and AirPlay for video are not done.
