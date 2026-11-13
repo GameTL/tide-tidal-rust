@@ -1,6 +1,9 @@
 use std::time::Duration;
 use thiserror::Error;
 
+pub mod video;
+pub use video::{VideoDownloadStats, VideoMediaInfo, VideoPlayer, VideoStatus, bgra_to_rgba};
+
 #[derive(Error, Debug)]
 pub enum MacosMediaError {
     #[error("Media controls error: {0}")]
@@ -33,17 +36,18 @@ mod macos {
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{msg_send, AnyThread};
+    use objc2::{AnyThread, msg_send};
     use objc2_app_kit::NSImage;
     use objc2_core_foundation::CGSize;
     use objc2_foundation::{NSData, NSDictionary, NSMutableDictionary, NSNumber, NSString};
     use objc2_media_player::{
         MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle,
         MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration,
-        MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyDefaultPlaybackRate,
-        MPNowPlayingInfoPropertyElapsedPlaybackTime, MPNowPlayingInfoPropertyMediaType,
-        MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommandCenter,
-        MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+        MPMediaItemPropertyTitle, MPNowPlayingInfoCenter,
+        MPNowPlayingInfoPropertyDefaultPlaybackRate, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+        MPNowPlayingInfoPropertyMediaType, MPNowPlayingInfoPropertyPlaybackRate,
+        MPNowPlayingPlaybackState, MPRemoteCommandCenter, MPRemoteCommandEvent,
+        MPRemoteCommandHandlerStatus,
     };
 
     use super::{MacosMediaError, MediaControlEvent, MediaPosition};
@@ -136,10 +140,13 @@ mod macos {
             unsafe { pos_cmd.setEnabled(true) };
             let h = handler.clone();
             let pos_block = RcBlock::new(move |event: NonNull<MPRemoteCommandEvent>| {
-                let pos_event = unsafe { &*(event.as_ptr() as *const MPChangePlaybackPositionCommandEvent) };
+                let pos_event =
+                    unsafe { &*(event.as_ptr() as *const MPChangePlaybackPositionCommandEvent) };
                 let secs = unsafe { pos_event.positionTime() };
                 if secs.is_finite() && secs >= 0.0 {
-                    h(MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs_f64(secs))));
+                    h(MediaControlEvent::SetPosition(MediaPosition(
+                        Duration::from_secs_f64(secs),
+                    )));
                 }
                 MPRemoteCommandHandlerStatus::Success
             });
@@ -165,7 +172,8 @@ mod macos {
             let media_type = NSNumber::new_u64(1); // Audio
 
             unsafe {
-                let _: () = msg_send![&self.dict, setObject: &*title_ns, forKey: MPMediaItemPropertyTitle];
+                let _: () =
+                    msg_send![&self.dict, setObject: &*title_ns, forKey: MPMediaItemPropertyTitle];
                 let _: () = msg_send![&self.dict, setObject: &*artist_ns, forKey: MPMediaItemPropertyArtist];
                 let _: () = msg_send![&self.dict, setObject: &*album_ns, forKey: MPMediaItemPropertyAlbumTitle];
                 let _: () = msg_send![&self.dict, setObject: &*media_type, forKey: MPNowPlayingInfoPropertyMediaType];
@@ -193,7 +201,9 @@ mod macos {
         pub fn set_artwork(&mut self, image_data: &[u8]) -> Result<(), MacosMediaError> {
             let data = NSData::with_bytes(image_data);
             let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
-                return Err(MacosMediaError::Generic("Failed to decode artwork image".into()));
+                return Err(MacosMediaError::Generic(
+                    "Failed to decode artwork image".into(),
+                ));
             };
             self.apply_artwork(image);
             Ok(())
@@ -203,7 +213,10 @@ mod macos {
             let path_str = path.to_string_lossy();
             let path_ns = NSString::from_str(&path_str);
             let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &path_ns) else {
-                return Err(MacosMediaError::Generic(format!("Failed to load artwork file: {}", path.display())));
+                return Err(MacosMediaError::Generic(format!(
+                    "Failed to load artwork file: {}",
+                    path.display()
+                )));
             };
             self.apply_artwork(image);
             Ok(())
@@ -211,7 +224,10 @@ mod macos {
 
         fn apply_artwork(&mut self, image: Retained<NSImage>) {
             let size = image.size();
-            let cg_size = CGSize { width: size.width, height: size.height };
+            let cg_size = CGSize {
+                width: size.width,
+                height: size.height,
+            };
             let image_ptr = Retained::into_raw(image);
             let handler = RcBlock::new(move |_req_size: CGSize| -> NonNull<NSImage> {
                 NonNull::new(image_ptr).expect("non-null NSImage for artwork")
@@ -224,12 +240,17 @@ mod macos {
                 )
             };
             unsafe {
-                let _: () = msg_send![&self.dict, setObject: &*artwork, forKey: MPMediaItemPropertyArtwork];
+                let _: () =
+                    msg_send![&self.dict, setObject: &*artwork, forKey: MPMediaItemPropertyArtwork];
             }
             self.publish();
         }
 
-        pub fn set_playback_state(&mut self, is_playing: bool, progress: Option<Duration>) -> Result<(), MacosMediaError> {
+        pub fn set_playback_state(
+            &mut self,
+            is_playing: bool,
+            progress: Option<Duration>,
+        ) -> Result<(), MacosMediaError> {
             let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
             let state = if is_playing {
                 MPNowPlayingPlaybackState::Playing
@@ -293,7 +314,9 @@ mod macos {
                     center.stopCommand().removeTarget(Some(target));
                     center.nextTrackCommand().removeTarget(Some(target));
                     center.previousTrackCommand().removeTarget(Some(target));
-                    center.changePlaybackPositionCommand().removeTarget(Some(target));
+                    center
+                        .changePlaybackPositionCommand()
+                        .removeTarget(Some(target));
                 }
 
                 let info_center = MPNowPlayingInfoCenter::defaultCenter();
@@ -306,9 +329,9 @@ mod macos {
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
+    use super::{MacosMediaError, MediaControlEvent};
     use std::path::Path;
     use std::time::Duration;
-    use super::{MacosMediaError, MediaControlEvent};
 
     pub struct MacMediaControls;
 
@@ -339,7 +362,11 @@ mod stub {
             Ok(())
         }
 
-        pub fn set_playback_state(&mut self, _is_playing: bool, _progress: Option<Duration>) -> Result<(), MacosMediaError> {
+        pub fn set_playback_state(
+            &mut self,
+            _is_playing: bool,
+            _progress: Option<Duration>,
+        ) -> Result<(), MacosMediaError> {
             Ok(())
         }
 
@@ -365,45 +392,72 @@ mod tests {
         use objc2_foundation::NSString;
         use objc2_media_player::{
             MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork,
-            MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
-            MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState,
+            MPMediaItemPropertyTitle, MPNowPlayingInfoCenter,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime, MPNowPlayingInfoPropertyPlaybackRate,
+            MPNowPlayingPlaybackState,
         };
 
         let mut controls = MacMediaControls::new("TIDE-TEST", |_| {}).expect("controls init");
 
         controls
-            .set_metadata("In the End", "Linkin Park", "Hybrid Theory", Some(Duration::from_secs(216)), None)
+            .set_metadata(
+                "In the End",
+                "Linkin Park",
+                "Hybrid Theory",
+                Some(Duration::from_secs(216)),
+                None,
+            )
             .expect("metadata set");
 
-        controls.set_playback_state(true, Some(Duration::from_secs(30))).expect("playback set");
+        controls
+            .set_playback_state(true, Some(Duration::from_secs(30)))
+            .expect("playback set");
 
         let center = unsafe { MPNowPlayingInfoCenter::defaultCenter() };
-        assert_eq!(unsafe { center.playbackState() }, MPNowPlayingPlaybackState::Playing);
+        assert_eq!(
+            unsafe { center.playbackState() },
+            MPNowPlayingPlaybackState::Playing
+        );
 
         let info = unsafe { center.nowPlayingInfo() }.expect("now playing info present");
         let title: Option<objc2::rc::Retained<NSString>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPMediaItemPropertyTitle] };
-        assert_eq!(title.as_deref().map(|s| s.to_string()), Some("In the End".into()));
+        assert_eq!(
+            title.as_deref().map(|s| s.to_string()),
+            Some("In the End".into())
+        );
 
         let artist: Option<objc2::rc::Retained<NSString>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPMediaItemPropertyArtist] };
-        assert_eq!(artist.as_deref().map(|s| s.to_string()), Some("Linkin Park".into()));
+        assert_eq!(
+            artist.as_deref().map(|s| s.to_string()),
+            Some("Linkin Park".into())
+        );
 
         let album: Option<objc2::rc::Retained<NSString>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPMediaItemPropertyAlbumTitle] };
-        assert_eq!(album.as_deref().map(|s| s.to_string()), Some("Hybrid Theory".into()));
+        assert_eq!(
+            album.as_deref().map(|s| s.to_string()),
+            Some("Hybrid Theory".into())
+        );
 
         let rate: Option<objc2::rc::Retained<objc2_foundation::NSNumber>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPNowPlayingInfoPropertyPlaybackRate] };
         assert_eq!(rate.map(|n| n.as_f64()), Some(1.0));
 
-        let elapsed: Option<objc2::rc::Retained<objc2_foundation::NSNumber>> =
-            unsafe { objc2::msg_send![&*info, objectForKey: MPNowPlayingInfoPropertyElapsedPlaybackTime] };
+        let elapsed: Option<objc2::rc::Retained<objc2_foundation::NSNumber>> = unsafe {
+            objc2::msg_send![&*info, objectForKey: MPNowPlayingInfoPropertyElapsedPlaybackTime]
+        };
         assert_eq!(elapsed.map(|n| n.as_f64()), Some(30.0));
 
         // Pause
-        controls.set_playback_state(false, Some(Duration::from_secs(45))).expect("pause set");
-        assert_eq!(unsafe { center.playbackState() }, MPNowPlayingPlaybackState::Paused);
+        controls
+            .set_playback_state(false, Some(Duration::from_secs(45)))
+            .expect("pause set");
+        assert_eq!(
+            unsafe { center.playbackState() },
+            MPNowPlayingPlaybackState::Paused
+        );
         let info = unsafe { center.nowPlayingInfo() }.expect("now playing info present");
         let rate: Option<objc2::rc::Retained<objc2_foundation::NSNumber>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPNowPlayingInfoPropertyPlaybackRate] };
@@ -427,7 +481,9 @@ mod tests {
 
         // Stop
         controls.stop().expect("stop set");
-        assert_eq!(unsafe { center.playbackState() }, MPNowPlayingPlaybackState::Stopped);
+        assert_eq!(
+            unsafe { center.playbackState() },
+            MPNowPlayingPlaybackState::Stopped
+        );
     }
 }
-
