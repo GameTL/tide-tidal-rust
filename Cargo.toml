@@ -7,9 +7,16 @@ members = [
     "crates/tide-app",
 ]
 resolver = "2"
+exclude = ["vendor"]
+
+# Slint's Skia renderer with two memory fixes (search for "TIDE patch"): font
+# files are no longer copied onto the heap, and the GPU resource cache can be
+# capped and trimmed. See vendor/i-slint-renderer-skia/TIDE-PATCH.md.
+[patch.crates-io]
+i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
 
 [workspace.package]
-version = "0.3.1"
+version = "0.7.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Tinapat Game Limsila <limsila.limsila@gmail.com>"]

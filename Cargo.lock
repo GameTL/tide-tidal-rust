@@ -1157,6 +1157,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -2106,6 +2108,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "input",
  "libseat",
@@ -2130,6 +2133,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
 ]
 
 [[package]]
@@ -2141,6 +2145,7 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "vtable",
 ]
@@ -2332,8 +2337,6 @@ dependencies = [
 [[package]]
 name = "i-slint-renderer-skia"
 version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc9c1cf02385f1d26fc1f423544e52390a8e5c2d89420a8042aa94b4fe109d1f"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -3359,6 +3362,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -4004,6 +4008,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
 name = "polycool"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4442,6 +4452,33 @@ dependencies = [
  "tiny-skia 0.12.0",
  "usvg",
  "zune-jpeg",
+]
+
+[[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "pollster",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4952,6 +4989,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "num-traits",
  "once_cell",
@@ -5084,6 +5122,7 @@ checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
  "as-raw-xcb-connection",
  "bytemuck",
+ "drm",
  "fastrand",
  "js-sys",
  "memmap2",
@@ -5566,7 +5605,7 @@ dependencies = [
 
 [[package]]
 name = "tide-api"
-version = "0.3.1"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5581,17 +5620,21 @@ dependencies = [
 
 [[package]]
 name = "tide-app"
-version = "0.3.1"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "arboard",
  "dirs",
  "i-slint-backend-testing",
+ "i-slint-renderer-skia",
  "image",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "open",
+ "reqwest 0.12.28",
+ "rfd",
  "serde",
  "serde_json",
  "slint",
@@ -5607,10 +5650,11 @@ dependencies = [
 
 [[package]]
 name = "tide-audio"
-version = "0.3.1"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "cpal",
+ "serde",
  "symphonia",
  "thiserror 2.0.21",
  "tokio",
@@ -5619,7 +5663,7 @@ dependencies = [
 
 [[package]]
 name = "tide-cache"
-version = "0.3.1"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5635,7 +5679,7 @@ dependencies = [
 
 [[package]]
 name = "tide-macos"
-version = "0.3.1"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
