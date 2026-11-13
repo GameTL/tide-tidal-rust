@@ -2849,10 +2849,10 @@ impl Ui {
                         {
                             let mut st = ui.state.borrow_mut();
                             let pos = st.hist_pos;
-                            if let Some(Page::Folder { id: fid, title }) = st.history.get_mut(pos) {
-                                if fid == &id {
-                                    *title = name.clone();
-                                }
+                            if let Some(Page::Folder { id: fid, title }) = st.history.get_mut(pos)
+                                && fid == &id
+                            {
+                                *title = name.clone();
                             }
                         }
                         crate::alerts::notice(&ui.app(), &format!("Renamed folder “{name}”"));
