@@ -1,0 +1,29 @@
+---
+import { installCommand } from '../data/links';
+
+interface Props {
+  class?: string;
+}
+
+const { class: className } = Astro.props;
+---
+<div class:list={['install-cmd', className]}>
+  <code><span class="install-prompt" aria-hidden="true">$</span>{installCommand}</code>
+  <button type="button" class="install-copy" data-copy={installCommand} aria-label="Copy install command">
+    Copy
+  </button>
+</div>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>('.install-copy').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy ?? '');
+        btn.textContent = 'Copied';
+      } catch {
+        btn.textContent = 'Select & copy';
+      }
+      setTimeout(() => (btn.textContent = 'Copy'), 1600);
+    });
+  });
+</script>

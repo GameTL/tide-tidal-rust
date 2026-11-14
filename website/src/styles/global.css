@@ -242,6 +242,7 @@ h2 {
 .hero-inner > h1 { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.15s both; }
 .hero-inner > .hero-sub { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.25s both; }
 .hero-inner > .hero-ctas,
+.hero-inner > .hero-install,
 .hero-inner > .hero-meta { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.35s both; }
 
 @keyframes logo-in {
@@ -813,6 +814,118 @@ h2 {
 
 .release-ver code {
   font-size: 14px;
+  color: var(--text);
+}
+
+/* install */
+
+.install-cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 6px 6px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  text-align: left;
+}
+
+.install-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.install-prompt {
+  margin-right: 10px;
+  color: var(--faint);
+  user-select: none;
+}
+
+.install-copy {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--pill);
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.install-copy:hover {
+  background: var(--tile-2);
+}
+
+.hero-install {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 28px auto 0;
+  max-width: 100%;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.install-ways {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 720px) {
+  .install-ways { grid-template-columns: 1fr; }
+}
+
+.install-way {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px;
+}
+
+.install-way p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.install-way .install-cmd {
+  width: 100%;
+}
+
+.install-way p.small {
+  font-size: 13px;
+}
+
+.steps {
+  margin: -4px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 13.5px;
+  color: #d4d4d4;
+}
+
+.why-unsigned {
+  margin: 0 0 28px;
+  max-width: 680px;
+  font-size: 14px;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.why-unsigned strong {
   color: var(--text);
 }
 

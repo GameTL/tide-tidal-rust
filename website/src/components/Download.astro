@@ -12,7 +12,8 @@ interface Props {
   releases: Release[];
 }
 
-import { github } from '../data/links';
+import { github, latestMacDmg } from '../data/links';
+import InstallCommand from './InstallCommand.astro';
 
 const { releases } = Astro.props;
 const kind = (url: string) => (url.toLowerCase().endsWith('.dmg') ? 'dmg' : 'zip');
@@ -25,13 +26,52 @@ const fmt = (d: string | null) =>
   <div class="container">
     <div class="sec-head">
       <h2>Downloads</h2>
-      <p>
-        Open the dmg and drag TIDE to Applications. Builds are not notarized yet, so the first
-        launch says “Apple could not verify TIDE”: click Done, then open System Settings ›
-        Privacy &amp; Security and click <strong>Open Anyway</strong>. Or run
-        <code>/usr/bin/xattr -dr com.apple.quarantine /Applications/TIDE.app</code> once.
-      </p>
+      <p>Two ways to install on macOS. Both get the latest release.</p>
     </div>
+
+    <div class="install-ways">
+      <div class="tile install-way">
+        <div class="platform-head">
+          <span>Install from Terminal</span>
+          <span class="pill-ok">Recommended</span>
+        </div>
+        <p class="muted">
+          Paste this into Terminal. It downloads the latest release and opens without a
+          security prompt.
+        </p>
+        <InstallCommand />
+        <p class="muted small">
+          TIDE goes to <code>/Applications/TIDE.app</code>, or{' '}
+          <code>~/Applications/TIDE.app</code> if /Applications isn’t writable. Open it from
+          Spotlight or Launchpad.
+        </p>
+      </div>
+
+      <div class="tile install-way">
+        <div class="platform-head">
+          <span>Download the dmg</span>
+        </div>
+        <p class="muted">Open it and drag TIDE into Applications.</p>
+        <a class="btn-primary" href={latestMacDmg}>Download for macOS</a>
+        <p class="muted small">
+          The first launch says “Apple could not verify TIDE”. To open it anyway:
+        </p>
+        <ol class="steps">
+          <li>Click <strong>Done</strong> on the warning.</li>
+          <li>Open <strong>System Settings › Privacy &amp; Security</strong>.</li>
+          <li>Scroll down and click <strong>Open Anyway</strong>, then confirm.</li>
+        </ol>
+        <p class="muted small">You only do this once.</p>
+      </div>
+    </div>
+
+    <p class="why-unsigned">
+      <strong>Why the warning?</strong> TIDE is a free, personal project, so it isn’t signed
+      through Apple’s paid Developer Program ($99 a year). macOS can’t verify apps that aren’t
+      signed that way and asks you once. The code is{' '}
+      <a class="text-link" href={github}>open source</a> if you’d rather check it, or build it
+      yourself.
+    </p>
 
     <div class="platforms">
       <div class="tile platform">
