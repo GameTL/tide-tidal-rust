@@ -23,9 +23,10 @@ if [ -z "$base" ] || ! git rev-parse -q --verify "${base}^{commit}" >/dev/null; 
   exit 0
 fi
 
-# Three-dot: compare against the merge base, like a PR's "Files changed" tab.
+# Two-dot compares the two trees directly. Release PRs are squash-merged, so
+# staging never contains the release tag and a merge-base diff would overstate.
 any() {
-  if [ -n "$(git diff --name-only "$base...$head" -- "$@")" ]; then echo true; else echo false; fi
+  if [ -n "$(git diff --name-only "$base" "$head" -- "$@")" ]; then echo true; else echo false; fi
 }
 
 echo "app=$(any . \
