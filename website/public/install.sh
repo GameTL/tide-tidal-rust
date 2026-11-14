@@ -19,15 +19,30 @@ DMG_URL="${TIDE_DMG_URL:-https://github.com/GameTL/tide-tidal-rust/releases/late
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
     fancy=1
     b=$(printf '\033[1m'); d=$(printf '\033[2m'); r=$(printf '\033[0m')
-    teal=$(printf '\033[38;5;44m'); green=$(printf '\033[32m'); red=$(printf '\033[31m')
-    clr=$(printf '\033[K')
+    # Cyan to green, like the sea.
+    cyan=$(printf '\033[38;5;51m'); aqua=$(printf '\033[38;5;50m')
+    mint=$(printf '\033[38;5;49m'); green=$(printf '\033[38;5;48m')
+    red=$(printf '\033[31m'); clr=$(printf '\033[K')
 else
-    fancy=0; b=; d=; r=; teal=; green=; red=; clr=
+    fancy=0; b=; d=; r=; cyan=; aqua=; mint=; green=; red=; clr=
 fi
 
-# A little wave rolling by while we work.
+# A little wave rolling by while we work, shading from cyan to green.
 wave="▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▂▃▄▅▆▇█▇▆▅▄▃▂"
 frames=14
+if [ "$fancy" = 1 ]; then
+    # Precompute the coloured frames as f0..f13 (3 bytes per block character).
+    eval "$(printf '%s\n' "$wave" | LC_ALL=C awk -v n="$frames" -v q="'" '
+        BEGIN { split("51 51 50 50 49 49 48 48", c, " ") }
+        {
+            for (f = 0; f < n; f++) {
+                out = ""
+                for (k = 0; k < 8; k++)
+                    out = out "\033[38;5;" c[k + 1] "m" substr($0, (f + k) * 3 + 1, 3)
+                printf "f%d=%s%s\033[0m%s\n", f, q, out, q
+            }
+        }')"
+fi
 
 tmp=""
 mnt=""
@@ -59,13 +74,13 @@ step() {
     if [ "$fancy" = 1 ]; then
         i=0
         while kill -0 "$pid" 2>/dev/null; do
-            frame=$(printf '%s' "$wave" | cut -b$((i * 3 + 1))-$((i * 3 + 24)))
+            eval "frame=\$f$i"
             extra=""
             if [ -n "${progress_file:-}" ] && [ -f "$progress_file" ]; then
                 extra=$(stat -f %z "$progress_file" 2>/dev/null |
                     awk '{ if ($1 > 0) printf "  %.1f MB", $1 / 1048576 }')
             fi
-            printf '\r  %s%s%s  %s%s%s%s' "$teal" "$frame" "$r" "$label" "$d" "$extra" "$r$clr"
+            printf '\r  %s  %s%s%s%s' "$frame" "$label" "$cyan" "$extra" "$r$clr"
             i=$(((i + 1) % frames))
             sleep 0.08
         done
@@ -94,7 +109,8 @@ fi
 app="$dest_dir/TIDE.app"
 
 if [ "$fancy" = 1 ]; then printf '\033[?25l'; fi
-printf '\n  %s≈ ~ ≈  TIDE%s %s· native TIDAL player for macOS%s\n\n' "$b$teal" "$r" "$d" "$r"
+printf '\n  %s≈ %s~ %s≈  %sTIDE%s %s· native TIDAL player for macOS%s\n\n' \
+    "$cyan" "$aqua" "$green" "$b$cyan" "$r" "$d" "$r"
 
 # ── download ────────────────────────────────────────────────────────────────
 progress_file=$dmg
@@ -123,9 +139,9 @@ mnt=""
 version=$(/usr/bin/defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "")
 
 # ── done ────────────────────────────────────────────────────────────────────
-printf '\n  %s🌊 TIDE%s is installed.%s\n\n' "$b" "${version:+ $version}" "$r"
-printf '     %sLocation%s   %s\n' "$d" "$r" "$app"
-printf '     %sOpen it%s    open -a "%s"   %s(or search TIDE in Spotlight)%s\n' "$d" "$r" "$app" "$d" "$r"
+printf '\n  🌊 %sTIDE%s%s%s is installed.%s\n\n' "$b$cyan" "$green" "${version:+ $version}" "$r$b" "$r"
+printf '     %sLocation%s   %s%s%s\n' "$d" "$r" "$cyan" "$app" "$r"
+printf '     %sOpen it%s    %sopen -a "%s"%s   %s(or search TIDE in Spotlight)%s\n' "$d" "$r" "$green" "$app" "$r" "$d" "$r"
 if pgrep -x TIDE >/dev/null 2>&1; then
     printf '\n     %sTIDE is running: quit and reopen it to use this version.%s\n' "$d" "$r"
 fi
