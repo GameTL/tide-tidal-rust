@@ -304,6 +304,11 @@ h2 {
 }
 
 /* screenshots ship with their own macOS window shadow */
+.hero-shot picture,
+.signal-shot picture {
+  display: block;
+}
+
 .hero-shot img,
 .signal-shot img {
   width: 100%;
@@ -887,4 +892,66 @@ h2 {
   .hero { padding-top: 64px; }
   .sec { padding: 64px 0; }
   .nav-links { gap: 16px; }
+}
+
+/* ---------- faq ---------- */
+
+.faq {
+  border-top: 1px solid var(--line-2);
+}
+
+.faq-item {
+  border-bottom: 1px solid var(--line-2);
+}
+
+.faq-item summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq-item summary::after {
+  content: "+";
+  flex: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+
+.faq-item[open] summary::after {
+  transform: rotate(45deg);
+}
+
+.faq-item summary:hover h3 {
+  color: var(--text);
+}
+
+.faq-item h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: #d4d4d4;
+  transition: color 0.15s ease;
+}
+
+.faq-item summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.faq-item p {
+  max-width: 680px;
+  margin: 0 0 22px;
+  color: var(--muted);
+  text-wrap: pretty;
 }

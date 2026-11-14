@@ -4,6 +4,7 @@ import Nav from '../components/Nav.astro';
 import Hero from '../components/Hero.astro';
 import Beats from '../components/Beats.astro';
 import Download from '../components/Download.astro';
+import Faq from '../components/Faq.astro';
 import Footer from '../components/Footer.astro';
 import releasesData from '../data/releases.json';
 
@@ -17,12 +18,14 @@ type Release = {
 };
 
 const releases = (releasesData.releases ?? []) as Release[];
-const latestMacUrl = releases.find((r) => r.macUniversalUrl)?.macUniversalUrl ?? null;
 ---
 <Layout>
   <Nav />
-  <Hero latestMacUrl={latestMacUrl} />
-  <Beats />
-  <Download releases={releases} />
-  <Footer latestMacUrl={latestMacUrl} />
+  <main>
+    <Hero />
+    <Beats />
+    <Download releases={releases} />
+    <Faq />
+  </main>
+  <Footer />
 </Layout>

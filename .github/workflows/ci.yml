@@ -14,8 +14,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.diff.outputs.app }}
+      website: ${{ steps.diff.outputs.website }}
+      workflows: ${{ steps.diff.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff against base
+        id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: sh scripts/changed.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+
+  # Skipped (counts as passing) when only the website or docs changed.
   rust:
     name: Rust
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +57,8 @@ jobs:
 
   website:
     name: Website
+    needs: changes
+    if: needs.changes.outputs.website == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
