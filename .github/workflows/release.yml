@@ -20,8 +20,7 @@ on:
 permissions:
   contents: write
   pull-requests: read
-  pages: write
-  id-token: write
+  actions: write
 
 concurrency:
   group: release
@@ -260,43 +259,15 @@ jobs:
               "dist/$name" dist/TIDE-macos-universal.dmg
           fi
 
+  # Deploying from here would run on the PR's merge ref, which the github-pages
+  # environment rejects, so hand off to pages.yml on main. It runs after the
+  # release exists, so releases.json lists the new version.
   deploy-site:
     name: Update website + Pages
-    needs: [resolve-version, tag-and-release]
+    needs: tag-and-release
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-
-      - name: Write releases.json from GitHub Releases
+      - name: Dispatch Pages workflow on main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          chmod +x scripts/write-releases-json.sh
-          sh scripts/write-releases-json.sh website/src/data/releases.json
-
-      - name: Build Astro site
-        working-directory: website
-        run: |
-          npm ci
-          npm run build
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: website/dist
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
