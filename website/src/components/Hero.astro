@@ -1,4 +1,5 @@
 ---
+import InstallCommand from './InstallCommand.astro';
 import { Image, Picture } from 'astro:assets';
 import { github, latestMacDmg } from '../data/links';
 import logo from '../assets/tide.png';
@@ -42,6 +43,10 @@ import appHome from '../assets/screenshots/app-home.png';
       <a class="text-link" href={github} target="_blank" rel="noreferrer">
         Read the source <span aria-hidden="true">↗</span>
       </a>
+    </div>
+    <div class="hero-install">
+      <span>or install from Terminal, no security prompt:</span>
+      <InstallCommand />
     </div>
     <p class="hero-meta">Universal binary · Apple Silicon &amp; Intel · Unofficial</p>
   </div>
