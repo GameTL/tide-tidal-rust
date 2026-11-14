@@ -35,6 +35,7 @@ jobs:
     outputs:
       next: ${{ steps.version.outputs.next }}
       last: ${{ steps.last_tag.outputs.tag }}
+      app_changed: ${{ steps.changes.outputs.app }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +51,23 @@ jobs:
             last="v0.0.0"
           fi
           echo "tag=$last" >> "$GITHUB_OUTPUT"
+
+      # A release PR with only website/docs changes ships no new app: skip the
+      # build, tag and GitHub release. pages.yml deploys the site on its own.
+      # Manual runs always build.
+      - name: Detect app changes since last tag
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          LAST: ${{ steps.last_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "app=true" >> "$GITHUB_OUTPUT"
+          else
+            sh scripts/changed.sh "$LAST" HEAD | grep '^app=' >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
 
       - name: Resolve bump
         id: bump
@@ -109,6 +127,7 @@ jobs:
   build:
     name: Build universal dmg
     needs: resolve-version
+    if: needs.resolve-version.outputs.app_changed == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

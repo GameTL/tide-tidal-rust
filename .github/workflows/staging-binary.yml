@@ -3,6 +3,17 @@ name: Staging binary
 on:
   push:
     branches: [staging]
+    # Website/docs-only pushes don't change the app, so there's nothing to build.
+    paths-ignore:
+      - 'website/**'
+      - 'docs/**'
+      - '**.md'
+      - 'scripts/write-releases-json.sh'
+      - 'scripts/changed.sh'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/pages.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-pr.yml'
 
 permissions:
   contents: read
