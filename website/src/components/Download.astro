@@ -12,8 +12,10 @@ interface Props {
   releases: Release[];
 }
 
+import { github } from '../data/links';
+
 const { releases } = Astro.props;
-const github = 'https://github.com/GameTL/tide-tidal-rust';
+const kind = (url: string) => (url.toLowerCase().endsWith('.dmg') ? 'dmg' : 'zip');
 const fmt = (d: string | null) =>
   d
     ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
@@ -23,7 +25,12 @@ const fmt = (d: string | null) =>
   <div class="container">
     <div class="sec-head">
       <h2>Downloads</h2>
-      <p>Builds are unsigned. On first launch, right-click TIDE.app and choose Open.</p>
+      <p>
+        Open the dmg and drag TIDE to Applications. Builds are not notarized yet, so the first
+        launch says “Apple could not verify TIDE”: click Done, then open System Settings ›
+        Privacy &amp; Security and click <strong>Open Anyway</strong>. Or run
+        <code>/usr/bin/xattr -dr com.apple.quarantine /Applications/TIDE.app</code> once.
+      </p>
     </div>
 
     <div class="platforms">
@@ -65,7 +72,7 @@ const fmt = (d: string | null) =>
               <span class="muted">{fmt(r.publishedAt)}</span>
             </div>
             {r.macUniversalUrl ? (
-              <a class="text-link" href={r.macUniversalUrl}>macOS universal zip ↓</a>
+              <a class="text-link" href={r.macUniversalUrl}>macOS universal {kind(r.macUniversalUrl)} ↓</a>
             ) : (
               <span class="muted">Unavailable</span>
             )}

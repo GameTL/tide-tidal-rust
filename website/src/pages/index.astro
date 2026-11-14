@@ -17,12 +17,11 @@ type Release = {
 };
 
 const releases = (releasesData.releases ?? []) as Release[];
-const latestMacUrl = releases.find((r) => r.macUniversalUrl)?.macUniversalUrl ?? null;
 ---
 <Layout>
   <Nav />
-  <Hero latestMacUrl={latestMacUrl} />
+  <Hero />
   <Beats />
   <Download releases={releases} />
-  <Footer latestMacUrl={latestMacUrl} />
+  <Footer />
 </Layout>

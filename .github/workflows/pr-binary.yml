@@ -31,8 +31,8 @@ jobs:
           TIDE_DEV_BUNDLE: '1'
         run: |
           set -euo pipefail
-          chmod +x scripts/package-macos-zip.sh
-          zip_path=$(sh scripts/package-macos-zip.sh release --universal)
+          chmod +x scripts/package-macos.sh
+          zip_path=$(sh scripts/package-macos.sh release --universal)
           echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload PR artifact
