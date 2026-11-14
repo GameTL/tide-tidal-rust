@@ -4,6 +4,7 @@ import Nav from '../components/Nav.astro';
 import Hero from '../components/Hero.astro';
 import Beats from '../components/Beats.astro';
 import Download from '../components/Download.astro';
+import Faq from '../components/Faq.astro';
 import Footer from '../components/Footer.astro';
 import releasesData from '../data/releases.json';
 
@@ -20,8 +21,11 @@ const releases = (releasesData.releases ?? []) as Release[];
 ---
 <Layout>
   <Nav />
-  <Hero />
-  <Beats />
-  <Download releases={releases} />
+  <main>
+    <Hero />
+    <Beats />
+    <Download releases={releases} />
+    <Faq />
+  </main>
   <Footer />
 </Layout>

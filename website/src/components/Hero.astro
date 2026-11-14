@@ -1,7 +1,8 @@
 ---
+import { Image, Picture } from 'astro:assets';
 import { github, latestMacDmg } from '../data/links';
-
-const base = import.meta.env.BASE_URL;
+import logo from '../assets/tide.png';
+import appHome from '../assets/screenshots/app-home.png';
 ---
 <section class="hero">
   <div class="hero-float" aria-hidden="true">
@@ -24,7 +25,7 @@ const base = import.meta.env.BASE_URL;
   <div class="container hero-inner">
     <div class="hero-logo">
       <span class="hero-logo-glow" aria-hidden="true"></span>
-      <img src={`${base}brand/tide.png`} alt="TIDE" width="128" height="128" />
+      <Image src={logo} alt="TIDE logo" width={128} height={128} densities={[1, 2]} loading="eager" fetchpriority="high" />
     </div>
     <h1>The native player<br />for your TIDAL<br />subscription.</h1>
     <p class="hero-sub">
@@ -47,11 +48,14 @@ const base = import.meta.env.BASE_URL;
 
   <div class="container">
     <figure class="hero-shot">
-      <img
-        src={`${base}screenshots/app-home.png`}
-        alt="TIDE desktop app showing the home library"
-        width="4336"
-        height="2802"
+      <Picture
+        src={appHome}
+        formats={['avif', 'webp']}
+        widths={[640, 960, 1440, 1920]}
+        sizes="(max-width: 1008px) calc(100vw - 48px), 960px"
+        alt="TIDE, a native TIDAL player for macOS, showing the home feed, listening history and recommended tracks"
+        loading="eager"
+        fetchpriority="high"
       />
     </figure>
   </div>

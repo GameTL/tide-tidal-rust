@@ -1,27 +1,136 @@
 ---
 import '../styles/global.css';
+import { site, features, faqs } from '../data/site';
+import releasesData from '../data/releases.json';
+import appHome from '../assets/screenshots/app-home.png';
+import bitPerfect from '../assets/screenshots/bit-perfect.png';
 
 interface Props {
   title?: string;
   description?: string;
 }
 
-const {
-  title = 'TIDE — unofficial native TIDAL player',
-  description = 'Unofficial native TIDAL player for macOS. Bit-perfect playback, parametric EQ, no telemetry.',
-} = Astro.props;
+const { title = site.title, description = site.description } = Astro.props;
 
 const base = import.meta.env.BASE_URL;
+const home = new URL(base, Astro.site).href;
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+const abs = (path: string) => new URL(path, home).href;
+const ogImage = abs(site.ogImage.path);
+
+const latest = (releasesData.releases ?? [])[0] as
+  | { version: string; publishedAt: string | null }
+  | undefined;
+
+// Plain-text answers for structured data: strip the Markdown code ticks.
+const plain = (s: string) => s.replace(/`/g, '');
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'WebSite',
+      '@id': `${home}#website`,
+      url: home,
+      name: site.name,
+      description,
+      inLanguage: 'en',
+    },
+    {
+      '@type': 'SoftwareApplication',
+      '@id': `${home}#app`,
+      name: site.name,
+      alternateName: 'TIDE for TIDAL',
+      description,
+      url: home,
+      applicationCategory: 'MultimediaApplication',
+      applicationSubCategory: 'Music player',
+      operatingSystem: 'macOS',
+      processorRequirements: 'Apple Silicon or Intel (universal binary)',
+      downloadUrl: site.downloadUrl,
+      installUrl: site.downloadUrl,
+      ...(latest && { softwareVersion: latest.version }),
+      ...(latest?.publishedAt && { datePublished: latest.publishedAt }),
+      isAccessibleForFree: true,
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      image: abs('icon-512.png'),
+      screenshot: [appHome, bitPerfect].map((img) => ({
+        '@type': 'ImageObject',
+        url: new URL(img.src, Astro.site).href,
+        width: img.width,
+        height: img.height,
+      })),
+      featureList: features,
+      keywords: site.keywords.join(', '),
+      author: { '@type': 'Person', name: site.author.name, url: site.author.url },
+      sameAs: [site.github],
+    },
+    {
+      '@type': 'SoftwareSourceCode',
+      '@id': `${home}#source`,
+      name: `${site.name} source code`,
+      codeRepository: site.github,
+      programmingLanguage: 'Rust',
+      license: site.license,
+      targetProduct: { '@id': `${home}#app` },
+    },
+    {
+      '@type': 'FAQPage',
+      '@id': `${home}#faq`,
+      mainEntity: faqs.map((f) => ({
+        '@type': 'Question',
+        name: f.q,
+        acceptedAnswer: { '@type': 'Answer', text: plain(f.a) },
+      })),
+    },
+  ],
+};
+
+// Keep "</script>" in any string from closing the tag early.
+const jsonLdHtml = JSON.stringify(jsonLd).replace(/</g, '\\u003c');
 ---
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content={description} />
-    <meta name="generator" content={Astro.generator} />
-    <link rel="icon" type="image/png" href={`${base}brand/tide.png`} />
     <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <link rel="canonical" href={canonical} />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#000000" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="application-name" content={site.name} />
+    <meta name="author" content={site.author.name} />
+
+    <link rel="icon" type="image/png" sizes="32x32" href={`${base}favicon-32.png`} />
+    <link rel="icon" type="image/png" sizes="192x192" href={`${base}icon-192.png`} />
+    <link rel="apple-touch-icon" href={`${base}apple-touch-icon.png`} />
+    <link rel="manifest" href={`${base}site.webmanifest`} />
+
+    <link rel="sitemap" type="application/xml" href={`${base}sitemap.xml`} />
+    <link rel="alternate" type="text/plain" title="LLM summary" href={`${base}llms.txt`} />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={site.name} />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content={String(site.ogImage.width)} />
+    <meta property="og:image:height" content={String(site.ogImage.height)} />
+    <meta property="og:image:alt" content={site.ogImage.alt} />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={site.ogImage.alt} />
+
+    <script type="application/ld+json" set:html={jsonLdHtml} />
   </head>
   <body>
     <slot />
