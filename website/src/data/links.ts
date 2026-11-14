@@ -3,3 +3,8 @@ export const github = 'https://github.com/GameTL/tide-tidal-rust';
 // The release workflow uploads the newest build under this fixed name, so this
 // link always downloads the latest macOS release, whenever the site was built.
 export const latestMacDmg = `${github}/releases/latest/download/TIDE-macos-universal.dmg`;
+
+// One-line installer (website/public/install.sh). curl does not quarantine what
+// it downloads, so TIDE installed this way opens without the Gatekeeper prompt.
+export const installCommand =
+  'curl -fsSL https://gametl.github.io/tide-tidal-rust/install.sh | sh';

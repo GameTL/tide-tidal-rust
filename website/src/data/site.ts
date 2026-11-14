@@ -86,6 +86,6 @@ export const faqs: Faq[] = [
   },
   {
     q: 'Why does macOS say “Apple could not verify TIDE”?',
-    a: 'Builds are not notarized yet. Click Done, then open System Settings › Privacy & Security and click Open Anyway. Or run `xattr -dr com.apple.quarantine /Applications/TIDE.app` once.',
+    a: 'TIDE is a free, personal project, so it is not signed through Apple’s paid Developer Program ($99 a year), and macOS warns about apps it cannot verify. Click Done, then open System Settings › Privacy & Security and click Open Anyway; you only do this once. Or install from Terminal with `curl -fsSL https://gametl.github.io/tide-tidal-rust/install.sh | sh`, which opens without the prompt.',
   },
 ];
