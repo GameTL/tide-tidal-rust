@@ -117,7 +117,8 @@ mod macos {
         targets: Vec<Retained<AnyObject>>,
         dict: Retained<NSMutableDictionary<NSString, AnyObject>>,
         local_monitor: Option<Retained<AnyObject>>,
-        handler: Arc<dyn Fn(MediaControlEvent) + Send + Sync>,
+        /// Kept so the coalescer Arc outlives the command-center blocks.
+        _handler: Arc<dyn Fn(MediaControlEvent) + Send + Sync>,
     }
 
     unsafe impl Send for MacMediaControls {}
@@ -267,7 +268,7 @@ mod macos {
                 targets,
                 dict,
                 local_monitor,
-                handler,
+                _handler: handler,
             })
         }
 
