@@ -15,7 +15,7 @@ fn checker(px: u32) -> Image {
     for (i, pixel) in buf.make_mut_slice().iter_mut().enumerate() {
         let x = i % size;
         let y = i / size;
-        let on = (x / 64 + y / 64) % 2 == 0;
+        let on = (x / 64 + y / 64).is_multiple_of(2);
         let v = if on { 48 } else { 210 };
         *pixel = Rgba8Pixel {
             r: v,

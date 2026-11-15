@@ -115,7 +115,7 @@ fn every_slim_item_plays_from_its_artwork_and_opens_from_its_row() {
     };
     let mut found = sweep(x0 + 9. + 20.);
     let second = sweep(x0 + rows_col + 30. + 20.);
-    found.extend(second.into_iter().map(|(id, y)| (id, y)));
+    found.extend(second);
     let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(
         ids,

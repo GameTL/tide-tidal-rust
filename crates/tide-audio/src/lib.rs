@@ -1888,7 +1888,7 @@ mod tests {
         bytes.extend_from_slice(b"data");
         bytes.extend_from_slice(&(frames * 2).to_le_bytes());
         for i in 0..frames {
-            let s: i16 = if i % 2 == 0 { 8000 } else { -8000 };
+            let s: i16 = if i.is_multiple_of(2) { 8000 } else { -8000 };
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         std::fs::write(path, bytes).unwrap();
