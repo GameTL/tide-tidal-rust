@@ -7793,7 +7793,7 @@ fn scroll_frame_tour() -> Vec<(u64, &'static str, Box<dyn Fn(&Rc<Ui>)>)> {
                     let timer = slint::Timer::default();
                     timer.start(
                         slint::TimerMode::Repeated,
-                        Duration::from_millis(4),
+                        crate::platform::frame_interval(),
                         move || {
                             let Some(ui) = weak.upgrade() else { return };
                             let win = ui.win.window();

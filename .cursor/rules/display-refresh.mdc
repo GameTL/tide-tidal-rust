@@ -1,0 +1,24 @@
+---
+description: Cap animation, scrolling, and visual ticks to the monitor refresh rate
+globs: crates/tide-app/**/*.{rs,slint}
+alwaysApply: true
+---
+
+# Display refresh
+
+Every on-screen motion is one frame of the window's monitor. Never faster, and never a fixed 60 Hz on a faster panel.
+
+- Slint `animate` is already vsync'd. Do not add a second timer to "smooth" it.
+- Custom visual loops (window zoom, page settle, video frame pump) use `crate::platform::frame_interval()` (or `frame_interval_from_hz` when you already have the screen). No `from_millis(4)` / `from_millis(8)` animation ticks.
+- Trackpad scrolling applies each AppKit delta as it arrives. Do not start a Slint coast on top of macOS momentum.
+- Progress bars, debug stats, and other non-motion polls may run slower than the display. They must not run faster.
+
+```rust
+// BAD — outruns a 120 Hz panel and jitters on 60 Hz
+timer.start(TimerMode::Repeated, Duration::from_millis(4), step);
+
+// GOOD
+timer.start(TimerMode::Repeated, crate::platform::frame_interval(), step);
+```
+
+CI: `sh scripts/lint-display-refresh.sh` fails Repeated timers with `Duration::from_millis(N)` when `N ≤ 16`.
