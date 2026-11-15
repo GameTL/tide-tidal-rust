@@ -38,6 +38,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.app == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: macos-latest
+    env:
+      # Repo .cargo/config.toml caps jobs at 2 for laptops. The runner can take more.
+      CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
 
