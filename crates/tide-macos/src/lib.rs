@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub mod video;
@@ -26,18 +26,79 @@ pub enum MediaControlEvent {
     SetShuffle(bool),
 }
 
+/// Decode AppKit's NX_SYSDEFINED media-key payload (IOKit/hidsystem/ev_keymap.h).
+/// The bool is true only for the initial key-down; releases and repeats must
+/// still be consumed without toggling playback again.
+#[cfg(any(target_os = "macos", test))]
+fn media_key(data: isize) -> Option<(MediaControlEvent, bool)> {
+    let command = match (data >> 16) & 0xffff {
+        16 => MediaControlEvent::Toggle,   // NX_KEYTYPE_PLAY
+        17 => MediaControlEvent::Next,     // NX_KEYTYPE_NEXT
+        18 => MediaControlEvent::Previous, // NX_KEYTYPE_PREVIOUS
+        19 => MediaControlEvent::Next,     // NX_KEYTYPE_FAST
+        20 => MediaControlEvent::Previous, // NX_KEYTYPE_REWIND
+        _ => return None,
+    };
+    let state = (data >> 8) & 0xff;
+    if state != 0x0a && state != 0x0b {
+        return None;
+    }
+    Some((command, state == 0x0a && data & 1 == 0))
+}
+
+/// Play/pause, next, and previous each arrive twice on macOS: AppKit's
+/// NX_SYSDEFINED event and MPRemoteCommandCenter. Treat those as one press.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MediaCommandClass {
+    Transport,
+    Next,
+    Previous,
+}
+
+fn media_command_class(event: &MediaControlEvent) -> Option<MediaCommandClass> {
+    match event {
+        MediaControlEvent::Play
+        | MediaControlEvent::Pause
+        | MediaControlEvent::Toggle
+        | MediaControlEvent::Stop => Some(MediaCommandClass::Transport),
+        MediaControlEvent::Next => Some(MediaCommandClass::Next),
+        MediaControlEvent::Previous => Some(MediaCommandClass::Previous),
+        MediaControlEvent::SetPosition(_) | MediaControlEvent::SetShuffle(_) => None,
+    }
+}
+
+const MEDIA_COMMAND_COALESCE: Duration = Duration::from_millis(300);
+
+fn accept_media_command(
+    last: &mut Option<(MediaCommandClass, Instant)>,
+    event: &MediaControlEvent,
+    now: Instant,
+) -> bool {
+    let Some(class) = media_command_class(event) else {
+        return true;
+    };
+    if let Some((prev, at)) = *last
+        && prev == class
+        && now.saturating_duration_since(at) < MEDIA_COMMAND_COALESCE
+    {
+        return false;
+    }
+    *last = Some((class, now));
+    true
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::path::Path;
     use std::ptr::NonNull;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::{AnyThread, msg_send};
-    use objc2_app_kit::NSImage;
+    use objc2::{AnyThread, MainThreadMarker, msg_send};
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSImage};
     use objc2_core_foundation::CGSize;
     use objc2_foundation::{NSData, NSDictionary, NSMutableDictionary, NSNumber, NSString};
     use objc2_media_player::{
@@ -55,6 +116,8 @@ mod macos {
     pub struct MacMediaControls {
         targets: Vec<Retained<AnyObject>>,
         dict: Retained<NSMutableDictionary<NSString, AnyObject>>,
+        local_monitor: Option<Retained<AnyObject>>,
+        handler: Arc<dyn Fn(MediaControlEvent) + Send + Sync>,
     }
 
     unsafe impl Send for MacMediaControls {}
@@ -63,10 +126,17 @@ mod macos {
     impl MacMediaControls {
         pub fn new<F>(_app_name: &'static str, event_handler: F) -> Result<Self, MacosMediaError>
         where
-            F: Fn(MediaControlEvent) + Send + 'static,
+            F: Fn(MediaControlEvent) + Send + Sync + 'static,
         {
             let command_center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
-            let handler = Arc::new(event_handler);
+            let inner: Arc<dyn Fn(MediaControlEvent) + Send + Sync> = Arc::new(event_handler);
+            let last = Arc::new(Mutex::new(None));
+            let handler: Arc<dyn Fn(MediaControlEvent) + Send + Sync> = Arc::new(move |event| {
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if super::accept_media_command(&mut last, &event, Instant::now()) {
+                    inner(event);
+                }
+            });
             let mut targets = Vec::new();
 
             // Toggle play/pause
@@ -155,7 +225,50 @@ mod macos {
 
             let dict = NSMutableDictionary::new();
 
-            Ok(Self { targets, dict })
+            // AppKit can deliver physical media keys to the foreground app
+            // before it has become the system's Now Playing owner. Winit does
+            // not translate these system-defined events into keyboard input.
+            // Consume both edges so one press cannot also reach another player.
+            // Background/Control Center commands continue through MPRemoteCommandCenter.
+            let h = handler.clone();
+            let local_block = RcBlock::new(move |event: NonNull<NSEvent>| {
+                // SAFETY: AppKit keeps the event alive throughout this callback.
+                let native_event = unsafe { event.as_ref() };
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return event.as_ptr();
+                };
+                let app = NSApplication::sharedApplication(mtm);
+                if !app.isActive() || app.keyWindow().is_none() || native_event.subtype().0 != 8 {
+                    return event.as_ptr();
+                }
+                let Some((command, dispatch)) = super::media_key(native_event.data1()) else {
+                    return event.as_ptr();
+                };
+                if dispatch {
+                    h(command);
+                }
+                std::ptr::null_mut()
+            });
+            let local_monitor = MainThreadMarker::new().and_then(|_| {
+                // SAFETY: on the main thread, and the block returns the
+                // original live event or null.
+                unsafe {
+                    NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                        NSEventMask::SystemDefined,
+                        &local_block,
+                    )
+                }
+            });
+            if local_monitor.is_none() {
+                tracing::warn!("Could not install foreground media-key handling");
+            }
+
+            Ok(Self {
+                targets,
+                dict,
+                local_monitor,
+                handler,
+            })
         }
 
         pub fn set_metadata(
@@ -297,6 +410,10 @@ mod macos {
 
     impl Drop for MacMediaControls {
         fn drop(&mut self) {
+            if let Some(monitor) = self.local_monitor.take() {
+                // SAFETY: this token came from NSEvent's monitor registration.
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
             let center = unsafe { MPRemoteCommandCenter::sharedCommandCenter() };
             unsafe {
                 center.playCommand().setEnabled(false);
@@ -338,7 +455,7 @@ mod stub {
     impl MacMediaControls {
         pub fn new<F>(_app_name: &'static str, _event_handler: F) -> Result<Self, MacosMediaError>
         where
-            F: Fn(MediaControlEvent) + Send + 'static,
+            F: Fn(MediaControlEvent) + Send + Sync + 'static,
         {
             Ok(Self)
         }
@@ -385,6 +502,87 @@ pub use stub::MacMediaControls;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_physical_keypress_does_not_play_then_immediately_stop() {
+        use std::time::Instant;
+
+        let mut last = None;
+        let t0 = Instant::now();
+        // Local NX_KEYTYPE_PLAY (Toggle) plus the Now Playing Pause/Toggle
+        // that macOS delivers for the same F8/play-pause press.
+        assert!(accept_media_command(
+            &mut last,
+            &MediaControlEvent::Toggle,
+            t0
+        ));
+        assert!(
+            !accept_media_command(
+                &mut last,
+                &MediaControlEvent::Pause,
+                t0 + Duration::from_millis(40)
+            ),
+            "Pause from MPRemoteCommandCenter must not undo the local Toggle"
+        );
+        assert!(!accept_media_command(
+            &mut last,
+            &MediaControlEvent::Toggle,
+            t0 + Duration::from_millis(80)
+        ));
+        assert!(!accept_media_command(
+            &mut last,
+            &MediaControlEvent::Play,
+            t0 + Duration::from_millis(90)
+        ));
+        assert!(
+            accept_media_command(
+                &mut last,
+                &MediaControlEvent::Next,
+                t0 + Duration::from_millis(90)
+            ),
+            "skip is a different key and must still work"
+        );
+        assert!(!accept_media_command(
+            &mut last,
+            &MediaControlEvent::Next,
+            t0 + Duration::from_millis(120)
+        ));
+        assert!(accept_media_command(
+            &mut last,
+            &MediaControlEvent::Toggle,
+            t0 + Duration::from_millis(400)
+        ));
+        assert!(accept_media_command(
+            &mut last,
+            &MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs(12))),
+            t0 + Duration::from_millis(410)
+        ));
+    }
+
+    #[test]
+    fn physical_media_keys_dispatch_once_and_leave_other_system_keys_alone() {
+        for (key, command) in [
+            (16, MediaControlEvent::Toggle),
+            (17, MediaControlEvent::Next),
+            (18, MediaControlEvent::Previous),
+            (19, MediaControlEvent::Next),
+            (20, MediaControlEvent::Previous),
+        ] {
+            assert_eq!(
+                media_key((key << 16) | 0x0a00),
+                Some((command.clone(), true))
+            );
+            assert_eq!(
+                media_key((key << 16) | 0x0b00),
+                Some((command.clone(), false))
+            );
+            assert_eq!(media_key((key << 16) | 0x0a01), Some((command, false)));
+        }
+        for key in [0, 1, 7, 21] {
+            assert_eq!(media_key((key << 16) | 0x0a00), None);
+        }
+        assert_eq!(media_key(16 << 16), None);
+    }
 
     #[test]
     #[cfg(target_os = "macos")]
