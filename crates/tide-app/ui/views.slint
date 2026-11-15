@@ -593,15 +593,6 @@ component RowGrid inherits Rectangle {
     }
 }
 
-component Spinner inherits Rectangle {
-    height: 120px;
-    Text {
-        text: "Loading…";
-        color: Theme.text-secondary;
-        font-size: 15px;
-    }
-}
-
 component LinkRow inherits Rectangle {
     in property <SectionData> section;
     property <length> gap: 8px;

@@ -7345,7 +7345,8 @@ impl Ui {
 
     /// Drive the UI through its main views and save a PNG of each (`--snapshot <dir>`).
     pub fn run_snapshot_tour(self: &Rc<Self>, dir: PathBuf, play: bool) {
-        type Step = (u64, &'static str, Box<dyn Fn(&Rc<Ui>)>);
+        type StepFn = Box<dyn Fn(&Rc<Ui>)>;
+        type Step = (u64, &'static str, StepFn);
         let mut steps: Vec<Step> = vec![
             (7000, "01-home", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("tracks"))),
@@ -7509,7 +7510,7 @@ impl Ui {
         // View ▸ Zoom: the same callbacks the menu items and ⌘= / ⌘− / ⌘0 fire.
         // Restore the saved preference afterwards so the tour leaves no trace.
         let saved_zoom = Rc::new(std::cell::Cell::new(100));
-        let report = |label: &'static str| -> Box<dyn Fn(&Rc<Ui>)> {
+        let report = |label: &'static str| -> StepFn {
             Box::new(move |ui| {
                 println!(
                     "zoom {label}: {}% scale={} compact={}",
