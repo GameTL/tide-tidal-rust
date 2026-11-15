@@ -5605,7 +5605,7 @@ dependencies = [
 
 [[package]]
 name = "tide-api"
-version = "0.7.9"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5620,7 +5620,7 @@ dependencies = [
 
 [[package]]
 name = "tide-app"
-version = "0.7.9"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5651,7 +5651,7 @@ dependencies = [
 
 [[package]]
 name = "tide-audio"
-version = "0.7.9"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5665,7 +5665,7 @@ dependencies = [
 
 [[package]]
 name = "tide-cache"
-version = "0.7.9"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5681,7 +5681,7 @@ dependencies = [
 
 [[package]]
 name = "tide-macos"
-version = "0.7.9"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
