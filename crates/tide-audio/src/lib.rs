@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,7 +25,10 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use thiserror::Error;
 
+use rt_lock::RtMutex;
+
 pub mod eq;
+mod rt_lock;
 pub use eq::{Band, BandKind, EqChain, EqProfile};
 
 /// Open cache file while DASH segments are still being appended.
@@ -228,6 +231,81 @@ fn push_box_average(frames: &[[f32; 2]], out: &mut Vec<f32>) {
 /// Samples (not frames) kept decoded ahead of the output callback.
 const BUFFER_AHEAD_SECS: f32 = 1.5;
 
+/// Body of the first child box `kind` inside an ISO-BMFF container body.
+fn mp4_child<'a>(mut data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    while data.len() >= 8 {
+        let size = u32::from_be_bytes(data[0..4].try_into().ok()?) as usize;
+        if size < 8 || size > data.len() {
+            return None;
+        }
+        if &data[4..8] == kind {
+            return Some(&data[8..size]);
+        }
+        data = &data[size..];
+    }
+    None
+}
+
+/// `baseMediaDecodeTime` of the first `moof` in a fragmented MP4, in track
+/// timescale units. A playable `.tmp` built from a mid-track DASH block starts
+/// there, while Symphonia numbers its packets from 0 regardless.
+fn first_fragment_decode_time(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let mut pos = 0u64;
+    for _ in 0..64 {
+        file.seek(SeekFrom::Start(pos)).ok()?;
+        let mut hdr = [0u8; 8];
+        file.read_exact(&mut hdr).ok()?;
+        let mut size = u64::from(u32::from_be_bytes(hdr[0..4].try_into().ok()?));
+        let mut header = 8u64;
+        if size == 1 {
+            let mut large = [0u8; 8];
+            file.read_exact(&mut large).ok()?;
+            size = u64::from_be_bytes(large);
+            header = 16;
+        }
+        if size < header {
+            return None;
+        }
+        match &hdr[4..8] {
+            b"moof" => {
+                let len = usize::try_from(size - header)
+                    .ok()
+                    .filter(|&n| n <= 1 << 20)?;
+                let mut body = vec![0u8; len];
+                file.read_exact(&mut body).ok()?;
+                let traf = mp4_child(&body, b"traf")?;
+                let tfdt = mp4_child(traf, b"tfdt")?;
+                return match tfdt.first()? {
+                    1 => Some(u64::from_be_bytes(tfdt.get(4..12)?.try_into().ok()?)),
+                    _ => Some(u64::from(u32::from_be_bytes(
+                        tfdt.get(4..8)?.try_into().ok()?,
+                    ))),
+                };
+            }
+            // Media before any fragment: not a fragmented file.
+            b"mdat" => return None,
+            _ => pos = pos.checked_add(size)?,
+        }
+    }
+    None
+}
+
+/// Identity of the file behind `path`, to notice a `.tmp` replaced by rename.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 struct AudioSource {
     reader: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
@@ -245,14 +323,25 @@ struct AudioSource {
     /// Cache file still growing while segments download in the background.
     growing: bool,
     eof_wait: Option<Instant>,
-    /// Source frames already decoded — used to resume after reopening a finalized cache file.
+    /// Track position (source frames from the start of the song) of the next
+    /// decoded frame — used to resume after reopening a finalized cache file.
     frames_decoded: u64,
+    /// Track time at which this file's first packet sits (non-zero for a
+    /// `.tmp` built from a mid-track DASH block).
+    offset: Duration,
+    /// The last read hit the end of a growing file; the decoder thread should
+    /// wait without holding the source lock.
+    starved: bool,
+    /// File the reader has open, and a replacement already tried at the same path.
+    identity: Option<(u64, u64)>,
+    tried_identity: Option<(u64, u64)>,
 }
 
 impl AudioSource {
     fn open(item: TrackQueueItem) -> Result<Self, AudioError> {
         let growing = item.file_path.extension().and_then(|s| s.to_str()) == Some("tmp");
         let file = File::open(&item.file_path)?;
+        let identity = file_identity(&item.file_path);
         let mss = if growing {
             MediaSourceStream::new(Box::new(GrowingFile { file }), Default::default())
         } else {
@@ -278,9 +367,20 @@ impl AudioSource {
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| AudioError::Decoder(e.to_string()))?;
 
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+        let offset = first_fragment_decode_time(&item.file_path)
+            .filter(|&ticks| ticks > 0)
+            .map(|ticks| match track.codec_params.time_base {
+                Some(tb) if tb.denom > 0 => {
+                    Duration::from_secs_f64(ticks as f64 * tb.numer as f64 / tb.denom as f64)
+                }
+                _ => Duration::from_secs_f64(ticks as f64 / sample_rate.max(1) as f64),
+            })
+            .unwrap_or(Duration::ZERO);
+
         Ok(Self {
             track_id: track.id,
-            sample_rate: track.codec_params.sample_rate.unwrap_or(44_100),
+            sample_rate,
             bits_per_sample: track.codec_params.bits_per_sample.unwrap_or(0),
             reader,
             decoder,
@@ -292,8 +392,38 @@ impl AudioSource {
             hold_len: 0,
             growing,
             eof_wait: None,
-            frames_decoded: 0,
+            frames_decoded: (offset.as_secs_f64() * sample_rate.max(1) as f64).round() as u64,
+            offset,
+            starved: false,
+            identity,
+            tried_identity: None,
         })
+    }
+
+    /// Track position of the next decoded frame.
+    fn position(&self) -> Duration {
+        Duration::from_secs_f64(self.frames_decoded as f64 / self.sample_rate.max(1) as f64)
+    }
+
+    /// The `.tmp` was rebuilt (renamed over) for a seek elsewhere, so the file
+    /// this reader holds will not grow any more. Follow the new file when it
+    /// still contains the current position.
+    fn try_follow_replaced(&mut self) -> Result<bool, AudioError> {
+        let current = file_identity(&self.item.file_path);
+        if current.is_none() || current == self.identity || current == self.tried_identity {
+            return Ok(false);
+        }
+        self.tried_identity = current;
+        let pos = self.position();
+        let Ok(mut fresh) = Self::open(self.item.clone()) else {
+            return Ok(false);
+        };
+        if fresh.seek_within(pos).is_err() {
+            return Ok(false);
+        }
+        tracing::info!(?pos, title = %fresh.item.title, "Followed rebuilt progressive head");
+        *self = fresh;
+        Ok(true)
     }
 
     fn format(&self) -> FormatInfo {
@@ -311,19 +441,40 @@ impl AudioSource {
         if !complete.exists() {
             return Ok(false);
         }
-        let pos =
-            Duration::from_secs_f64(self.frames_decoded as f64 / self.sample_rate.max(1) as f64);
+        let pos = self.position();
         let mut item = self.item.clone();
         item.file_path = complete;
         let decoded = self.frames_decoded;
         let mut fresh = Self::open(item)?;
         if pos > Duration::from_millis(20) {
-            fresh.seek(pos)?;
+            fresh.seek_within(pos)?;
         }
         fresh.frames_decoded = decoded;
         tracing::info!(?pos, title = %fresh.item.title, "Reopened finalized audio after progressive head");
         *self = fresh;
         Ok(true)
+    }
+
+    /// The progressive head is exhausted and the finished file gave nothing
+    /// past this position: the track is over. Returns `read_stereo`'s "more".
+    fn end_after_failed_reopen(&mut self, error: &AudioError) -> bool {
+        let position = self.position();
+        let duration = self.item.duration;
+        self.growing = false;
+        self.starved = false;
+        self.eof_wait = None;
+        if position + Duration::from_secs(2) >= duration {
+            // Seeking the finished file to its very end reports end of stream.
+            tracing::debug!(?position, ?duration, "Finished file ends here: {error}");
+        } else {
+            tracing::warn!(
+                title = %self.item.title,
+                ?position,
+                ?duration,
+                "Track cut short: could not continue in the finished file: {error}"
+            );
+        }
+        false
     }
 
     /// Decode one packet into interleaved stereo at `out_rate`. Returns false at end of stream.
@@ -333,6 +484,7 @@ impl AudioSource {
             match self.reader.next_packet() {
                 Ok(packet) => {
                     self.eof_wait = None;
+                    self.starved = false;
                     break packet;
                 }
                 Err(SymphoniaError::IoError(err))
@@ -341,21 +493,32 @@ impl AudioSource {
                     if !self.growing {
                         return Ok(false);
                     }
-                    if self.try_reopen_finalized()? {
+                    match self.try_reopen_finalized() {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return Ok(self.end_after_failed_reopen(&e)),
+                    }
+                    if self.try_follow_replaced()? {
                         continue;
                     }
                     let start = *self.eof_wait.get_or_insert_with(Instant::now);
                     if start.elapsed() > GROWING_EOF_GRACE {
                         self.eof_wait = None;
                         self.growing = false;
+                        self.starved = false;
                         return Ok(false);
                     }
-                    std::thread::sleep(Duration::from_millis(25));
-                    continue;
+                    // Let the caller wait for more bytes without holding any lock.
+                    self.starved = true;
+                    return Ok(true);
                 }
                 Err(SymphoniaError::ResetRequired) => {
-                    if self.growing && self.try_reopen_finalized()? {
-                        continue;
+                    if self.growing {
+                        match self.try_reopen_finalized() {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(e) => return Ok(self.end_after_failed_reopen(&e)),
+                        }
                     }
                     return Ok(false);
                 }
@@ -368,6 +531,13 @@ impl AudioSource {
         let decoded = match self.decoder.decode(&packet) {
             Ok(decoded) => decoded,
             Err(SymphoniaError::DecodeError(_)) => return Ok(true),
+            // A packet cut short: skip it, the reader reports the real end next.
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                tracing::debug!(position = ?self.position(), "Skipped a truncated packet");
+                return Ok(true);
+            }
             Err(e) => return Err(AudioError::Decoder(e.to_string())),
         };
 
@@ -476,27 +646,27 @@ impl AudioSource {
             let mut item = self.item.clone();
             item.file_path = reopen_path;
             let mut fresh = Self::open(item)?;
-            fresh
-                .reader
-                .seek(
-                    SeekMode::Accurate,
-                    SeekTo::Time {
-                        time: Time::from(to.as_secs_f64()),
-                        track_id: Some(fresh.track_id),
-                    },
-                )
-                .map_err(|e| AudioError::Decoder(e.to_string()))?;
-            fresh.decoder.reset();
-            fresh.frames_decoded =
-                (to.as_secs_f64() * fresh.sample_rate.max(1) as f64).round() as u64;
+            fresh.seek_within(to)?;
             *self = fresh;
             return Ok(());
         }
+        self.seek_within(to)
+    }
+
+    /// Seek this open file to track time `to`, which must not lie before the
+    /// file's first fragment.
+    fn seek_within(&mut self, to: Duration) -> Result<(), AudioError> {
+        let Some(relative) = to.checked_sub(self.offset) else {
+            return Err(AudioError::Decoder(format!(
+                "{to:?} is before this file's start at {:?}",
+                self.offset
+            )));
+        };
         self.reader
             .seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: Time::from(to.as_secs_f64()),
+                    time: Time::from(relative.as_secs_f64()),
                     track_id: Some(self.track_id),
                 },
             )
@@ -508,6 +678,7 @@ impl AudioSource {
         self.hold_len = 0;
         self.frames_decoded = (to.as_secs_f64() * self.sample_rate.max(1) as f64).round() as u64;
         self.eof_wait = None;
+        self.starved = false;
         Ok(())
     }
 }
@@ -549,7 +720,7 @@ struct Buffer {
 }
 
 struct Shared {
-    buffer: Mutex<Buffer>,
+    buffer: RtMutex<Buffer>,
     source: Mutex<Option<AudioSource>>,
     queue: Mutex<VecDeque<TrackQueueItem>>,
     playing: AtomicBool,
@@ -575,6 +746,129 @@ struct Shared {
     /// change when `eq_version` moves.
     eq: Mutex<Vec<EqProfile>>,
     eq_version: AtomicU64,
+    glitches: Glitches,
+}
+
+/// What the output callback saw go wrong. Written from the real-time thread
+/// (atomics only); the decoder thread turns it into log lines.
+#[derive(Default)]
+struct Glitches {
+    /// CoreAudio overloads reported while audio was playing / while silent.
+    overloads_playing: AtomicU64,
+    overloads_silent: AtomicU64,
+    /// Callbacks that ran out of decoded samples mid-track.
+    dry: AtomicU64,
+    /// Worst case since the decoder thread last cleared them.
+    lock_wait_max_us: AtomicU32,
+    callback_max_us: AtomicU32,
+    /// Frames the device asked for in the last callback.
+    callback_frames: AtomicU32,
+    /// When the stream was opened, in `since_start_us` time.
+    opened_us: AtomicU64,
+}
+
+/// Microseconds since the first call. Safe on the audio thread.
+fn since_start_us() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+/// Turns [`Glitches`] into log lines, at most one every [`Self::EVERY`].
+struct GlitchReporter {
+    overloads_playing: u64,
+    overloads_silent: u64,
+    dry: u64,
+    last_report: Option<Instant>,
+    window_start: Instant,
+}
+
+impl GlitchReporter {
+    const EVERY: Duration = Duration::from_secs(2);
+    /// The worst-case timings cover at most this long before a glitch.
+    const WINDOW: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            overloads_playing: 0,
+            overloads_silent: 0,
+            dry: 0,
+            last_report: None,
+            window_start: Instant::now(),
+        }
+    }
+
+    fn poll(&mut self, shared: &Shared) {
+        let g = &shared.glitches;
+        let playing = g.overloads_playing.load(Ordering::Relaxed);
+        let silent = g.overloads_silent.load(Ordering::Relaxed);
+        let dry = g.dry.load(Ordering::Relaxed);
+        if (playing, silent, dry) == (self.overloads_playing, self.overloads_silent, self.dry) {
+            if self.window_start.elapsed() > Self::WINDOW {
+                g.lock_wait_max_us.store(0, Ordering::Relaxed);
+                g.callback_max_us.store(0, Ordering::Relaxed);
+                self.window_start = Instant::now();
+            }
+            return;
+        }
+        if self.last_report.is_some_and(|at| at.elapsed() < Self::EVERY) {
+            return;
+        }
+        let new_playing = playing - self.overloads_playing;
+        let new_silent = silent - self.overloads_silent;
+        let new_dry = dry - self.dry;
+        (self.overloads_playing, self.overloads_silent, self.dry) = (playing, silent, dry);
+        self.last_report = Some(Instant::now());
+        self.window_start = Instant::now();
+
+        let rate = shared.device_rate.load(Ordering::Relaxed).max(1);
+        let buffered_ms = shared.buffer.lock().samples.len() as u64 * 500 / u64::from(rate);
+        let lock_wait_max_us = g.lock_wait_max_us.swap(0, Ordering::Relaxed);
+        let callback_max_us = g.callback_max_us.swap(0, Ordering::Relaxed);
+        let callback_frames = g.callback_frames.load(Ordering::Relaxed);
+        // One callback must finish within the time its frames take to play.
+        let deadline_us = u64::from(callback_frames) * 1_000_000 / u64::from(rate);
+        let stream_age_ms =
+            since_start_us().saturating_sub(g.opened_us.load(Ordering::Relaxed)) / 1000;
+        let waiting_on_download = shared
+            .source
+            .try_lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|s| s.starved));
+        let device = shared.output.lock().unwrap().name.clone();
+        if new_playing == 0 && new_dry == 0 {
+            // Nothing was audible: typically the first cycles of a just-opened stream.
+            tracing::debug!(
+                overloads = new_silent,
+                stream_age_ms,
+                %device,
+                rate,
+                "Output overload while silent"
+            );
+            return;
+        }
+        tracing::warn!(
+            overloads = new_playing,
+            overloads_silent = new_silent,
+            dry_callbacks = new_dry,
+            lock_wait_max_us,
+            callback_max_us,
+            deadline_us,
+            callback_frames,
+            buffered_ms,
+            stream_age_ms,
+            ?waiting_on_download,
+            %device,
+            rate,
+            "Audio glitch: {}",
+            if new_dry > 0 {
+                "the output ran out of decoded audio"
+            } else if u64::from(callback_max_us) > deadline_us / 2 {
+                "TIDE's audio callback was slow"
+            } else {
+                "CoreAudio missed a deadline although TIDE's callback was fast (system load or device)"
+            }
+        );
+    }
 }
 
 pub struct AudioPlayer {
@@ -744,6 +1038,7 @@ fn build_stream(
     let rate = config.sample_rate();
     let channels = config.channels() as usize;
     let cb_shared = Arc::clone(shared);
+    let err_shared = Arc::clone(shared);
     let mut eq_seen = shared.eq_version.load(Ordering::Relaxed);
     let mut eq = EqChain::default();
     eq.configure(&shared.eq.lock().unwrap(), rate);
@@ -767,7 +1062,10 @@ fn build_stream(
                 let equalise = eq.is_active();
                 let vol = cb_shared.volume.load(Ordering::Relaxed) as f32 / 1000.0;
                 let gain = vol * vol;
-                let mut buf = cb_shared.buffer.lock().unwrap();
+                let started = Instant::now();
+                let mut buf = cb_shared.buffer.lock();
+                let lock_wait_us = started.elapsed().as_micros() as u32;
+                let wanted = (data.len() / channels) as u64;
                 let mut frames = 0u64;
                 for out in data.chunks_mut(channels) {
                     if buf.samples.len() < 2 {
@@ -802,19 +1100,61 @@ fn build_stream(
                 } else {
                     cb_shared.frames_played.fetch_add(frames, Ordering::Relaxed);
                 }
-                if buf.consumed >= buf.end_at {
+                let ended = buf.consumed >= buf.end_at;
+                // Before the first sample after a start or seek, an empty queue is expected.
+                let dry = frames < wanted && !ended && buf.consumed > 0;
+                if ended {
                     buf.end_at = NONE;
                     cb_shared.finished.store(true, Ordering::Relaxed);
                     cb_shared.playing.store(false, Ordering::Relaxed);
                 }
+                drop(buf);
+                let glitches = &cb_shared.glitches;
+                if dry {
+                    glitches.dry.fetch_add(1, Ordering::Relaxed);
+                }
+                glitches
+                    .lock_wait_max_us
+                    .fetch_max(lock_wait_us, Ordering::Relaxed);
+                glitches
+                    .callback_max_us
+                    .fetch_max(started.elapsed().as_micros() as u32, Ordering::Relaxed);
+                glitches
+                    .callback_frames
+                    .store(wanted as u32, Ordering::Relaxed);
             },
-            |err| tracing::error!("An error occurred on audio stream: {}", err),
+            move |err| {
+                if err.kind() == cpal::ErrorKind::Xrun {
+                    // Delivered on the real-time thread: count it here, and let
+                    // the decoder thread log it with the timings around it.
+                    let glitches = &err_shared.glitches;
+                    if err_shared.playing.load(Ordering::Relaxed) {
+                        glitches.overloads_playing.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        glitches.overloads_silent.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    tracing::error!("An error occurred on audio stream: {}", err);
+                }
+            },
             None,
         )
         .map_err(|e| AudioError::Stream(e.to_string()))?;
     stream
         .play()
         .map_err(|e| AudioError::Stream(e.to_string()))?;
+    shared
+        .glitches
+        .opened_us
+        .store(since_start_us(), Ordering::Relaxed);
+    {
+        // Room for everything the decoder keeps ahead, so it never has to grow
+        // the queue (allocate and copy) while the callback waits for the lock.
+        let ahead = (rate as f32 * 2.0 * BUFFER_AHEAD_SECS) as usize + 65_536;
+        let mut buf = shared.buffer.lock();
+        let len = buf.samples.len();
+        buf.samples.reserve(ahead.saturating_sub(len));
+    }
     Ok((
         stream,
         OutputInfo {
@@ -826,9 +1166,11 @@ fn build_stream(
 
 fn decoder_loop(shared: Arc<Shared>) {
     let mut chunk = Vec::with_capacity(16_384);
+    let mut glitches = GlitchReporter::new();
     loop {
+        glitches.poll(&shared);
         let device_rate = shared.device_rate.load(Ordering::Relaxed);
-        let buffered = shared.buffer.lock().unwrap().samples.len();
+        let buffered = shared.buffer.lock().samples.len();
         if buffered as f32 > device_rate as f32 * 2.0 * BUFFER_AHEAD_SECS {
             std::thread::sleep(Duration::from_millis(15));
             continue;
@@ -844,7 +1186,7 @@ fn decoder_loop(shared: Arc<Shared>) {
             match AudioSource::open(next) {
                 Ok(opened) => {
                     tracing::info!(title = %opened.item.title, "Gapless transition queued");
-                    let mut buf = shared.buffer.lock().unwrap();
+                    let mut buf = shared.buffer.lock();
                     buf.switch_at = buf.pushed;
                     buf.end_at = NONE;
                     buf.upcoming = Some(Playing {
@@ -866,18 +1208,33 @@ fn decoder_loop(shared: Arc<Shared>) {
         {
             Ok(more) => more,
             Err(e) => {
-                tracing::error!("Decode error: {e}");
+                let at = source.as_ref().expect("checked above");
+                tracing::error!(
+                    title = %at.item.title,
+                    position = ?at.position(),
+                    duration = ?at.item.duration,
+                    growing = at.growing,
+                    "Decode error: {e}"
+                );
                 false
             }
         };
-        let mut buf = shared.buffer.lock().unwrap();
+        let starved = more && chunk.is_empty() && source.as_ref().is_some_and(|s| s.starved);
+        let mut buf = shared.buffer.lock();
         buf.pushed += chunk.len() as u64;
         buf.samples.extend(chunk.drain(..));
+        if !more && shared.queue.lock().unwrap().is_empty() {
+            buf.end_at = buf.pushed;
+        }
+        drop(buf);
         if !more {
+            // Closing the file is not for the sample-queue lock.
             *source = None;
-            if shared.queue.lock().unwrap().is_empty() {
-                buf.end_at = buf.pushed;
-            }
+        }
+        drop(source);
+        if starved {
+            // Waiting on a download: seeks and track changes must not block on us.
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 }
@@ -885,7 +1242,7 @@ fn decoder_loop(shared: Arc<Shared>) {
 impl AudioPlayer {
     pub fn new() -> Result<Self, AudioError> {
         let shared = Arc::new(Shared {
-            buffer: Mutex::new(Buffer {
+            buffer: RtMutex::new(Buffer {
                 samples: VecDeque::with_capacity(48_000 * 4),
                 pushed: 0,
                 consumed: 0,
@@ -909,6 +1266,7 @@ impl AudioPlayer {
             released: AtomicBool::new(false),
             eq: Mutex::new(Vec::new()),
             eq_version: AtomicU64::new(0),
+            glitches: Glitches::default(),
         });
 
         let (stream, output) = build_stream(&shared, None, false)?;
@@ -1113,18 +1471,21 @@ impl AudioPlayer {
         start_at: Duration,
     ) -> Result<(), AudioError> {
         let mut opened = AudioSource::open(item)?;
-        let actual_start = if start_at.is_zero() {
-            Duration::ZERO
+        let actual_start = if start_at <= opened.offset {
+            opened.position()
         } else {
             match opened.seek(start_at) {
                 Ok(()) => start_at,
                 Err(e) => {
-                    tracing::warn!(
+                    // The bytes at `start_at` are not on disk yet: play from the
+                    // head of this file (its first fragment's track time) and let
+                    // the caller retry the seek once they arrive.
+                    tracing::info!(
                         ?start_at,
-                        "Initial seek failed; starting from beginning: {e}"
+                        head = ?opened.offset,
+                        "Initial seek missed; playing this file from its head: {e}"
                     );
-                    opened = AudioSource::open(opened.item)?;
-                    Duration::ZERO
+                    opened.position()
                 }
             }
         };
@@ -1135,14 +1496,14 @@ impl AudioPlayer {
 
         let mut source = self.shared.source.lock().unwrap();
         self.shared.queue.lock().unwrap().clear();
-        let mut buf = self.shared.buffer.lock().unwrap();
+        let mut buf = self.shared.buffer.lock();
         self.reset_buffer(&mut buf, frames_played);
         buf.current = Some(Playing {
             item: opened.item.clone(),
             format: opened.format(),
         });
-        *source = Some(opened);
         drop(buf);
+        *source = Some(opened);
         drop(source);
         self.shared.playing.store(true, Ordering::Relaxed);
         Ok(())
@@ -1166,7 +1527,7 @@ impl AudioPlayer {
         queue.clear();
         queue.push_back(item);
         // If the decoder already hit the end of the current track, cancel the pending stop.
-        let mut buf = self.shared.buffer.lock().unwrap();
+        let mut buf = self.shared.buffer.lock();
         if buf.end_at != NONE && buf.consumed < buf.end_at {
             buf.end_at = NONE;
         }
@@ -1182,25 +1543,31 @@ impl AudioPlayer {
     pub fn cancel_upcoming(&self) {
         let mut source = self.shared.source.lock().unwrap();
         self.clear_queue();
-        let mut buf = self.shared.buffer.lock().unwrap();
+        let mut dropped = None;
+        let mut buf = self.shared.buffer.lock();
         if buf.upcoming.take().is_some() {
             let boundary = buf.switch_at;
             let remaining = boundary.saturating_sub(buf.consumed) as usize;
             buf.samples.truncate(remaining);
             buf.pushed = boundary;
             buf.switch_at = NONE;
-            *source = None;
+            dropped = source.take();
         }
         if source.is_none() && buf.current.is_some() {
             buf.end_at = buf.pushed;
         }
+        drop(buf);
+        // Closed only after the sample-queue lock is released.
+        drop(dropped);
     }
 
     /// Jump within the current track. Returns false if nothing is loaded.
     pub fn seek(&self, to: Duration) -> bool {
+        // The source lock keeps the decoder out for the whole seek. The
+        // sample-queue lock is only taken around the file work, never across
+        // it: the output callback waits on that one.
         let mut source = self.shared.source.lock().unwrap();
-        let mut buf = self.shared.buffer.lock().unwrap();
-        let Some(current_item) = buf.current.as_ref().map(|c| c.item.clone()) else {
+        let Some(current_item) = self.current_item() else {
             return false;
         };
 
@@ -1223,9 +1590,27 @@ impl AudioPlayer {
             tracing::warn!("Seek failed: {e}");
             return false;
         }
+        let sought = Playing {
+            item: src.item.clone(),
+            format: src.format(),
+        };
         let rate = self.shared.device_rate.load(Ordering::Relaxed) as f64;
+        let mut buf = self.shared.buffer.lock();
         self.reset_buffer(&mut buf, (to.as_secs_f64() * rate) as u64);
+        // Playback crossed into the next track while the file work ran: the
+        // seek was asked of this one, and its samples are what follows.
+        let replaced = match buf.current.as_ref() {
+            Some(current) if current.item.id == sought.item.id => None,
+            _ => buf.current.replace(sought),
+        };
+        drop(buf);
+        drop(replaced);
         true
+    }
+
+    fn current_item(&self) -> Option<TrackQueueItem> {
+        let buf = self.shared.buffer.lock();
+        buf.current.as_ref().map(|c| c.item.clone())
     }
 
     pub fn pause(&self) {
@@ -1233,7 +1618,7 @@ impl AudioPlayer {
     }
 
     pub fn resume(&self) {
-        if self.shared.buffer.lock().unwrap().current.is_some()
+        if self.shared.buffer.lock().current.is_some()
             && !self.shared.finished.load(Ordering::Relaxed)
         {
             if self.shared.released.load(Ordering::Relaxed) {
@@ -1256,7 +1641,7 @@ impl AudioPlayer {
     pub fn state(&self) -> PlaybackState {
         if self.is_playing() {
             PlaybackState::Playing
-        } else if self.is_finished() || self.shared.buffer.lock().unwrap().current.is_none() {
+        } else if self.is_finished() || self.shared.buffer.lock().current.is_none() {
             PlaybackState::Stopped
         } else {
             PlaybackState::Paused
@@ -1268,7 +1653,6 @@ impl AudioPlayer {
         self.shared
             .buffer
             .lock()
-            .unwrap()
             .current
             .as_ref()
             .map(|c| c.item.id.clone())
@@ -1281,7 +1665,7 @@ impl AudioPlayer {
 
     pub fn format_info(&self) -> Option<FormatInfo> {
         let (mut format, item) = {
-            let buf = self.shared.buffer.lock().unwrap();
+            let buf = self.shared.buffer.lock();
             let current = buf.current.as_ref()?;
             (current.format, current.item.clone())
         };
@@ -1294,7 +1678,7 @@ impl AudioPlayer {
     /// Bitrate to report for the current source when its file cannot tell
     /// (a stream being written as it plays).
     pub fn set_source_bitrate(&self, kbps: u32) {
-        if let Some(current) = self.shared.buffer.lock().unwrap().current.as_mut() {
+        if let Some(current) = self.shared.buffer.lock().current.as_mut() {
             current.format.bitrate_kbps = kbps;
         }
     }
@@ -1304,9 +1688,10 @@ impl AudioPlayer {
         self.shared.playing.store(false, Ordering::Relaxed);
         let mut source = self.shared.source.lock().unwrap();
         self.shared.queue.lock().unwrap().clear();
-        let mut buf = self.shared.buffer.lock().unwrap();
+        let mut buf = self.shared.buffer.lock();
         self.reset_buffer(&mut buf, 0);
         buf.current = None;
+        drop(buf);
         *source = None;
     }
 
@@ -1315,7 +1700,7 @@ impl AudioPlayer {
     /// negative holds back (plays silence first). Never crosses into the next
     /// track. Returns how many frames it actually moved.
     pub fn nudge(&self, frames: i64) -> i64 {
-        let mut buf = self.shared.buffer.lock().unwrap();
+        let mut buf = self.shared.buffer.lock();
         if frames >= 0 {
             let boundary = [buf.switch_at, buf.end_at]
                 .into_iter()
@@ -1727,6 +2112,14 @@ mod tests {
     /// carrying 16-bit mono 48 kHz PCM (`sowt`) so Symphonia's `IsoMp4Reader` runs its exact
     /// `try_new`, `next_packet`, and `seek` code paths in deterministic unit tests.
     fn minimal_fmp4_head_and_tail() -> (Vec<u8>, Vec<u8>) {
+        let (init, frags) = fmp4_init_and_fragments(4, 3);
+        let head = [init, frags[0].clone(), frags[1].clone()].concat();
+        (head, frags[2].clone())
+    }
+
+    /// `ftyp`+`moov` init plus `count` fragments of `samples` 48 kHz mono PCM
+    /// frames each, numbered from the start of the track (like DASH segments).
+    fn fmp4_init_and_fragments(samples: usize, count: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
         fn atom(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
             let len = (8 + payload.len()) as u32;
             let mut v = Vec::with_capacity(len as usize);
@@ -1811,10 +2204,9 @@ mod tests {
         let moov = atom(b"moov", &[mvhd, trak, mvex].concat());
 
         let make_fragment = |seq: u32, decode_time: u64| -> Vec<u8> {
-            let samples = 4usize; // 4 PCM samples per fragment
             let mut pcm = Vec::with_capacity(samples * 2);
             for i in 0..samples {
-                let s = (i as i16 + 1) * 4000;
+                let s = ((i % 8) as i16 + 1) * 4000;
                 pcm.extend_from_slice(&s.to_le_bytes());
             }
             let mfhd = full_atom(b"mfhd", 0, 0, &seq.to_be_bytes());
@@ -1831,9 +2223,72 @@ mod tests {
             [moof, mdat].concat()
         };
 
-        let head = [ftyp, moov, make_fragment(1, 0), make_fragment(2, 4)].concat();
-        let tail = make_fragment(3, 8);
-        (head, tail)
+        let init = [ftyp, moov].concat();
+        let frags = (0..count)
+            .map(|k| make_fragment(k as u32 + 1, (k * samples) as u64))
+            .collect();
+        (init, frags)
+    }
+
+    /// A `.tmp` rebuilt from a mid-track DASH block keeps track time: its
+    /// head sits at the first fragment's `tfdt`, seeks are absolute, and a
+    /// seek before the head is refused instead of landing somewhere else.
+    #[test]
+    fn mid_track_head_keeps_track_time() {
+        let dir = std::env::temp_dir().join(format!("tide_midhead_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join("track.tmp");
+        // 10 fragments of 0.1 s; the playable head holds 0.6 s .. 0.8 s.
+        let (init, frags) = fmp4_init_and_fragments(4_800, 10);
+        std::fs::write(
+            &tmp,
+            [init.clone(), frags[6].clone(), frags[7].clone()].concat(),
+        )
+        .unwrap();
+
+        let mut src = AudioSource::open(item(&tmp, 1.0)).unwrap();
+        assert_eq!(src.offset, Duration::from_millis(600));
+        assert_eq!(src.position(), Duration::from_millis(600));
+
+        // Before the head: refused (Symphonia alone would land at 0.6 s + 0.3 s).
+        assert!(src.seek(Duration::from_millis(300)).is_err());
+        assert_eq!(src.position(), Duration::from_millis(600));
+        // Inside the head: absolute track time.
+        src.seek(Duration::from_millis(650)).unwrap();
+        assert_eq!(src.position(), Duration::from_millis(650));
+
+        // Drain to the end of the downloaded bytes: the reader reports starvation
+        // instead of sleeping (the decoder thread waits with no lock held).
+        let mut out = Vec::new();
+        let t = Instant::now();
+        while !src.starved {
+            assert!(src.read_stereo(48_000, &mut out).unwrap());
+        }
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert_eq!(src.position(), Duration::from_millis(800));
+
+        // The cache rebuilds the head (rename over the `.tmp`) for another seek;
+        // the reader follows it because it still contains the current position.
+        let staged = dir.join("track.tmp.new");
+        let rebuilt = [
+            init,
+            frags[5].clone(),
+            frags[6].clone(),
+            frags[7].clone(),
+            frags[8].clone(),
+        ];
+        std::fs::write(&staged, rebuilt.concat()).unwrap();
+        std::fs::rename(&staged, &tmp).unwrap();
+        out.clear();
+        assert!(src.read_stereo(48_000, &mut out).unwrap());
+        assert!(
+            !out.is_empty(),
+            "reader should continue in the rebuilt head"
+        );
+        assert!(src.position() > Duration::from_millis(800));
+        assert_eq!(src.offset, Duration::from_millis(500));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
