@@ -25,10 +25,13 @@ use tide_macos::{VideoDownloadStats, VideoMediaInfo, VideoPlayer, VideoStatus};
 
 use super::{Ui, card_row, fmt_time, on_ui};
 
-/// How often a new frame is looked for: often enough for 120 Hz displays.
-const FRAME_POLL: Duration = Duration::from_millis(8);
-/// Player bar, Now Playing and end-of-video checks run every this many polls (~250 ms).
-const STATUS_EVERY: u32 = 30;
+/// Player bar, Now Playing and end-of-video checks, about four times a second.
+const STATUS_PERIOD: Duration = Duration::from_millis(250);
+
+fn status_every() -> u32 {
+    let frame = crate::platform::frame_interval().as_nanos().max(1);
+    (STATUS_PERIOD.as_nanos() / frame).max(1) as u32
+}
 /// Keep long sessions from growing the chunk grid without limit.
 const MAX_DEBUG_CHUNKS: u64 = 4096;
 /// The soundtrack is nudged once it is this far off the picture (seconds).
@@ -427,7 +430,7 @@ impl Ui {
                 app.set_video_frame(Image::from_rgba8(buf));
             }
             v.polls = v.polls.wrapping_add(1);
-            let check = v.polls.is_multiple_of(STATUS_EVERY);
+            let check = v.polls.is_multiple_of(status_every());
             // Held for the soundtrack: it is starting, not paused.
             let held = v.audio.hold_since.is_some() && v.audio.resume;
             (
@@ -542,11 +545,15 @@ impl Ui {
         }
         let timer = slint::Timer::default();
         let weak = Rc::downgrade(self);
-        timer.start(slint::TimerMode::Repeated, FRAME_POLL, move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.video_poll();
-            }
-        });
+        timer.start(
+            slint::TimerMode::Repeated,
+            crate::platform::frame_interval(),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.video_poll();
+                }
+            },
+        );
         v.timer = Some(timer);
     }
 

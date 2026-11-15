@@ -1,10 +1,78 @@
 // Main content views.
 import { ScrollView } from "std-widgets.slint";
 import { TrackMenuButton } from "context-menu.slint";
+import { HeaderTools } from "chrome.slint";
+import { MinimizeButton } from "common.slint";
 import { MaxLogin } from "settings.slint";
 import { App, Theme, EditableInput, Icon, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
 
-// ---------------------------------------------------------------- cards
+// ---------------------------------------------------------------- items
+//
+// Two kinds of item, each with one fixed behaviour wherever it appears:
+//
+//   GridItem  big artwork on top (carousels, grids, videos). Hover shows play /
+//             heart / More on the artwork; the play button plays, the rest opens.
+//   SlimItem  artwork left, two lines of text (shortcuts, feed rows, search,
+//             artist releases). Hover fades the row and puts a play button on the
+//             artwork; the artwork plays, the rest opens (a track plays), More
+//             sits on the right.
+//
+// Every item speaks `CardData` and only calls App.play-card / App.open-card /
+// App.request-card-menu. The controller decides what each kind means (a
+// "track" card plays from the section it is in, and gets the track menu).
+
+// Shared item helpers.
+global Items {
+    // A section track as a slim item.
+    public pure function from-track(t: TrackData) -> CardData {
+        return {
+            id: t.id,
+            kind: "track",
+            title: t.title,
+            subtitle: t.artist,
+            image: t.cover,
+            explicit: t.explicit,
+            fresh: t.fresh,
+        };
+    }
+    // Kinds that have a context menu.
+    public pure function has-menu(kind: string) -> bool {
+        return kind == "album" || kind == "playlist" || kind == "mix" || kind == "artist"
+            || kind == "video" || kind == "folder" || kind == "track";
+    }
+    // Kinds that can be played straight from their artwork.
+    public pure function playable(kind: string) -> bool {
+        return kind != "page" && kind != "folder";
+    }
+}
+
+// An item that arrived with a background refresh grows in on its own instead
+// of the page redrawing.
+component FreshItem inherits Rectangle {
+    in property <bool> fresh;
+    property <bool> shown: !root.fresh;
+    property <float> pop: root.shown ? 1 : 0;
+    animate pop { duration: 480ms; easing: cubic-bezier(0.34, 1.45, 0.64, 1); }
+    opacity: min(1, root.pop * 1.5);
+    transform-scale: 0.86 + 0.14 * root.pop;
+    // A beat after the first frame, so the animation starts from 0.
+    Timer {
+        interval: 40ms;
+        running: !root.shown;
+        triggered => { root.shown = true; }
+    }
+}
+
+// Pointer target for an item: right-click opens the item's menu where it was clicked.
+component ItemTouch inherits TouchArea {
+    in property <CardData> card;
+    mouse-cursor: pointer;
+    pointer-event(e) => {
+        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+            App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+        }
+    }
+}
 
 // Heart / More on cover: circular hover plate. Folders keep a filled plate.
 component OverlayAction inherits Rectangle {
@@ -37,24 +105,23 @@ component OverlayAction inherits Rectangle {
     }
 }
 
-// Play / My Collection / More on artwork. Folders keep the teal tile and only show More.
+// GridItem artwork hover: Play / My Collection / More. Folders keep the teal
+// tile and only show More.
 component CoverHover inherits Rectangle {
     in property <CardData> card;
     in property <bool> show: false;
-    in property <bool> enabled: true;
     in property <length> play-d: 40px;
     in property <length> inset: 10px;
     property <bool> folder: card.kind == "folder";
     property <bool> playing: App.playing-card-id == card.id && App.playing-card-kind == card.kind;
     property <bool> heart: card.kind == "album" || card.kind == "video" || (card.kind == "playlist" && card.by != "Me" && card.by != "");
-    property <bool> more: folder || card.kind == "album" || card.kind == "playlist" || card.kind == "mix" || card.kind == "artist" || card.kind == "video";
     property <bool> playing-now: root.playing && App.playing;
     property <length> action-d: folder ? max(28px, min(36px, root.play-d * 0.8)) : root.play-d;
     property <length> action-icon: max(16px, root.action-d * 0.45);
     // Child buttons steal parent hover; keep the overlay up while any of them is hot.
     out property <bool> hovered: play-ta.has-hover || more-btn.hovered || heart-btn.hovered;
     property <bool> on: show || hovered;
-    visible: enabled && on && card.kind != "page";
+    visible: on && card.kind != "page";
     background: folder ? transparent : #00000099;
     clip: true;
 
@@ -67,19 +134,10 @@ component CoverHover inherits Rectangle {
         border-radius: root.play-d / 2;
         background: white;
         transform-scale: play-ta.has-hover ? 1.12 : 1;
-        animate transform-scale {
-            duration: 150ms;
-            easing: ease-out;
-        }
+        animate transform-scale { duration: 150ms; easing: ease-out; }
         play-ta := TouchArea {
             mouse-cursor: pointer;
-            clicked => {
-                if (root.playing) {
-                    App.toggle-play();
-                } else {
-                    App.play-card(root.card);
-                }
-            }
+            clicked => { App.play-card(root.card); }
         }
         Icon {
             source: root.playing-now ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
@@ -89,7 +147,7 @@ component CoverHover inherits Rectangle {
     }
 
     more-btn := OverlayAction {
-        visible: root.on && root.more;
+        visible: root.on && Items.has-menu(root.card.kind);
         x: parent.width - root.inset - self.width - (!root.folder && root.heart ? self.width + 4px : 0px);
         y: parent.height - root.inset - self.height;
         diameter: root.action-d;
@@ -114,22 +172,53 @@ component CoverHover inherits Rectangle {
     }
 }
 
-component MediaCard inherits Rectangle {
+// SlimItem artwork hover: a scrim and a centred play button fade in; the whole
+// artwork plays the item.
+component ArtPlay inherits Rectangle {
     in property <CardData> card;
+    in property <bool> show: false;
+    out property <bool> hovered: ta.has-hover;
+    property <bool> live: Items.playable(root.card.kind);
+    background: #000000a0;
+    opacity: root.live && root.show ? 1 : 0;
+    animate opacity { duration: 160ms; easing: ease-out; }
+    clip: true;
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(30px, root.width * 0.64);
+        height: self.width;
+        border-radius: self.width / 2;
+        background: white;
+        transform-scale: ta.has-hover ? 1.12 : 1;
+        animate transform-scale { duration: 150ms; easing: ease-out; }
+        Icon {
+            // The triangle's optical centre sits right of its box centre.
+            x: (parent.width - self.width) / 2 + 1px;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("icons/play.svg");
+            size: parent.width * 0.45;
+            tint: black;
+        }
+    }
+    // Not playable (folders, pages): clicks fall through to the row and open it.
+    ta := ItemTouch {
+        card: root.card;
+        enabled: root.live;
+        clicked => { App.play-card(root.card); }
+    }
+}
+
+component GridItem inherits FreshItem {
+    in property <CardData> card;
+    fresh: card.fresh;
     // Videos are 16:9 stills with a length line ("2 MIN") under the artists.
     property <bool> wide: card.kind == "video";
     property <length> art-h: wide ? self.width * 9 / 16 : self.width;
     height: self.art-h + (wide ? 100px : 76px);
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        pointer-event(e) => {
-            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-            }
-        }
-        clicked => {
-            App.open-card(root.card);
-        }
+    body := ItemTouch {
+        card: root.card;
+        clicked => { App.open-card(root.card); }
     }
 
     CardArt {
@@ -146,7 +235,7 @@ component MediaCard inherits Rectangle {
         width: root.width;
         height: root.art-h;
         card: root.card;
-        show: ta.has-hover;
+        show: body.has-hover;
         play-d: root.wide ? min(56px, root.art-h * 0.36) : min(44px, root.width * 0.28);
         inset: max(8px, root.width * 0.05);
     }
@@ -201,137 +290,83 @@ component MediaCard inherits Rectangle {
     }
 }
 
-// Compact tile: artwork left, two lines of text.
-component RowCard inherits Rectangle {
+component SlimItem inherits FreshItem {
     in property <CardData> card;
-    in property <bool> tile: false;
-    in property <length> art: 48px;
-    // Home shortcuts keep CoverHover. Feed compact rows do not.
-    in property <bool> overlay: true;
-    // Feed rows play on click; tiles / search / artist rows open the page.
-    in property <bool> play-on-click: false;
-    height: tile ? 66px : 62px;
+    // Grey tile (Home shortcuts, search) rather than a bare list row.
+    in property <bool> filled: false;
+    in property <length> art: filled ? 48px : 62px;
+    fresh: card.fresh;
+    property <length> inset: filled ? 9px : 0px;
+    property <length> art-radius: card.kind == "artist" ? root.art / 2 : 3px;
+    // Child targets steal the row's hover; any of them keeps the row hot.
+    property <bool> hot: body.has-hover || art-play.hovered || more.hovered;
+    property <bool> active: card.kind == "track"
+        ? App.current-id == card.id
+        : App.playing-card-id == card.id && App.playing-card-kind == card.kind;
+    height: filled ? 66px : 62px;
     border-radius: 4px;
-    background: tile ? ((ta.has-hover || hover.hovered) ? #1e1e1e : Theme.surface) : ((ta.has-hover || hover.hovered) ? #111111 : transparent);
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        pointer-event(e) => {
-            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-            }
-        }
-        clicked => {
-            if (root.play-on-click) {
-                App.play-card(root.card);
-            } else {
-                App.open-card(root.card);
-            }
-        }
+    background: root.filled
+        ? (root.hot ? #262626 : Theme.surface)
+        : (root.hot ? #111111 : transparent);
+    animate background { duration: 160ms; easing: ease-out; }
+
+    body := ItemTouch {
+        card: root.card;
+        clicked => { App.open-card(root.card); }
     }
 
     CardArt {
-        x: tile ? 9px : 0px;
+        x: root.inset;
         width: root.art;
         height: root.art;
         card: root.card;
-        radius: 3px;
+        radius: root.art-radius;
     }
 
-    hover := CoverHover {
-        x: tile ? 9px : 0px;
+    art-play := ArtPlay {
+        x: root.inset;
         y: (parent.height - root.art) / 2;
         width: root.art;
         height: root.art;
-        border-radius: 3px;
+        border-radius: root.art-radius;
         card: root.card;
-        enabled: root.overlay;
-        show: ta.has-hover;
-        play-d: min(28px, root.art * 0.5);
-        inset: 4px;
+        show: root.hot;
     }
 
     VerticalLayout {
-        x: (tile ? 9px : 0px) + root.art + 13px;
-        width: root.width - self.x - 12px;
+        x: root.inset + root.art + 13px;
+        width: root.width - self.x - 48px;
         alignment: center;
         spacing: 3px;
         TitleWithQuality {
-            height: tile ? 18px : 20px;
+            height: root.filled ? 18px : 20px;
             title: card.title;
             quality: card.kind == "album" && card.quality == "MAX" ? card.quality : "";
-            font-size: tile ? 13.5px : 15px;
-            font-weight: tile ? Theme.demibold : Theme.medium;
+            explicit: card.explicit;
+            title-color: root.active ? App.accent : Theme.text;
+            font-size: root.filled ? 13.5px : 15px;
+            font-weight: root.filled ? Theme.demibold : Theme.medium;
         }
 
         if card.subtitle != "": Text {
             text: card.subtitle;
             color: Theme.text-secondary;
-            font-size: tile ? 13px : 15px;
+            font-size: root.filled ? 13px : 15px;
             overflow: elide;
         }
     }
-}
 
-component RowTrack inherits Rectangle {
-    in property <TrackData> track;
-    callback play();
-    property <bool> active: track.id == App.current-id;
-    height: 62px;
-    border-radius: 4px;
-    background: ta.has-hover ? #111111 : transparent;
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        pointer-event(e) => {
-            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
-                more.open-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-            }
-        }
+    more := OverlayAction {
+        visible: root.hot && Items.has-menu(root.card.kind);
+        x: root.width - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        diameter: 34px;
+        icon-size: 16px;
+        icon: @image-url("icons/more.svg");
         clicked => {
-            root.play();
+            App.request-card-menu(root.card, self.absolute-position.x, self.absolute-position.y + self.height);
         }
-    }
-
-    Cover {
-        x: 0;
-        width: 62px;
-        height: 62px;
-        source: track.cover;
-        radius: 3px;
-    }
-
-    VerticalLayout {
-        x: 75px;
-        width: root.width - 75px - 56px;
-        alignment: center;
-        spacing: 3px;
-        HorizontalLayout {
-            alignment: start;
-            spacing: 8px;
-            Text {
-                text: track.title;
-                color: active ? App.accent : Theme.text;
-                font-size: 15px;
-                font-weight: 500;
-                overflow: elide;
-            }
-
-            if track.explicit: VerticalLayout {
-                alignment: center;
-                ExplicitBadge { }
-            }
-        }
-
-        Text {
-            text: track.artist;
-            color: Theme.text-secondary;
-            font-size: 15px;
-            overflow: elide;
-        }
-    }
-
-    more := TrackMenuButton {
-        x: root.width - 44px;
-        track-id: track.id;
+        context-requested(x, y) => { App.request-card-menu(root.card, x, y); }
     }
 }
 
@@ -496,7 +531,7 @@ component Carousel inherits Rectangle {
                 duration: 280ms;
                 easing: ease-out;
             }
-            for card[i] in section.cards: MediaCard {
+            for card[i] in section.cards: GridItem {
                 x: i * (card-w + gap);
                 y: 0;
                 width: card-w;
@@ -514,7 +549,8 @@ component RowGrid inherits Rectangle {
     property <length> gap-x: tiles ? 9px : 30px;
     property <length> row-h: tiles ? 75px : 79px;
     property <length> col-w: (self.width - (cols - 1) * gap-x) / cols;
-    property <int> count: section.layout == "tracks" ? section.tracks.length : section.cards.length;
+    // Feed rows (Recently played) mix collections and single tracks: tracks follow the cards.
+    property <int> count: section.layout == "tracks" ? section.tracks.length : section.layout == "rows" ? section.cards.length + section.tracks.length : section.cards.length;
     property <length> head: tiles ? 0px : 50px;
     height: head + ceil(count / cols) * row-h - (tiles ? 9px : 17px);
     property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan) / row-h));
@@ -532,29 +568,27 @@ component RowGrid inherits Rectangle {
         y: 0;
         title: section.title;
     }
-    if section.layout == "tracks": Rectangle {
+    // Feed rows (Recently played) list their tracks after the cards.
+    property <int> offset: section.layout == "tracks" ? 0 : section.cards.length;
+    Rectangle {
         y: head;
-        for track[i] in section.tracks: RowTrack {
-            x: mod(i, cols) * (col-w + gap-x);
-            y: floor(i / cols) * row-h;
-            width: col-w;
-            track: track;
-            play => {
-                App.play-section-track(root.section-index, track.id);
+        if section.layout != "tracks": Rectangle {
+            for card[i] in section.cards: SlimItem {
+                x: mod(i, cols) * (col-w + gap-x);
+                y: floor(i / cols) * row-h;
+                width: col-w;
+                card: card;
+                filled: root.tiles;
             }
         }
-    }
-    if section.layout != "tracks": Rectangle {
-        y: head;
-        for card[i] in section.cards: RowCard {
-            x: mod(i, cols) * (col-w + gap-x);
-            y: floor(i / cols) * row-h;
-            width: col-w;
-            card: card;
-            tile: root.tiles;
-            art: root.tiles ? 48px : 62px;
-            overlay: root.tiles;
-            play-on-click: !root.tiles;
+        if section.layout == "tracks" || section.layout == "rows": Rectangle {
+            for track[j] in section.tracks: SlimItem {
+                x: mod(root.offset + j, cols) * (col-w + gap-x);
+                y: floor((root.offset + j) / cols) * row-h;
+                width: col-w;
+                card: Items.from-track(track);
+                filled: root.tiles;
+            }
         }
     }
 }
@@ -1135,7 +1169,7 @@ component VideoGrid inherits Rectangle {
         y: 50px + (root.first-row + floor(slot / root.cols)) * root.row-h;
         width: root.card-w;
         height: root.row-h - root.gap;
-        if index < root.cards.length: MediaCard {
+        if index < root.cards.length: GridItem {
             width: parent.width;
             card: root.cards[parent.index];
         }
@@ -1196,6 +1230,17 @@ export component TracksView inherits Rectangle {
     // Hand-rolled virtualisation so the header scrolls with the rows.
     property <int> first: max(0, floor((-sv.content-y - header-h) / row-h));
     property <int> visible-rows: ceil(self.height / row-h) + 2;
+    property <int> reveal-request: App.reveal-track-revision;
+    function reveal-track() {
+        if (App.reveal-track-index >= 0 && App.reveal-track-index < App.tracks.length) {
+            App.scroll-y = clamp(root.height / 2 - root.header-h - (App.reveal-track-index + 0.5) * root.row-h,
+                min(0px, root.height - sv.content-height), 0px);
+        }
+    }
+    changed reveal-request => { root.reveal-track(); }
+    changed height => { root.reveal-track(); }
+    changed header-h => { root.reveal-track(); }
+    init => { root.reveal-track(); }
     changed first => {
         App.rows-visible(first, visible-rows);
     }
@@ -1205,8 +1250,10 @@ export component TracksView inherits Rectangle {
     sv := ScrollView {
         content-y <=> App.scroll-y;
         content-width: root.width;
-        content-height: artist-page || album-page || search-page ? artist-content.y + artist-content.preferred-height + 48px
-            : header-h + row-count * row-h + 48px;
+        // Leave enough room to center even the final track after a source jump.
+        property <length> tail: App.reveal-track-index >= 0 ? max(48px, root.height / 2) : 48px;
+        content-height: artist-page || album-page || search-page ? artist-content.y + artist-content.preferred-height + self.tail
+            : header-h + row-count * row-h + self.tail;
         if artist-page || album-page: Rectangle {
             y: 0;
             width: root.width;
@@ -1322,12 +1369,12 @@ export component TracksView inherits Rectangle {
                 title: "Artists & Albums";
                 view-all: false;
             }
-            for card[i] in App.search-cards: RowCard {
+            for card[i] in App.search-cards: SlimItem {
                 x: mod(i, search-cols) * (parent.tile-w + 12px);
                 y: 38px + floor(i / search-cols) * 66px;
                 width: parent.tile-w;
                 card: card;
-                tile: true;
+                filled: true;
             }
         }
         if artist-page: Rectangle {
@@ -1678,17 +1725,19 @@ export component TracksView inherits Rectangle {
                     title: "Albums";
                     view-all: false;
                 }
-                for card in App.artist-albums: RowCard {
+                for card in App.artist-albums: SlimItem {
                     width: parent.width;
                     card: card;
+                    art: 48px;
                 }
                 if App.artist-singles.length > 0: SectionHeader {
                     title: "EPs & Singles";
                     view-all: false;
                 }
-                for card in App.artist-singles: RowCard {
+                for card in App.artist-singles: SlimItem {
                     width: parent.width;
                     card: card;
+                    art: 48px;
                 }
             }
             if artist-page && show-tracks && App.artist-albums.length > 0: Carousel {
@@ -2059,7 +2108,7 @@ export component GridView inherits Rectangle {
                         upto: min(n, (first-row + vis-rows) * root.cols);
                         request(from, upto) => { App.grid-art(g, from, upto); }
                     }
-                    for card[i] in group.cards: MediaCard {
+                    for card[i] in group.cards: GridItem {
                         x: mod(i, root.cols) * (root.card-w + root.gap);
                         y: floor(i / root.cols) * root.cell-h;
                         width: root.card-w;
@@ -2095,40 +2144,63 @@ export component StubView inherits Rectangle {
 // ---------------------------------------------------------------- now playing
 
 export component NowPlayingView inherits Rectangle {
-    background: #1a1a1a;
+    out property <float> expansion: App.show-now-playing ? 1 : 0;
+    animate expansion { duration: 250ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    // Re-evaluated when the animation starts and ends, not every frame, so it
+    // doesn't invalidate the cached layers below.
+    out property <bool> presenting: App.show-now-playing || root.expansion > 0;
+    // Fading a group needs an offscreen layer; Skia sizes it to the whole
+    // window, several times a frame. While the view animates, each faded group
+    // renders once into a texture of its own size, which is blended instead.
+    // Off at rest, where the cache would crop hover tips. Compare `expansion`
+    // directly: a property derived from an animated one isn't refreshed
+    // while the animation runs.
+    // Faded through its colours: `opacity` with `visible` makes it a group.
     Rectangle {
-        background: @linear-gradient(180deg, App.np-tint 0%, App.np-tint.darker(0.6) 55%, #1a1716 100%);
+        visible: root.presenting;
+        background: @linear-gradient(180deg, App.np-tint.with-alpha(root.expansion) 0%, App.np-tint.darker(0.6).with-alpha(root.expansion) 55%, #1a1716.with-alpha(root.expansion) 100%);
     }
+    // The collapsed artwork lets the original player-bar hit area handle clicks.
+    TouchArea { enabled: root.presenting; }
+    DragArea { y: 0px; height: 64px; enabled: App.show-now-playing; }
 
-    // Swallow clicks so they don't reach the view underneath.
-    TouchArea { }
-
-    DragArea {
-        y: 0;
-        height: 64px;
-    }
-
-    property <length> art: min(self.height - 96px - 200px, self.width * 0.40);
-    Cover {
-        x: max(48px, root.width * 0.28 - self.width / 2);
-        y: (root.height - 96px - self.height) / 2 + 20px;
-        width: art;
-        height: art;
-        source: App.np-cover-large;
-        radius: 2px;
-        drop-shadow-blur: 60px;
+    // Destination-size art, scaled down to the player slot. Animating width/height
+    // or drop-shadow-blur rebuilds a ~1000px Skia blur every frame.
+    property <length> art: max(0px, min(self.height - App.player-height - (App.compact-layout ? 100px : 200px), self.width * 0.40));
+    property <length> slot: 62px;
+    property <length> slot-x: 16px;
+    property <length> slot-y: root.height - App.player-height + 17px;
+    property <length> dest-x: max(48px, root.width * 0.28 - root.art / 2);
+    property <length> dest-y: (root.height - App.player-height - root.art) / 2 + 20px;
+    property <float> grow: root.art > 0px ? slot / root.art + (1 - slot / root.art) * root.expansion : 1;
+    Rectangle {
+        x: root.slot-x + (root.dest-x - root.slot-x) * root.expansion;
+        y: root.slot-y + (root.dest-y - root.slot-y) * root.expansion;
+        width: root.art;
+        height: root.art;
+        transform-origin: { x: 0px, y: 0px };
+        transform-scale: root.grow;
+        border-radius: 4px;
+        drop-shadow-blur: root.presenting ? 60px : 0;
         drop-shadow-color: #00000080;
+        Cover {
+            width: 100%;
+            height: 100%;
+            source: App.np-cover-large.width > 0 ? App.np-cover-large : App.np-cover;
+            radius: (4px - 2px * root.expansion) / max(root.grow, 0.001);
+        }
     }
-
     VerticalLayout {
         x: root.width * 0.51;
         y: 96px;
         width: root.width * 0.37;
         height: root.height - 96px - 110px;
+        visible: root.presenting;
         alignment: center;
         spacing: 30px;
         if App.lyrics.length == 0: Text {
             text: App.lyrics-status;
+            opacity: root.expansion;
             color: #ffffff80;
             font-size: 28px;
             font-weight: 700;
@@ -2136,47 +2208,49 @@ export component NowPlayingView inherits Rectangle {
         }
         for line in App.lyrics: Text {
             text: line.text;
+            opacity: root.expansion;
             color: line.active ? white : #ffffff66;
             font-size: line.active ? 42px : 38px;
             font-weight: 700;
             wrap: word-wrap;
         }
     }
-
-    HorizontalLayout {
-        x: root.width - self.width - 16px;
-        y: 12px;
-        width: self.preferred-width;
-        height: 40px;
-        spacing: 10px;
-        VerticalLayout {
-            alignment: center;
-            DebugButton { }
+    // Lyrics | Search, Debug, Profile, using the same tools as the other views.
+    Rectangle {
+        x: header.x - 101px;
+        y: 0px;
+        width: 101px;
+        height: 64px;
+        opacity: root.expansion;
+        cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
+        visible: root.presenting;
+        Rectangle {
+            x: 0px;
+            y: 15px;
+            width: 68px;
+            height: 34px;
+            border-radius: 17px;
+            background: white;
+            Text { text: "Lyrics"; color: black; font-size: 14px; font-weight: 600; }
         }
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 68px;
-                height: 34px;
-                border-radius: 17px;
-                background: white;
-                Text {
-                    text: "Lyrics";
-                    color: black;
-                    font-size: 14px;
-                    font-weight: 600;
-                }
-            }
-        }
-
-        IconButton {
-            icon: @image-url("icons/chevron-down.svg");
-            size: 18px;
-            tint: #ffffffb0;
-            clicked => {
-                App.show-now-playing = false;
-            }
-        }
+        Rectangle { x: 84px; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
+    }
+    header := HeaderTools {
+        x: parent.width - self.width;
+        y: 0px;
+        active: App.show-now-playing;
+        visible: root.presenting;
+        opacity: root.expansion;
+        cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
+    }
+    MinimizeButton {
+        x: root.width - self.width - 32px;
+        y: root.height - App.player-height - 52px;
+        opacity: root.expansion;
+        cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
+        visible: root.presenting;
+        enabled: App.show-now-playing;
+        clicked => { App.show-now-playing = false; }
     }
 }
 
@@ -2189,94 +2263,99 @@ export component LoginView inherits Rectangle {
         height: 64px;
     }
 
-    VerticalLayout {
-        alignment: center;
-        HorizontalLayout {
+    ScrollView {
+        content-height: max(root.height, 472px);
+        VerticalLayout {
+            height: max(root.height, 472px);
             alignment: center;
-            Rectangle {
-                width: 520px;
-                height: 440px;
-                border-radius: 16px;
-                background: #0e0e0e;
-                border-width: 1px;
-                border-color: Theme.border;
-                VerticalLayout {
-                    padding: 40px;
-                    spacing: 18px;
-                    alignment: center;
-                    Text {
-                        text: "T I D E";
-                        color: Theme.text;
-                        font-size: 30px;
-                        font-weight: 800;
-                        horizontal-alignment: center;
-                    }
-
-                    Text {
-                        text: App.user-code == "" ? "Log in to start listening in Max quality." : "Enter this code at link.tidal.com";
-                        color: Theme.text-secondary;
-                        font-size: 15px;
-                        horizontal-alignment: center;
-                        wrap: word-wrap;
-                    }
-
-                    // Default: Max-quality login in the default browser.
-                    if App.user-code == "": MaxLogin {
-                        centered: true;
-                    }
-                    if App.user-code != "": Rectangle {
-                        height: 72px;
-                        border-radius: 10px;
-                        background: #161616;
-                        EditableInput {
-                            text: App.user-code;
-                            read-only: true;
-                            color: Theme.lossless;
-                            font-size: 34px;
-                            font-weight: 700;
-                            letter-spacing: 6px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    if App.user-code != "": HorizontalLayout {
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: min(520px, root.width - 32px);
+                    height: 440px;
+                    border-radius: 16px;
+                    background: #0e0e0e;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 40px;
+                        spacing: 18px;
                         alignment: center;
-                        PillButton {
-                            width: 240px;
-                            text: "Open browser";
-                            primary: true;
-                            clicked => {
-                                App.open-browser();
-                            }
-                        }
-                    }
-                    if App.auth-status != "": Text {
-                        text: App.auth-status;
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        horizontal-alignment: center;
-                        wrap: word-wrap;
-                    }
-                    Rectangle {
-                        height: 1px;
-                        background: Theme.border;
-                    }
-
-                    // Fallback: device code (TIDAL limits it to 16-bit, 44.1 kHz).
-                    Rectangle {
-                        height: 20px;
-                        fallback := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                App.login();
-                            }
+                        Text {
+                            text: "T I D E";
+                            color: Theme.text;
+                            font-size: 30px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
                         }
 
                         Text {
-                            text: "Trouble logging in? Use a device code instead (16-bit, 44.1 kHz only)";
-                            color: fallback.has-hover ? Theme.text : Theme.text-secondary;
+                            text: App.user-code == "" ? "Log in to start listening in Max quality." : "Enter this code at link.tidal.com";
+                            color: Theme.text-secondary;
+                            font-size: 15px;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        // Default: Max-quality login in the default browser.
+                        if App.user-code == "": MaxLogin {
+                            centered: true;
+                        }
+                        if App.user-code != "": Rectangle {
+                            height: 72px;
+                            border-radius: 10px;
+                            background: #161616;
+                            EditableInput {
+                                text: App.user-code;
+                                read-only: true;
+                                color: Theme.lossless;
+                                font-size: 34px;
+                                font-weight: 700;
+                                letter-spacing: 6px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if App.user-code != "": HorizontalLayout {
+                            alignment: center;
+                            PillButton {
+                                width: 240px;
+                                text: "Open browser";
+                                primary: true;
+                                clicked => {
+                                    App.open-browser();
+                                }
+                            }
+                        }
+                        if App.auth-status != "": Text {
+                            text: App.auth-status;
+                            color: Theme.text-secondary;
                             font-size: 13px;
                             horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        // Fallback: device code (TIDAL limits it to 16-bit, 44.1 kHz).
+                        Rectangle {
+                            height: 20px;
+                            fallback := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    App.login();
+                                }
+                            }
+
+                            Text {
+                                text: "Trouble logging in? Use a device code instead (16-bit, 44.1 kHz only)";
+                                color: fallback.has-hover ? Theme.text : Theme.text-secondary;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }

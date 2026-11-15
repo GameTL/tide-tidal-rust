@@ -5624,6 +5624,7 @@ version = "0.7.9"
 dependencies = [
  "anyhow",
  "arboard",
+ "core-foundation 0.9.4",
  "dirs",
  "i-slint-backend-testing",
  "i-slint-renderer-skia",
@@ -5654,6 +5655,7 @@ version = "0.7.9"
 dependencies = [
  "anyhow",
  "cpal",
+ "libc",
  "serde",
  "symphonia",
  "thiserror 2.0.21",

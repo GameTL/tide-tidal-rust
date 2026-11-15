@@ -31,6 +31,9 @@ Security › **Open Anyway**.
 - Local-first: library metadata, artwork and audio are cached on disk, so
   already-played music starts without touching the network
 - macOS media keys and Now Playing integration
+- Interface zoom from 50% to 200% in 25-point steps, remembered across launches.
+  Use **View → Zoom In / Zoom Out**, **⌘= / ⌘−** (⌘+ also works), or **⌘0**
+  for Actual Size (100%).
 
 ## Run
 
