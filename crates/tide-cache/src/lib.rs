@@ -1,6 +1,8 @@
 use rusqlite::{Connection, params};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tide_api::TrackItem;
 
@@ -21,48 +23,251 @@ pub const SCORE_HALF_LIFE_DAYS: f64 = 30.0;
 
 /// DASH init + first media segments — enough to probe and start decoding while the rest downloads.
 const PLAYBACK_READY_SEGMENTS: usize = 3;
+const DOWNLOAD_WINDOW: usize = 8;
 
-async fn write_url_range(
-    client: &reqwest::Client,
-    file: &mut std::fs::File,
-    urls: &[String],
+/// `urls[0]` is the DASH init segment; the rest are media. Maps a scrubber
+/// time onto the media URL that should be fetched first.
+///
+/// Segments are fixed-length with a shorter last one, so spreading the track
+/// evenly over them overshoots by up to a block late in the track. Start one
+/// block early so the playable head begins at or before `at_secs`.
+pub fn media_index_for_time(url_count: usize, duration_secs: f64, at_secs: f64) -> usize {
+    if url_count <= 1 {
+        return 0;
+    }
+    let media = url_count - 1;
+    let frac = if duration_secs <= 0.0 {
+        0.0
+    } else {
+        (at_secs / duration_secs).clamp(0.0, 0.999_999)
+    };
+    1 + ((frac * media as f64).floor() as usize).saturating_sub(1)
+}
+
+/// Next `limit` undownloaded URL indices: init first, then the seek block
+/// running toward the end, then earlier gaps.
+pub fn next_download_indices(have: &[bool], priority: usize, limit: usize) -> Vec<usize> {
+    if have.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(limit);
+    let push = |out: &mut Vec<usize>, i: usize| {
+        if i < have.len() && !have[i] && !out.contains(&i) && out.len() < limit {
+            out.push(i);
+        }
+    };
+    push(&mut out, 0);
+    let start = priority.max(1).min(have.len() - 1);
+    for i in start..have.len() {
+        push(&mut out, i);
+        if out.len() == limit {
+            return out;
+        }
+    }
+    for i in 1..start {
+        push(&mut out, i);
+        if out.len() == limit {
+            return out;
+        }
+    }
+    out
+}
+
+fn missing_playback_head(have: &[bool], from: usize) -> Vec<usize> {
+    if have.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if !have[0] {
+        out.push(0);
+    }
+    let start = from.max(1);
+    let need = PLAYBACK_READY_SEGMENTS.saturating_sub(1);
+    for i in (start..have.len()).take(need) {
+        if !have[i] {
+            out.push(i);
+        }
+    }
+    out
+}
+
+fn playback_head_ready(have: &[bool], from: usize) -> bool {
+    if have.is_empty() || !have[0] {
+        return false;
+    }
+    let start = from.max(1);
+    if start >= have.len() {
+        return true;
+    }
+    let need = PLAYBACK_READY_SEGMENTS.saturating_sub(1);
+    let available: Vec<usize> = (start..have.len()).take(need).collect();
+    !available.is_empty() && available.iter().all(|&i| have[i])
+}
+
+fn part_file(dir: &Path, index: usize) -> PathBuf {
+    dir.join(format!("{index:04}"))
+}
+
+fn write_playable_concat(
+    parts_dir: &Path,
+    dest: &Path,
     from: usize,
-    to: usize,
+    url_count: usize,
+) -> Result<usize, std::io::Error> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(dest)?;
+    let mut n = 0usize;
+    let mut write_idx = |file: &mut std::fs::File, i: usize| -> std::io::Result<bool> {
+        let path = part_file(parts_dir, i);
+        if !path.exists() {
+            return Ok(false);
+        }
+        file.write_all(&std::fs::read(path)?)?;
+        n += 1;
+        Ok(true)
+    };
+    if url_count == 0 {
+        return Ok(0);
+    }
+    if !write_idx(&mut file, 0)? {
+        return Ok(0);
+    }
+    let start = from.max(1);
+    for i in start..url_count {
+        if !write_idx(&mut file, i)? {
+            break;
+        }
+    }
+    file.flush()?;
+    Ok(n)
+}
+
+fn contiguous_through(have: &[bool], from: usize) -> usize {
+    let start = from.max(1);
+    if start >= have.len() || !have.get(start).copied().unwrap_or(false) {
+        return start.saturating_sub(1);
+    }
+    let mut end = start;
+    while end + 1 < have.len() && have[end + 1] {
+        end += 1;
+    }
+    end
+}
+
+/// Write the finished track next to `dest` and rename it into place, so a
+/// reader never sees a half-written `.audio`.
+fn finalize_concat(parts_dir: &Path, dest: &Path, url_count: usize) -> std::io::Result<()> {
+    let staged = dest.with_extension("audio.new");
+    write_playable_concat(parts_dir, &staged, 1, url_count)?;
+    std::fs::rename(&staged, dest)
+}
+
+fn append_part(tmp: &Path, part: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(tmp)?;
+    file.write_all(&std::fs::read(part)?)?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct LiveDownload {
+    requested_ms: AtomicU64,
+    duration_ms: AtomicU64,
+    url_count: AtomicUsize,
+    playable_from: AtomicUsize,
+    playable_gen: AtomicU64,
+    appended_through: AtomicUsize,
+}
+
+impl LiveDownload {
+    /// True when the playable `.tmp` already holds media block `index`.
+    fn covers(&self, index: usize) -> bool {
+        let from = self.playable_from.load(Ordering::Relaxed);
+        from != 0 && from <= index && index <= self.appended_through.load(Ordering::Relaxed)
+    }
+
+    fn index(&self) -> usize {
+        media_index_for_time(
+            self.url_count.load(Ordering::Relaxed),
+            self.duration_ms.load(Ordering::Relaxed) as f64 / 1000.0,
+            self.requested_ms.load(Ordering::Relaxed) as f64 / 1000.0,
+        )
+    }
+}
+
+async fn download_indices(
+    client: &reqwest::Client,
+    urls: &[String],
+    indices: &[usize],
+    parts_dir: &Path,
     on_chunk: &(dyn Fn(usize, u8, u64) + Send + Sync),
     total_bytes: &mut u64,
+    have: &mut [bool],
 ) -> Result<(), CacheError> {
-    use std::io::Write;
-    const WINDOW: usize = 8;
-    let slice = &urls[from..to];
-    for (w, window) in slice.chunks(WINDOW).enumerate() {
-        let base = from + w * WINDOW;
-        for i in 0..window.len() {
-            on_chunk(base + i, 1, *total_bytes);
+    if indices.is_empty() {
+        return Ok(());
+    }
+    for &i in indices {
+        on_chunk(i, 1, *total_bytes);
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for &i in indices {
+        let (client, url) = (client.clone(), urls[i].clone());
+        set.spawn(async move {
+            let bytes = client
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            Ok::<_, reqwest::Error>((i, bytes))
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        let (i, bytes) = joined.map_err(|e| std::io::Error::other(e.to_string()))??;
+        std::fs::write(part_file(parts_dir, i), &bytes)?;
+        *total_bytes += bytes.len() as u64;
+        if let Some(slot) = have.get_mut(i) {
+            *slot = true;
         }
-        let mut set = tokio::task::JoinSet::new();
-        for (i, url) in window.iter().enumerate() {
-            let (client, url) = (client.clone(), url.clone());
-            set.spawn(async move {
-                let bytes = client
-                    .get(&url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
-                Ok::<_, reqwest::Error>((i, bytes))
-            });
+        on_chunk(i, 2, *total_bytes);
+    }
+    Ok(())
+}
+
+fn publish_playable(
+    parts_dir: &Path,
+    tmp: &Path,
+    have: &[bool],
+    live: &LiveDownload,
+    url_count: usize,
+    replace: bool,
+) -> Result<(), CacheError> {
+    let from = live.index().max(1);
+    let prev_from = live.playable_from.load(Ordering::Relaxed);
+    let prev_through = live.appended_through.load(Ordering::Relaxed);
+    // Rebuild only when the seek block is outside the current file (and not
+    // the next block it appends): the player keeps reading the file it has.
+    let outside = prev_from == 0 || from < prev_from || from > prev_through + 1;
+    if replace || outside || !tmp.exists() {
+        if !playback_head_ready(have, from) {
+            return Ok(());
         }
-        let mut parts: Vec<Option<Vec<u8>>> = vec![None; window.len()];
-        while let Some(joined) = set.join_next().await {
-            let (i, bytes) = joined.map_err(|e| std::io::Error::other(e.to_string()))??;
-            *total_bytes += bytes.len() as u64;
-            on_chunk(base + i, 2, *total_bytes);
-            parts[i] = Some(bytes.to_vec());
-        }
-        for part in parts.into_iter().flatten() {
-            file.write_all(&part)?;
-        }
+        let through = contiguous_through(have, from);
+        let staged = tmp.with_extension("tmp.new");
+        write_playable_concat(parts_dir, &staged, from, url_count)?;
+        std::fs::rename(&staged, tmp)?;
+        live.playable_from.store(from, Ordering::Relaxed);
+        live.appended_through.store(through, Ordering::Relaxed);
+        live.playable_gen.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    let mut through_have = live.appended_through.load(Ordering::Relaxed);
+    while through_have + 1 < url_count && have.get(through_have + 1).copied() == Some(true) {
+        append_part(tmp, &part_file(parts_dir, through_have + 1))?;
+        through_have += 1;
+        live.appended_through.store(through_have, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -661,6 +866,7 @@ pub struct AudioCache {
     max_bytes: std::sync::atomic::AtomicU64,
     /// Track/quality keys with a progressive download still appending their `.tmp`.
     live_partials: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    live: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<LiveDownload>>>>,
 }
 
 fn partial_key(track_id: &str, quality: &str) -> String {
@@ -675,6 +881,7 @@ impl AudioCache {
             base_dir,
             max_bytes: (20u64 * 1024 * 1024 * 1024).into(), // 20 GB default
             live_partials: Default::default(),
+            live: Default::default(),
         })
     }
 
@@ -684,6 +891,7 @@ impl AudioCache {
             base_dir: dir,
             max_bytes: max_bytes.into(),
             live_partials: Default::default(),
+            live: Default::default(),
         })
     }
 
@@ -706,6 +914,64 @@ impl AudioCache {
             .lock()
             .unwrap()
             .contains(&partial_key(track_id, quality))
+    }
+
+    fn live_for(&self, track_id: &str, quality: &str) -> Arc<LiveDownload> {
+        self.live
+            .lock()
+            .unwrap()
+            .entry(partial_key(track_id, quality))
+            .or_default()
+            .clone()
+    }
+
+    fn drop_live(&self, track_id: &str, quality: &str) {
+        self.live
+            .lock()
+            .unwrap()
+            .remove(&partial_key(track_id, quality));
+        self.clear_partial_live(track_id, quality);
+    }
+
+    /// Point the in-flight DASH fetch at `at` so that block is downloaded first.
+    pub fn request_time(&self, track_id: &str, quality: &str, at: Duration, duration: Duration) {
+        let live = self.live_for(track_id, quality);
+        live.requested_ms
+            .store(at.as_millis() as u64, Ordering::Relaxed);
+        live.duration_ms
+            .store(duration.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// URL index the current playable `.tmp` was built from (0 if none).
+    pub fn playable_index(&self, track_id: &str, quality: &str) -> usize {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&partial_key(track_id, quality))
+            .map(|live| live.playable_from.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// True when the bytes for the requested seek block can be played now:
+    /// the track is fully cached or the playable `.tmp` holds that block.
+    pub fn requested_ready(&self, track_id: &str, quality: &str) -> bool {
+        if self.get_cached(track_id, quality).is_some() {
+            return true;
+        }
+        self.live
+            .lock()
+            .unwrap()
+            .get(&partial_key(track_id, quality))
+            .is_some_and(|live| live.covers(live.index()))
+    }
+
+    pub fn playable_generation(&self, track_id: &str, quality: &str) -> u64 {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&partial_key(track_id, quality))
+            .map(|live| live.playable_gen.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     pub fn file_path(&self, track_id: &str, quality: &str) -> PathBuf {
@@ -766,8 +1032,9 @@ impl AudioCache {
     }
 
     /// `on_chunk(index, state, bytes_so_far)` — state `1` in flight, `2` received.
-    /// When `stream_for_playback` is true, returns after [`PLAYBACK_READY_SEGMENTS`]
-    /// and keeps downloading the rest in the background.
+    /// When `stream_for_playback` is true, returns once the current seek block
+    /// (init + a couple of media segments at [`AudioCache::request_time`]) is on
+    /// disk and keeps filling the rest in the background.
     pub async fn fetch_or_cache_with(
         &self,
         track_id: &str,
@@ -781,114 +1048,127 @@ impl AudioCache {
             return Ok(cached);
         }
 
+        if !stream_for_playback && self.is_partial_live(track_id, quality) {
+            // A playback download is still filling this track in the background
+            // (and its `.tmp` may start mid-track). Let it finish instead of
+            // downloading the same segments twice.
+            while self.is_partial_live(track_id, quality) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            if let Some(cached) = self.get_cached(track_id, quality) {
+                return Ok(cached);
+            }
+        }
+
         let start = std::time::Instant::now();
         let num_segments = urls.len();
-        let ready_end = if stream_for_playback {
-            num_segments.min(PLAYBACK_READY_SEGMENTS)
-        } else {
-            num_segments
-        };
+        let dest = self.file_path(track_id, quality);
+        let tmp = dest.with_extension("tmp");
+        let parts_dir = dest.with_extension("parts");
+        std::fs::create_dir_all(&parts_dir)?;
+        if tmp.exists() && !self.is_partial_live(track_id, quality) {
+            let _ = std::fs::remove_file(&tmp);
+        }
+
+        let live = self.live_for(track_id, quality);
+        live.url_count.store(num_segments, Ordering::Relaxed);
         tracing::info!(
             track_id = %track_id,
             %quality,
             segments = num_segments,
             stream_for_playback,
-            ready_end,
+            priority = live.index(),
             "Audio cache MISS: downloading DASH segments"
         );
-        let dest = self.file_path(track_id, quality);
-        let tmp = dest.with_extension("tmp");
-        // Drop any orphan from a previous crashed download before truncating.
-        if tmp.exists() && !self.is_partial_live(track_id, quality) {
-            let _ = std::fs::remove_file(&tmp);
-        }
 
         let client = reqwest::Client::new();
-        let mut file = std::fs::File::create(&tmp)?;
+        let mut have = vec![false; num_segments];
         let mut total_bytes = 0u64;
         let hook = on_chunk.as_ref();
+        for (i, slot) in have.iter_mut().enumerate() {
+            if let Ok(meta) = std::fs::metadata(part_file(&parts_dir, i)) {
+                *slot = true;
+                total_bytes += meta.len();
+                hook(i, 2, total_bytes);
+            }
+        }
 
-        write_url_range(
-            &client,
-            &mut file,
-            urls,
-            0,
-            ready_end,
-            hook,
-            &mut total_bytes,
-        )
-        .await?;
+        if have.iter().all(|h| *h) && num_segments > 0 {
+            finalize_concat(&parts_dir, &dest, num_segments)?;
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_dir_all(&parts_dir);
+            self.drop_live(track_id, quality);
+            return Ok(dest);
+        }
 
-        let streaming = stream_for_playback && ready_end < num_segments;
-        if streaming {
-            use std::io::Write;
-            file.flush()?;
-            drop(file);
+        if stream_for_playback && playback_head_ready(&have, live.index()) {
+            publish_playable(&parts_dir, &tmp, &have, &live, num_segments, true)?;
             self.mark_partial_live(track_id, quality);
-            let head_ms = start.elapsed().as_millis();
-            tracing::info!(
-                track_id = %track_id,
-                ready_end,
-                head_ms,
-                "Playback can start; caching remaining segments in background"
+            self.spawn_fill(
+                track_id,
+                quality,
+                urls,
+                parts_dir,
+                tmp.clone(),
+                dest,
+                on_chunk,
+                live,
+                have,
+                total_bytes,
             );
-            let urls_rest = urls.to_vec();
-            let track = track_id.to_string();
-            let quality_owned = quality.to_string();
-            let chunk_cb = on_chunk.clone();
-            let tmp_bg = tmp.clone();
-            let dest_bg = dest.clone();
-            let live = self.live_partials.clone();
-            let live_key = partial_key(track_id, quality);
-            tokio::spawn(async move {
-                let clear_live = || {
-                    live.lock().unwrap().remove(&live_key);
-                };
-                let client = reqwest::Client::new();
-                let open = std::fs::OpenOptions::new().append(true).open(&tmp_bg);
-                let Ok(mut file) = open else {
-                    tracing::error!(track_id = %track, "could not reopen partial cache for append");
-                    clear_live();
-                    return;
-                };
-                let mut tail_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let hook = chunk_cb.as_ref();
-                if let Err(e) = write_url_range(
-                    &client,
-                    &mut file,
-                    &urls_rest,
-                    ready_end,
-                    urls_rest.len(),
-                    hook,
-                    &mut tail_bytes,
-                )
-                .await
-                {
-                    tracing::error!(track_id = %track, "background cache download failed: {e}");
-                    let _ = std::fs::remove_file(&tmp_bg);
-                    clear_live();
-                    return;
-                }
-                drop(file);
-                if let Err(e) = std::fs::rename(&tmp_bg, &dest_bg) {
-                    tracing::error!(track_id = %track, "could not finalize audio cache: {e}");
-                    clear_live();
-                    return;
-                }
-                clear_live();
-                tracing::info!(
-                    track_id = %track,
-                    quality = %quality_owned,
-                    bytes = tail_bytes,
-                    segments = urls_rest.len(),
-                    "Finished downloading track to cache"
-                );
-            });
             return Ok(tmp);
         }
 
-        drop(file);
-        std::fs::rename(&tmp, &dest)?;
+        loop {
+            let priority = live.index();
+            let batch = if stream_for_playback && !playback_head_ready(&have, priority) {
+                missing_playback_head(&have, priority)
+            } else {
+                next_download_indices(&have, priority, DOWNLOAD_WINDOW)
+            };
+            if batch.is_empty() {
+                break;
+            }
+            download_indices(
+                &client,
+                urls,
+                &batch,
+                &parts_dir,
+                hook,
+                &mut total_bytes,
+                &mut have,
+            )
+            .await?;
+            if stream_for_playback && playback_head_ready(&have, live.index()) {
+                publish_playable(&parts_dir, &tmp, &have, &live, num_segments, true)?;
+                let head_ms = start.elapsed().as_millis();
+                tracing::info!(
+                    track_id = %track_id,
+                    priority = live.index(),
+                    head_ms,
+                    "Playback can start; caching remaining segments in background"
+                );
+                self.mark_partial_live(track_id, quality);
+                self.spawn_fill(
+                    track_id,
+                    quality,
+                    urls,
+                    parts_dir,
+                    tmp.clone(),
+                    dest,
+                    on_chunk,
+                    live,
+                    have,
+                    total_bytes,
+                );
+                return Ok(tmp);
+            }
+        }
+
+        finalize_concat(&parts_dir, &dest, num_segments)?;
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_dir_all(&parts_dir);
+        self.drop_live(track_id, quality);
         let elapsed = start.elapsed();
         let mb = total_bytes as f64 / (1024.0 * 1024.0);
         let speed_mb_s = if elapsed.as_secs_f64() > 0.0 {
@@ -907,6 +1187,87 @@ impl AudioCache {
         Ok(dest)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_fill(
+        &self,
+        track_id: &str,
+        quality: &str,
+        urls: &[String],
+        parts_dir: PathBuf,
+        tmp: PathBuf,
+        dest: PathBuf,
+        on_chunk: std::sync::Arc<dyn Fn(usize, u8, u64) + Send + Sync>,
+        live: Arc<LiveDownload>,
+        mut have: Vec<bool>,
+        mut total_bytes: u64,
+    ) {
+        let urls = urls.to_vec();
+        let track = track_id.to_string();
+        let quality_owned = quality.to_string();
+        let live_map = self.live.clone();
+        let live_partials = self.live_partials.clone();
+        let live_key = partial_key(track_id, quality);
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let hook = on_chunk.as_ref();
+            loop {
+                let priority = live.index();
+                let batch = if !playback_head_ready(&have, priority) {
+                    let head = missing_playback_head(&have, priority);
+                    if head.is_empty() {
+                        next_download_indices(&have, priority, DOWNLOAD_WINDOW)
+                    } else {
+                        head
+                    }
+                } else {
+                    next_download_indices(&have, priority, DOWNLOAD_WINDOW)
+                };
+                if batch.is_empty() {
+                    break;
+                }
+                if let Err(e) = download_indices(
+                    &client,
+                    &urls,
+                    &batch,
+                    &parts_dir,
+                    hook,
+                    &mut total_bytes,
+                    &mut have,
+                )
+                .await
+                {
+                    tracing::error!(track_id = %track, "background cache download failed: {e}");
+                    let _ = std::fs::remove_file(&tmp);
+                    let _ = std::fs::remove_dir_all(&parts_dir);
+                    live_partials.lock().unwrap().remove(&live_key);
+                    live_map.lock().unwrap().remove(&live_key);
+                    return;
+                }
+                if let Err(e) = publish_playable(&parts_dir, &tmp, &have, &live, urls.len(), false)
+                {
+                    tracing::warn!(track_id = %track, "could not refresh playable cache: {e}");
+                }
+            }
+            if let Err(e) = finalize_concat(&parts_dir, &dest, urls.len()) {
+                tracing::error!(track_id = %track, "could not finalize audio cache: {e}");
+                live_partials.lock().unwrap().remove(&live_key);
+                live_map.lock().unwrap().remove(&live_key);
+                return;
+            }
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_dir_all(&parts_dir);
+            live_partials.lock().unwrap().remove(&live_key);
+            live_map.lock().unwrap().remove(&live_key);
+            tracing::info!(
+                track_id = %track,
+                quality = %quality_owned,
+                bytes = total_bytes,
+                segments = urls.len(),
+                "Finished downloading track to cache"
+            );
+        });
+    }
+
     /// Number of cached tracks and their total size in bytes.
     pub fn usage(&self) -> (usize, u64) {
         std::fs::read_dir(&self.base_dir)
@@ -923,8 +1284,11 @@ impl AudioCache {
     /// Delete every cached audio file.
     pub fn clear(&self) -> Result<(), CacheError> {
         for entry in std::fs::read_dir(&self.base_dir)?.flatten() {
-            if entry.metadata().is_ok_and(|m| m.is_file()) {
-                std::fs::remove_file(entry.path())?;
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else if entry.metadata().is_ok_and(|m| m.is_file()) {
+                std::fs::remove_file(path)?;
             }
         }
         Ok(())
@@ -1006,15 +1370,72 @@ impl AudioCache {
     }
 }
 
+/// Artwork on disk, keyed by what the picture is rather than the URL that served it.
+///
+/// TIDAL artwork URLs look like `https://resources.tidal.com/images/{uuid as a/b/c/d/e}/{W}x{H}.jpg`.
+/// Every track of an album shares the album's uuid, so a 2000-track list needs one
+/// request per album, not per track. Files are stored as `{uuid}_{W}x{H}.jpg`; a request
+/// for a size we lack is served from a larger cached size of the same picture (the
+/// decoder downsizes anyway) before going to the network.
 pub struct ImageCache {
     base_dir: PathBuf,
+    client: reqwest::Client,
+    /// One download per file at a time; a second caller waits and then reads the file.
+    inflight: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set when the CDN answers 429/503: every download waits until then.
+    cooldown_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+/// Square sizes the TIDAL image CDN serves, smallest first.
+const ART_SIZES: [u32; 8] = [80, 160, 320, 480, 640, 750, 1080, 1280];
+const ART_ATTEMPTS: u32 = 4;
+
+/// `(uuid, size)` for a TIDAL image URL: `("cf78bf6b-3be0-…", "160x160")` or `(…, "origin")`.
+pub fn art_identity(url: &str) -> Option<(String, String)> {
+    let rest = url.split_once("://")?.1;
+    let (host, path) = rest.split_once('/')?;
+    if !host.ends_with("tidal.com") {
+        return None;
+    }
+    let path = path.split(['?', '#']).next()?;
+    let path = path.strip_prefix("images/")?;
+    let (dir, file) = path.rsplit_once('/')?;
+    let size = file.strip_suffix(".jpg")?;
+    let parts: Vec<&str> = dir.split('/').collect();
+    let ok = parts.len() == 5
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_hexdigit()));
+    let size_ok = size == "origin"
+        || size
+            .split_once('x')
+            .is_some_and(|(w, h)| w.parse::<u32>().is_ok() && h.parse::<u32>().is_ok());
+    (ok && size_ok).then(|| (parts.join("-").to_ascii_lowercase(), size.to_string()))
+}
+
+fn art_px(size: &str) -> Option<u32> {
+    let (w, h) = size.split_once('x')?;
+    Some(w.parse::<u32>().ok()?.max(h.parse::<u32>().ok()?))
 }
 
 impl ImageCache {
     pub fn new() -> Result<Self, CacheError> {
-        let base_dir = default_image_cache_dir()?;
+        Self::with_dir(default_image_cache_dir()?)
+    }
+
+    pub fn with_dir(base_dir: PathBuf) -> Result<Self, CacheError> {
         std::fs::create_dir_all(&base_dir)?;
-        Ok(Self { base_dir })
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(16)
+            .build()?;
+        Ok(Self {
+            base_dir,
+            client,
+            inflight: Default::default(),
+            cooldown_until: Default::default(),
+        })
     }
 
     pub fn file_path(&self, id: &str) -> PathBuf {
@@ -1022,15 +1443,167 @@ impl ImageCache {
         self.base_dir.join(format!("{}.jpg", safe_id))
     }
 
-    pub async fn get_or_download(&self, id: &str, url: &str) -> Result<PathBuf, CacheError> {
-        let dest = self.file_path(id);
-        if dest.exists() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            return Ok(dest);
-        }
+    fn usable(path: &Path) -> bool {
+        path.metadata().is_ok_and(|m| m.len() > 0)
+    }
 
-        let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
-        std::fs::write(&dest, &bytes)?;
-        Ok(dest)
+    /// A cached copy of the same picture at another size: the smallest one at least
+    /// `px` (capped at 1280, so a thumbnail never decodes a multi-MB original), else
+    /// with `allow_smaller` the largest one below it.
+    fn other_size(&self, uuid: &str, px: u32, allow_smaller: bool) -> Option<PathBuf> {
+        let mut smaller = None;
+        for s in ART_SIZES {
+            let path = self.file_path(&format!("{uuid}_{s}x{s}"));
+            if !Self::usable(&path) {
+                continue;
+            }
+            if s >= px {
+                return Some(path);
+            }
+            smaller = Some(path);
+        }
+        if allow_smaller { smaller } else { None }
+    }
+
+    /// The file for `url` when it is already on disk (at its own size, a larger
+    /// one, or under its `legacy_id`), without touching the network. Callers that
+    /// throttle downloads check this first, so a cache hit never queues behind them.
+    pub fn cached(&self, legacy_id: &str, url: &str) -> Option<PathBuf> {
+        let identity = art_identity(url);
+        let dest = self.file_path(&identity.as_ref().map_or_else(
+            || legacy_id.to_string(),
+            |(uuid, size)| format!("{uuid}_{size}"),
+        ));
+        if Self::usable(&dest) {
+            return Some(dest);
+        }
+        if let Some((uuid, size)) = &identity
+            && let Some(px) = art_px(size)
+            && let Some(path) = self.other_size(uuid, px, false)
+        {
+            return Some(path);
+        }
+        let legacy = self.file_path(legacy_id);
+        (legacy != dest && Self::usable(&legacy) && std::fs::rename(&legacy, &dest).is_ok())
+            .then_some(dest)
+    }
+
+    /// The cached file for `url`, downloading it if needed. `legacy_id` is the key the
+    /// file was stored under before artwork was keyed by uuid; a hit there is renamed.
+    pub async fn get_or_download(&self, legacy_id: &str, url: &str) -> Result<PathBuf, CacheError> {
+        if let Some(path) = self.cached(legacy_id, url) {
+            return Ok(path);
+        }
+        let identity = art_identity(url);
+        let id = identity.as_ref().map_or_else(
+            || legacy_id.to_string(),
+            |(uuid, size)| format!("{uuid}_{size}"),
+        );
+        let dest = self.file_path(&id);
+        let px = identity.as_ref().and_then(|(_, size)| art_px(size));
+
+        let lock = {
+            let mut map = self.inflight.lock().unwrap();
+            map.entry(id.clone()).or_default().clone()
+        };
+        let guard = lock.lock().await;
+        let result = self.fill(&dest, legacy_id, url).await;
+        drop(guard);
+        {
+            let mut map = self.inflight.lock().unwrap();
+            if map.get(&id).is_some_and(|l| Arc::strong_count(l) <= 2) {
+                map.remove(&id);
+            }
+        }
+        match result {
+            Ok(()) => Ok(dest),
+            Err(e) => {
+                // Offline or throttled: a smaller copy beats a black tile.
+                if let (Some((uuid, _)), Some(px)) = (&identity, px)
+                    && let Some(path) = self.other_size(uuid, px, true)
+                {
+                    tracing::debug!("artwork {url}: {e}; using a smaller cached copy");
+                    return Ok(path);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn fill(&self, dest: &Path, legacy_id: &str, url: &str) -> Result<(), CacheError> {
+        // Another caller may have finished it while we waited for the lock.
+        if Self::usable(dest) {
+            return Ok(());
+        }
+        let legacy = self.file_path(legacy_id);
+        if legacy != dest && Self::usable(&legacy) && std::fs::rename(&legacy, dest).is_ok() {
+            return Ok(());
+        }
+        let bytes = self.download(url).await?;
+        let tmp = dest.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, dest)?;
+        Ok(())
+    }
+
+    /// GET with retries: connection errors, timeouts, 429 and 5xx back off and try
+    /// again; a 429/503 pauses every artwork download, honouring `Retry-After`.
+    async fn download(&self, url: &str) -> Result<Vec<u8>, CacheError> {
+        let mut attempt = 0;
+        loop {
+            let wait = self
+                .cooldown_until
+                .lock()
+                .unwrap()
+                .filter(|t| *t > tokio::time::Instant::now());
+            if let Some(t) = wait {
+                tokio::time::sleep_until(t).await;
+            }
+            attempt += 1;
+            let backoff = Duration::from_millis(400 * (1 << (attempt - 1)));
+            let res = self.client.get(url).send().await;
+            let err = match res {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) if !b.is_empty() => return Ok(b.to_vec()),
+                    Ok(_) => None,
+                    Err(e) => Some(e),
+                },
+                Ok(r) => {
+                    let status = r.status();
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if status.as_u16() == 429 || status.as_u16() == 503 {
+                        let after = r
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.trim().parse::<u64>().ok())
+                            .map_or(backoff, |s| Duration::from_secs(s.min(60)));
+                        let until = tokio::time::Instant::now() + after;
+                        let mut c = self.cooldown_until.lock().unwrap();
+                        if c.is_none_or(|t| t < until) {
+                            *c = Some(until);
+                        }
+                        tracing::warn!("artwork CDN said {status}; pausing downloads {after:?}");
+                    }
+                    let e = r.error_for_status().err();
+                    if !retryable || attempt >= ART_ATTEMPTS {
+                        return Err(e.map_or_else(
+                            || std::io::Error::other(format!("HTTP {status}")).into(),
+                            CacheError::from,
+                        ));
+                    }
+                    e
+                }
+                Err(e) => Some(e),
+            };
+            if attempt >= ART_ATTEMPTS {
+                return Err(err.map_or_else(
+                    || std::io::Error::other("empty artwork response").into(),
+                    CacheError::from,
+                ));
+            }
+            tokio::time::sleep(backoff).await;
+        }
     }
 }
 
@@ -1079,6 +1652,49 @@ mod tests {
         let history = cache.get_recently_played(10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, "1001");
+    }
+
+    #[test]
+    fn art_identity_keys_by_picture_and_size() {
+        let (uuid, size) = art_identity(
+            "https://resources.tidal.com/images/cf78bf6b/3be0/4527/b52f/ad19596a086f/160x160.jpg",
+        )
+        .unwrap();
+        assert_eq!(uuid, "cf78bf6b-3be0-4527-b52f-ad19596a086f");
+        assert_eq!(size, "160x160");
+        let (u2, s2) = art_identity(
+            "https://resources.tidal.com/images/cf78bf6b/3be0/4527/b52f/ad19596a086f/origin.jpg",
+        )
+        .unwrap();
+        assert_eq!((u2.as_str(), s2.as_str()), (uuid.as_str(), "origin"));
+        assert!(art_identity("https://example.com/cover.jpg").is_none());
+        assert!(art_identity("https://resources.tidal.com/images/x/y/160x160.jpg").is_none());
+    }
+
+    #[tokio::test]
+    async fn image_cache_serves_a_larger_cached_size_without_network() {
+        let dir = std::env::temp_dir().join(format!("tide_art_{}", std::process::id()));
+        let cache = ImageCache::with_dir(dir.clone()).unwrap();
+        let uuid = "cf78bf6b-3be0-4527-b52f-ad19596a086f";
+        std::fs::write(cache.file_path(&format!("{uuid}_640x640")), b"jpg").unwrap();
+        // Unroutable host: a network attempt would fail, so a hit proves no request was made.
+        let url =
+            "https://resources.tidal.com/images/cf78bf6b/3be0/4527/b52f/ad19596a086f/160x160.jpg";
+        let path = cache.cached("legacy", url).unwrap();
+        assert!(path.ends_with(format!("{uuid}_640x640.jpg")));
+        assert_eq!(cache.get_or_download("legacy", url).await.unwrap(), path);
+        // Not on disk at all: no file, and no request either.
+        let missing =
+            "https://resources.tidal.com/images/00000000/1111/2222/3333/444444444444/320x320.jpg";
+        assert!(cache.cached("nothing", missing).is_none());
+        // A legacy URL-hash file is adopted under the new key.
+        let url2 =
+            "https://resources.tidal.com/images/aaaaaaaa/bbbb/cccc/dddd/eeeeeeeeeeee/320x320.jpg";
+        std::fs::write(cache.file_path("oldhash_0"), b"jpg").unwrap();
+        let path = cache.get_or_download("oldhash_0", url2).await.unwrap();
+        assert!(path.ends_with("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_320x320.jpg"));
+        assert!(!cache.file_path("oldhash_0").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1276,5 +1892,238 @@ mod tests {
 
         cache.clear_playback_state().unwrap();
         assert!(cache.load_playback_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn media_index_maps_scrubber_time_onto_dash_urls() {
+        // urls[0] is init; the rest are media.
+        assert_eq!(media_index_for_time(1, 100.0, 50.0), 0);
+        assert_eq!(media_index_for_time(11, 100.0, 0.0), 1);
+        // One block early: floor(0.75 * 10) = 7 → URL 7 (media block 6).
+        assert_eq!(media_index_for_time(11, 100.0, 75.0), 7);
+        assert_eq!(media_index_for_time(11, 100.0, 99.9), 9);
+        assert_eq!(media_index_for_time(11, 100.0, 100.0), 9);
+    }
+
+    #[test]
+    fn next_download_window_fetches_init_then_the_seek_block_then_gaps() {
+        let have = vec![false; 12];
+        assert_eq!(next_download_indices(&have, 8, 4), vec![0, 8, 9, 10]);
+        let mut have = vec![false; 12];
+        for i in [0, 8, 9] {
+            have[i] = true;
+        }
+        assert_eq!(next_download_indices(&have, 8, 4), vec![10, 11, 1, 2]);
+    }
+
+    #[test]
+    fn missing_playback_head_is_init_plus_two_media_at_priority() {
+        let have = vec![false; 12];
+        assert_eq!(missing_playback_head(&have, 1), vec![0, 1, 2]);
+        assert_eq!(missing_playback_head(&have, 9), vec![0, 9, 10]);
+        let mut have = vec![false; 12];
+        have[0] = true;
+        have[9] = true;
+        assert_eq!(missing_playback_head(&have, 9), vec![10]);
+    }
+
+    #[test]
+    fn playback_head_is_ready_once_init_and_two_media_at_priority_exist() {
+        let mut have = vec![false; 10];
+        assert!(!playback_head_ready(&have, 5));
+        have[0] = true;
+        have[5] = true;
+        assert!(!playback_head_ready(&have, 5));
+        have[6] = true;
+        assert!(playback_head_ready(&have, 5));
+        // From the start: init + first two media.
+        let mut from_start = vec![false; 10];
+        from_start[0] = true;
+        from_start[1] = true;
+        from_start[2] = true;
+        assert!(playback_head_ready(&from_start, 1));
+        // Short tail: last media segment is enough.
+        let mut tail = vec![false; 6];
+        tail[0] = true;
+        tail[5] = true;
+        assert!(playback_head_ready(&tail, 5));
+    }
+
+    #[test]
+    fn playable_concat_is_init_plus_contiguous_media_from_the_seek_block() {
+        let dir = std::env::temp_dir().join(format!("tide_parts_concat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, body) in ["I", "A", "B", "C", "D", "E"].into_iter().enumerate() {
+            if i == 3 || i == 4 {
+                continue; // hole at 3-4
+            }
+            std::fs::write(part_file(&dir, i), body.as_bytes()).unwrap();
+        }
+        let dest = dir.join("play.tmp");
+        let n = write_playable_concat(&dir, &dest, 5, 6).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"IE");
+        assert_eq!(n, 2);
+        let n = write_playable_concat(&dir, &dest, 1, 6).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"IAB");
+        assert_eq!(n, 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn serve_segments(
+        bodies: Vec<Vec<u8>>,
+    ) -> (
+        Vec<String>,
+        tokio::task::JoinHandle<()>,
+        std::net::SocketAddr,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let n = bodies.len();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let bodies = bodies.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req.split_whitespace().nth(1).unwrap_or("/");
+                    let idx: usize = path.trim_start_matches('/').parse().unwrap_or(0);
+                    let body = bodies.get(idx).cloned().unwrap_or_default();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        let urls = (0..n).map(|i| format!("http://{addr}/{i}")).collect();
+        (urls, handle, addr)
+    }
+
+    #[tokio::test]
+    async fn fetch_for_playback_builds_tmp_from_the_seek_block() {
+        let bodies: Vec<Vec<u8>> = (0..12).map(|i| format!("S{i}").into_bytes()).collect();
+        let (urls, server, _) = serve_segments(bodies).await;
+        let dir = std::env::temp_dir().join(format!(
+            "tide_prio_fetch_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = AudioCache::with_dir(dir.clone(), 10_000_000).unwrap();
+        cache.request_time(
+            "t",
+            "MAX",
+            Duration::from_secs(75),
+            Duration::from_secs(100),
+        );
+        // 12 URLs (init + 11 media): 75% → floor(0.75 * 11) = 8, one block early → 8.
+        assert_eq!(media_index_for_time(12, 100.0, 75.0), 8);
+
+        let path = cache
+            .fetch_or_cache_with("t", "MAX", &urls, true, std::sync::Arc::new(|_, _, _| {}))
+            .await
+            .unwrap();
+        assert_eq!(path.extension().and_then(|s| s.to_str()), Some("tmp"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"S0S8S9");
+        assert_eq!(cache.playable_index("t", "MAX"), 8);
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn fetch_from_the_start_returns_init_and_first_media() {
+        let bodies: Vec<Vec<u8>> = (0..12).map(|i| format!("S{i}").into_bytes()).collect();
+        let (urls, server, _) = serve_segments(bodies).await;
+        let dir = std::env::temp_dir().join(format!(
+            "tide_start_fetch_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = AudioCache::with_dir(dir.clone(), 10_000_000).unwrap();
+        let path = cache
+            .fetch_or_cache_with("t", "MAX", &urls, true, std::sync::Arc::new(|_, _, _| {}))
+            .await
+            .unwrap();
+        assert_eq!(path.extension().and_then(|s| s.to_str()), Some("tmp"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"S0S1S2");
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Seeking inside the playable `.tmp` must keep appending to the same file
+    /// (the player is reading it); only a seek outside it rebuilds the head.
+    #[test]
+    fn playable_tmp_is_rebuilt_only_for_seeks_outside_it() {
+        let dir = std::env::temp_dir().join(format!("tide_rebase_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let parts = dir.join("parts");
+        std::fs::create_dir_all(&parts).unwrap();
+        let tmp = dir.join("t.tmp");
+        let write_part = |i: usize| std::fs::write(part_file(&parts, i), format!("S{i}")).unwrap();
+        let mut have = vec![false; 12];
+        for (i, slot) in have.iter_mut().enumerate().take(7) {
+            write_part(i);
+            *slot = true;
+        }
+        // 12 URLs over 110 s: `seek_block(k)` lands where block k is fetched first.
+        let live = LiveDownload::default();
+        live.url_count.store(12, Ordering::Relaxed);
+        live.duration_ms.store(110_000, Ordering::Relaxed);
+        let seek_block = |k: u64| {
+            live.requested_ms
+                .store(10_000 * k + 5_000, Ordering::Relaxed)
+        };
+        let read = || String::from_utf8(std::fs::read(&tmp).unwrap()).unwrap();
+
+        seek_block(1);
+        publish_playable(&parts, &tmp, &have, &live, 12, true).unwrap();
+        assert_eq!(read(), "S0S1S2S3S4S5S6");
+        let gen0 = live.playable_gen.load(Ordering::Relaxed);
+        assert!(live.covers(4) && !live.covers(7));
+
+        // Inside the file: same file, no new generation.
+        seek_block(4);
+        publish_playable(&parts, &tmp, &have, &live, 12, false).unwrap();
+        assert_eq!(live.playable_gen.load(Ordering::Relaxed), gen0);
+        assert_eq!(live.playable_from.load(Ordering::Relaxed), 1);
+
+        // The next block to append: keep appending.
+        seek_block(7);
+        write_part(7);
+        have[7] = true;
+        publish_playable(&parts, &tmp, &have, &live, 12, false).unwrap();
+        assert_eq!(read(), "S0S1S2S3S4S5S6S7");
+        assert_eq!(live.playable_gen.load(Ordering::Relaxed), gen0);
+
+        // Outside: rebuild from the seek block.
+        seek_block(10);
+        for i in [10, 11] {
+            write_part(i);
+            have[i] = true;
+        }
+        publish_playable(&parts, &tmp, &have, &live, 12, false).unwrap();
+        assert_eq!(read(), "S0S10S11");
+        assert_eq!(live.playable_gen.load(Ordering::Relaxed), gen0 + 1);
+        assert!(live.covers(live.index()));
+
+        // Back before the rebuilt head: rebuild again.
+        seek_block(2);
+        publish_playable(&parts, &tmp, &have, &live, 12, false).unwrap();
+        assert_eq!(read(), "S0S2S3S4S5S6S7");
+        assert_eq!(live.playable_gen.load(Ordering::Relaxed), gen0 + 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
