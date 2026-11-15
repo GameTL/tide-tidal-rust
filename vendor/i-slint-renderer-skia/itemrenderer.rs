@@ -461,6 +461,14 @@ impl<'a> SkiaItemRenderer<'a> {
         }
     }
 
+    /// TIDE patch: the opacity item's only child is a `Layer` that caches its
+    /// rendering (`cache-rendering-hint: true`).
+    fn is_cached_layer(opacity_rc: &ItemRc) -> bool {
+        let Some(child) = opacity_rc.first_child() else { return false };
+        child.next_sibling().is_none()
+            && child.downcast::<Layer>().is_some_and(|layer| layer.as_pin_ref().cache_rendering_hint())
+    }
+
     fn render_and_blend_layer(&mut self, item_rc: &ItemRc) -> RenderingResult {
         if let Some((layer_offset, layer_image)) =
             i_slint_core::item_rendering::render_layer(self, item_rc)
@@ -940,7 +948,18 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         _size: LogicalSize,
     ) -> RenderingResult {
         let opacity = opacity_item.opacity();
-        if Opacity::need_layer(item_rc, opacity) {
+        // TIDE patch: a fully transparent group draws nothing; don't render
+        // it into a window-sized layer only to blend that at alpha 0.
+        if (opacity * 255.) < 1. {
+            return RenderingResult::ContinueRenderingWithoutChildren;
+        }
+        // TIDE patch: when the only child is a cached Layer, that layer is
+        // drawn as one image with the current alpha, which already is the
+        // group opacity. Skip the unbounded (window-sized) save_layer.
+        if Opacity::need_layer(item_rc, opacity) && !Self::is_cached_layer(item_rc) {
+            if crate::memory::frame_log() {
+                crate::memory::FULL_LAYERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             self.canvas.save_layer_alpha(None, (opacity * 255.) as u32);
             self.state_stack.push(self.current_state);
             self.current_state.alpha = 1.0;
