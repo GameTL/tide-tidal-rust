@@ -9,9 +9,15 @@
 # macOS opens TIDE without the "Apple could not verify" prompt.
 #
 # Options (environment variables):
-#   TIDE_INSTALL_DIR  install somewhere else, e.g. TIDE_INSTALL_DIR=~/Apps
+#   TIDE_INSTALL_DIR  install somewhere else
 #   TIDE_DMG_URL      install a specific dmg instead of the latest release
+# Set them on the sh side of the pipe:
+#   curl -fsSL https://gametl.github.io/tide-tidal-rust/install.sh | TIDE_INSTALL_DIR=~/Apps sh
 set -eu
+
+# Everything runs from main, called on the last line, so a download cut off
+# halfway through runs nothing.
+main() {
 
 DMG_URL="${TIDE_DMG_URL:-https://github.com/GameTL/tide-tidal-rust/releases/latest/download/TIDE-macos-universal.dmg}"
 
@@ -46,7 +52,10 @@ fi
 
 tmp=""
 mnt=""
+pid=""
 cleanup() {
+    # Background steps ignore Ctrl-C in a non-interactive sh: stop them here.
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
     if [ -n "$mnt" ] && [ -d "$mnt" ]; then
         hdiutil detach "$mnt" -quiet -force >/dev/null 2>&1 || true
     fi
@@ -86,8 +95,10 @@ step() {
         done
     fi
     if wait "$pid"; then
+        pid=""
         printf '\r  %s✓%s %s%s\n' "$green" "$r" "$label" "$clr"
     else
+        pid=""
         fail "$label failed" "$log"
     fi
 }
@@ -107,6 +118,11 @@ else
     dest_dir="$HOME/Applications"
 fi
 app="$dest_dir/TIDE.app"
+
+# Replacing the bundle under a running app can crash it.
+if pgrep -x TIDE >/dev/null 2>&1; then
+    fail "TIDE is running. Quit it, then run this again."
+fi
 
 if [ "$fancy" = 1 ]; then printf '\033[?25l'; fi
 printf '\n  %s≈ %s~ %s≈  %sTIDE%s %s· native TIDAL player for macOS%s\n\n' \
@@ -142,7 +158,7 @@ version=$(/usr/bin/defaults read "$app/Contents/Info" CFBundleShortVersionString
 printf '\n  🌊 %sTIDE%s%s%s is installed.%s\n\n' "$b$cyan" "$green" "${version:+ $version}" "$r$b" "$r"
 printf '     %sLocation%s   %s%s%s\n' "$d" "$r" "$cyan" "$app" "$r"
 printf '     %sOpen it%s    %sopen -a "%s"%s   %s(or search TIDE in Spotlight)%s\n' "$d" "$r" "$green" "$app" "$r" "$d" "$r"
-if pgrep -x TIDE >/dev/null 2>&1; then
-    printf '\n     %sTIDE is running: quit and reopen it to use this version.%s\n' "$d" "$r"
-fi
 printf '\n'
+}
+
+main "$@"
