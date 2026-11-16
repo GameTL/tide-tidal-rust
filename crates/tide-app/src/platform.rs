@@ -1169,6 +1169,54 @@ fn start_window_move(w: &slint::winit_030::winit::window::Window) {
     let _ = w.drag_window();
 }
 
+/// Make TIDE's chrome the only thing that moves or zooms the window.
+///
+/// The title bar is transparent and the content extends under it, but AppKit
+/// still treats the top strip as a title bar wherever the view under the
+/// pointer says `mouseDownCanMoveWindow` (NSView's default for a non-opaque
+/// view such as winit's). A press there then starts a WindowServer drag *and*
+/// reaches TIDE's DragArea, which moves the window as well; a double-click
+/// runs AppKit's Zoom/Fill *and* TIDE's animated zoom. Two movers fighting over
+/// one frame make drags jitter, and leave AppKit's idea of the frame out of
+/// step with where the window really is: maximized but shifted up, its top
+/// under the menu bar and a gap above the Dock.
+///
+/// winit registers its view class with the first window, so this runs from the
+/// window event hook; it adds the override once, for every window after it.
+#[cfg(target_os = "macos")]
+fn disable_native_title_bar_drag() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use objc2::sel;
+
+    thread_local! {
+        static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if DONE.get() {
+        return;
+    }
+    let Some(cls) = AnyClass::get(c"WinitView") else {
+        return;
+    };
+    DONE.set(true);
+
+    unsafe extern "C-unwind" fn cannot_move_window(_: *mut AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    type MouseDownCanMoveWindow = unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool;
+    // SAFETY: the override has the selector's signature (BOOL, id self, SEL)
+    // and lives for the whole process. winit's class does not define the
+    // method itself, so this adds an override of NSView's.
+    let added = unsafe {
+        objc2::ffi::class_addMethod(
+            (cls as *const AnyClass).cast_mut(),
+            sel!(mouseDownCanMoveWindow),
+            std::mem::transmute::<MouseDownCanMoveWindow, Imp>(cannot_move_window),
+            c"B@:".as_ptr(),
+        )
+    };
+    tracing::debug!(added = added.as_bool(), "Title bar strip no longer drags natively");
+}
+
 /// Follow the pointer while a window move is in progress; ends it on release.
 #[cfg(target_os = "macos")]
 fn follow_window_move(window: &slint::Window, event: &WindowEvent) {
@@ -1289,6 +1337,7 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
         }
         #[cfg(target_os = "macos")]
         {
+            disable_native_title_bar_drag();
             restore_chrome(window);
             follow_window_move(window, event);
             if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
