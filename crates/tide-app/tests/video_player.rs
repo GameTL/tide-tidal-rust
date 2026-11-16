@@ -59,6 +59,10 @@ fn video_expands_from_thumbnail_title_and_enter_and_collapses_without_pausing() 
         let weak = ui.as_weak();
         move || weak.unwrap().global::<App>().set_video_open(false)
     });
+    app.on_open_now_playing({
+        let weak = ui.as_weak();
+        move || weak.unwrap().global::<App>().invoke_open_video()
+    });
     let toggles = Rc::new(Cell::new(0));
     app.on_toggle_play({
         let toggles = toggles.clone();
@@ -94,8 +98,11 @@ fn video_expands_from_thumbnail_title_and_enter_and_collapses_without_pausing() 
     advance(win, 500);
 
     // Click the pill's left side, outside the chevron itself.
-    click(win, 40., 770., PointerEventButton::Left);
-    assert!(!app.get_video_open(), "the lower-left pill minimizes video");
+    click(win, 1320., 770., PointerEventButton::Left);
+    assert!(
+        !app.get_video_open(),
+        "the lower-right pill minimizes video"
+    );
     advance(win, 500);
     assert_eq!(toggles.get(), 1, "minimizing must not pause playback");
     assert!(app.get_playing());
@@ -106,7 +113,7 @@ fn video_expands_from_thumbnail_title_and_enter_and_collapses_without_pausing() 
     assert!(app.get_video_open(), "clicking the video title expands it");
     assert_eq!(opens.get(), 2);
     advance(win, 500);
-    click(win, 80., 770., PointerEventButton::Left);
+    click(win, 1360., 770., PointerEventButton::Left);
     advance(win, 500);
 
     win.dispatch_event(WindowEvent::KeyPressed {

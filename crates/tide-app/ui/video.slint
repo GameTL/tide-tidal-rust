@@ -7,7 +7,8 @@
 // (the queue button) moves the picture to the left half and lists suggestions
 // on the right.
 import { App, Theme, Icon, IconButton, Cover, CardData, ExplicitBadge, TideLoader } from "common.slint";
-import { PlayerBar, HoverTip, HeaderTools } from "chrome.slint";
+import { MinimizeButton } from "common.slint";
+import { PlayerBar, HeaderTools } from "chrome.slint";
 
 component SimilarRow inherits Rectangle {
     in property <CardData> card;
@@ -83,8 +84,7 @@ export component VideoView inherits Rectangle {
     // Controls: shown on any pointer movement, hidden after a rest while playing.
     property <bool> controls: true;
     property <duration> last-move: 0ms;
-    property <bool> over-controls: bar-ta.has-hover || collapse-ta.has-hover || header.engaged || App.debug-open;
-    property <bool> collapse-tip: false;
+    property <bool> over-controls: bar-ta.has-hover || collapse.hovered || header.engaged || App.debug-open;
     property <float> split: App.video-similar-open && App.video-open ? 1 : 0;
     animate split { duration: 220ms; easing: ease-in-out; }
     property <length> video-w: root.width + (min(root.width, max(320px, root.width * 0.48)) - root.width) * root.split;
@@ -150,7 +150,7 @@ export component VideoView inherits Rectangle {
         x: root.video-w + 54px;
         y: 0px;
         width: root.width - root.video-w - 54px - 24px;
-        height: root.height - 110px;
+        height: root.height - App.player-height - 14px;
         TouchArea {
             changed mouse-x => { root.wake(); }
             scroll-event(_) => { return reject; }
@@ -218,46 +218,16 @@ export component VideoView inherits Rectangle {
         changed engaged => { if (self.engaged) { root.wake(); } }
     }
 
-    // Wide minimize target just above the video details at the lower left.
-    Rectangle {
-        x: 32px;
-        y: root.height - 148px;
-        width: 96px;
-        height: 36px;
-        border-radius: 18px;
+    // Shared collapse pill above the controls at the lower right.
+    collapse := MinimizeButton {
+        x: root.width - self.width - 32px;
+        y: root.height - App.player-height - 52px;
         opacity: root.controls-opacity;
         visible: self.opacity > 0;
         animate opacity { duration: 200ms; easing: ease-in-out; }
-        background: collapse-ta.pressed ? #ffffff42 : collapse-ta.has-hover ? #ffffff2e : #ffffff1a;
-        animate background { duration: 120ms; }
-        accessible-role: button;
-        accessible-label: "Minimize video (Esc)";
-        accessible-action-default => { App.close-video(); }
-        collapse-ta := TouchArea {
-            enabled: root.controls && App.video-open;
-            mouse-cursor: pointer;
-            clicked => { App.close-video(); }
-            changed has-hover => {
-                root.collapse-tip = false;
-                if (self.has-hover) { root.wake(); }
-            }
-        }
-        Icon {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            source: @image-url("icons/chevron-down.svg");
-            size: 22px;
-            tint: Theme.text;
-        }
-        Timer {
-            interval: 350ms;
-            running: App.video-open && collapse-ta.has-hover && !root.collapse-tip;
-            triggered => { root.collapse-tip = true; }
-        }
-        if root.collapse-tip && collapse-ta.has-hover && App.video-open: HoverTip {
-            x: 0px;
-            y: -(self.height + 8px);
-            text: "Esc to minimize";
-        }
+        enabled: root.controls && App.video-open;
+        label: "Minimize video (Esc)";
+        clicked => { App.close-video(); }
+        changed hovered => { if (self.hovered) { root.wake(); } }
     }
 }

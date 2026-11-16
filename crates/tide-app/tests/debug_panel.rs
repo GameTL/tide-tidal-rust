@@ -57,9 +57,11 @@ fn debug_button_toggles_and_leaves_the_window_clickable() {
     click(win, debug_x, debug_y);
     assert!(!app.get_debug_open());
 
+    app.set_has_track(true);
     app.set_show_now_playing(true);
-    // The same debug circle is immediately left of Lyrics in Now Playing.
-    let now_playing_debug_x = 1440. - 16. - 34. - 10. - 68. - 10. - 17.5;
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+    // Now Playing uses the same Search / Debug / Profile header.
+    let now_playing_debug_x = debug_x;
     click(win, now_playing_debug_x, top + 32.);
     assert!(app.get_debug_open());
     assert!(app.get_show_now_playing());
@@ -67,7 +69,7 @@ fn debug_button_toggles_and_leaves_the_window_clickable() {
     assert!(app.get_debug_open(), "the panel stays above Now Playing");
     click(win, now_playing_debug_x, top + 32.);
     assert!(!app.get_debug_open());
-    click(win, 1440. - 16. - 17., top + 32.);
+    click(win, 1360., 770.);
     assert!(
         !app.get_show_now_playing(),
         "the collapse control still works"

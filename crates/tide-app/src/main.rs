@@ -1,8 +1,12 @@
 mod alerts;
 mod controller;
+mod logfile;
 mod mem;
 mod platform;
 mod signal;
+#[cfg(target_os = "macos")]
+mod window_state;
+mod zoom;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,6 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             // The debug panel's log tail; errors also surface as the in-app alert.
             .with(alerts::AlertLayer.with_filter(alerts::panel_filter()))
+            // The same lines on disk, so a problem can be looked up afterwards.
+            .with(logfile::LogFile::open().map(|file| {
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_timer(alerts::LocalDateTimer)
+                    .with_writer(file)
+                    .with_filter(alerts::panel_filter())
+            }))
             .init();
     }
 
@@ -45,29 +57,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_cli(args).await;
     }
 
-    tracing::info!("Starting TIDE...");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        log = ?logfile::path(),
+        "Starting TIDE..."
+    );
     let service = TidalService::with_device_auth()?;
     let has_session = service.is_authenticated();
     let ctx = Ctx::new(service)?;
     restore_output_on_exit(&ctx);
     platform::configure_backend();
-    // `TIDE_LOW_RAM=1` (or 0) overrides the Low RAM setting for this run.
-    if let Ok(value) = std::env::var("TIDE_LOW_RAM") {
-        ctx.settings.write().unwrap().low_ram = value != "0";
-    }
-    platform::apply_memory_profile(ctx.settings.read().unwrap().low_ram);
-
-    // Media keys / Control Center arrive on a system thread; hop to the UI thread.
-    *ctx.media.lock().unwrap() =
-        MacMediaControls::new("TIDE", |event| on_ui(move |ui| ui.media_event(event))).ok();
+    let fancy = controller::fancy_animation_override()
+        .unwrap_or(ctx.settings.read().unwrap().fancy_animation);
+    platform::apply_memory_profile(!fancy);
 
     let main_window = MainWindow::new()?;
+    platform::configure_input(main_window.window(), ctx.clone());
     #[cfg(target_os = "macos")]
     {
-        platform::configure_input(main_window.window());
         platform::install_reopen_handler();
+        platform::install_window_animation();
+        platform::install_quit_animation();
     }
-    let ui = Ui::install(&main_window, ctx);
+    let ui = Ui::install(&main_window, ctx.clone());
+    // Register after AppKit and the UI callback target exist, but before boot
+    // publishes the restored, paused track to Now Playing.
+    match MacMediaControls::new("TIDE", |event| on_ui(move |ui| ui.media_event(event))) {
+        Ok(media) => *ctx.media.lock().unwrap() = Some(media),
+        Err(e) => tracing::warn!("Could not initialize media controls: {e}"),
+    }
     ui.boot(has_session);
     ui.start_token_refresh();
     ui.start_offline_keeper();
@@ -91,7 +109,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Closing the window (⌘W, the close button) only hides it; TIDE keeps
     // playing until ⌘Q, which exits the process from the app menu.
+    #[cfg(target_os = "macos")]
+    window_state::place_before_show(main_window.window(), &ctx);
     main_window.show()?;
+    #[cfg(target_os = "macos")]
+    slint::Timer::single_shot(Duration::ZERO, || on_ui(|ui| ui.restore_window()));
     slint::run_event_loop_until_quit()?;
     release_output_now();
     Ok(())
@@ -104,6 +126,8 @@ static EXIT_CTX: std::sync::OnceLock<std::sync::Arc<Ctx>> = std::sync::OnceLock:
 /// the sample rate it had before TIDE changed it. Safe to call more than once.
 fn release_output_now() {
     if let Some(ctx) = EXIT_CTX.get() {
+        #[cfg(target_os = "macos")]
+        let _ = window_state::flush(ctx);
         ctx.player.pause();
         if ctx.player.current_id().is_some() {
             ctx.meta
@@ -124,7 +148,11 @@ fn restore_output_on_exit(ctx: &std::sync::Arc<Ctx>) {
         fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
     }
     extern "C" fn at_exit() {
-        release_output_now();
+        // A panic cannot unwind out of an `extern "C"` callback: it would abort
+        // the process (a crash report on every Quit). Best effort only here.
+        // Run on a fresh thread: by now this thread's thread-locals (which
+        // `tracing` writes through) are destroyed, and touching them panics.
+        let _ = std::panic::catch_unwind(|| std::thread::spawn(release_output_now).join());
     }
     // SAFETY: `at_exit` is a plain function that stays valid for the whole process.
     unsafe {

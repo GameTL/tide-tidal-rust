@@ -136,19 +136,47 @@ fn format_clock(unix_secs: i64) -> String {
 }
 
 #[cfg(unix)]
-fn local_hms(unix_secs: i64) -> Option<String> {
+fn local_tm(unix_secs: i64) -> Option<libc::tm> {
     let t = unix_secs as libc::time_t;
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY: `tm` is zeroed; `localtime_r` writes the broken-down local time into it.
     if unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) }.is_null() {
         return None;
     }
-    // SAFETY: a non-null return means hour/min/sec were written.
-    let (hour, min, sec) = unsafe {
-        let tm = tm.as_ptr();
-        ((*tm).tm_hour, (*tm).tm_min, (*tm).tm_sec)
-    };
-    Some(format!("{hour:02}:{min:02}:{sec:02}"))
+    // SAFETY: a non-null return means the fields were written.
+    Some(unsafe { tm.assume_init() })
+}
+
+#[cfg(unix)]
+fn local_hms(unix_secs: i64) -> Option<String> {
+    let tm = local_tm(unix_secs)?;
+    Some(format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec))
+}
+
+/// Log-file timestamps carry the date too: the file outlives the day.
+pub struct LocalDateTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalDateTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        #[cfg(unix)]
+        if let Some(tm) = local_tm(unix) {
+            return write!(
+                w,
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min,
+                tm.tm_sec
+            );
+        }
+        write!(w, "{unix}")
+    }
 }
 
 /// Console timestamps match the debug panel: the laptop's local clock.

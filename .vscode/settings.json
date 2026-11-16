@@ -1,0 +1,6 @@
+{
+  // Daily diagnostics stay on cargo check. Clippy is CI / on-demand only.
+  "rust-analyzer.check.command": "check",
+  "rust-analyzer.check.extraArgs": ["--jobs", "2"],
+  "rust-analyzer.cargo.extraArgs": ["--jobs", "2"]
+}

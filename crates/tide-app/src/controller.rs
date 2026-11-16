@@ -30,7 +30,8 @@ use crate::{
 
 /// Cache key for "best quality the account can stream".
 pub const QUALITY_KEY: &str = "MAX";
-const PREFETCH_BEFORE_END: Duration = Duration::from_secs(25);
+/// Preload the next track once the playhead (or a scrub) is in the last quarter.
+const PREFETCH_ZONE: f32 = 0.75;
 /// "Keep most played offline" looks at this many top tracks, played at least this often.
 const KEEP_OFFLINE_TOP: usize = 50;
 const KEEP_OFFLINE_MIN_PLAYS: u32 = 2;
@@ -62,8 +63,15 @@ pub struct Settings {
     pub restore_sample_rate: bool,
     /// Collection grid artwork size: 0 smallest … 4 largest (3 is the original size).
     pub grid_size: i32,
-    /// Trade the sliding page transitions and some rendering caches for memory.
-    pub low_ram: bool,
+    /// Whole-interface zoom, independent of display DPI.
+    pub zoom_percent: i32,
+    /// Sliding back / forward transitions (page snapshots) and a larger
+    /// graphics budget. Off by default: TIDE keeps its memory low and still
+    /// animates at the display's refresh rate.
+    pub fancy_animation: bool,
+    /// Last window placement, kept with preferences so logout preserves it.
+    #[cfg(target_os = "macos")]
+    pub window: Option<crate::window_state::WindowState>,
 }
 
 fn default_true() -> bool {
@@ -81,7 +89,10 @@ impl Default for Settings {
             rate_matching: true,
             restore_sample_rate: true,
             grid_size: 3,
-            low_ram: true,
+            zoom_percent: 100,
+            fancy_animation: false,
+            #[cfg(target_os = "macos")]
+            window: None,
         }
     }
 }
@@ -93,6 +104,7 @@ impl Settings {
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
         settings.grid_size = settings.grid_size.clamp(0, 4);
+        settings.zoom_percent = crate::zoom::normalize(settings.zoom_percent);
         settings
     }
 }
@@ -100,6 +112,190 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kept_window_is_the_request_not_the_clamp() {
+        let mut keep = HashMap::new();
+        // A tracks-only home section has no cards: the card pass clamps to nothing...
+        assert_eq!(keep_window(&mut keep, "home:1", 0, 5, 0), (0, 0));
+        // ...but a refresh must replay the full request, or the track covers are dropped.
+        assert_eq!(keep["home:1"], (0, 5));
+        // A feed section: 2 cards then tracks; the window reaches into the tracks.
+        assert_eq!(keep_window(&mut keep, "home:2", 0, 6, 2), (0, 2));
+        assert_eq!(keep["home:2"], (0, 6));
+        assert_eq!(keep_window(&mut keep, "grid:0", 8, 4, 10), (4, 4));
+    }
+
+    fn row(id: &str, title: &str) -> CardData {
+        CardData {
+            kind: "album".into(),
+            id: id.into(),
+            title: title.into(),
+            image_url: format!("https://img/{id}").into(),
+            ..Default::default()
+        }
+    }
+
+    fn with_art(mut row: CardData) -> CardData {
+        row.image = Image::from_rgba8(SharedPixelBuffer::new(1, 1));
+        row
+    }
+
+    fn ids(model: &VecModel<CardData>) -> Vec<String> {
+        model.iter().map(|r| r.id.to_string()).collect()
+    }
+
+    fn patch(model: &VecModel<CardData>, rows: Vec<CardData>) -> usize {
+        patch_rows(model, rows, card_key, merge_card, |r| r.fresh = true)
+    }
+
+    #[test]
+    fn patch_rows_inserts_only_what_is_new_and_keeps_artwork() {
+        let model = VecModel::from(vec![with_art(row("a", "A")), with_art(row("b", "B"))]);
+        let inserted = patch(&model, vec![row("n", "New"), row("a", "A"), row("b", "B")]);
+        assert_eq!(inserted, 1);
+        assert_eq!(ids(&model), ["n", "a", "b"]);
+        let rows: Vec<CardData> = model.iter().collect();
+        assert!(rows[0].fresh && rows[0].image.size().width == 0);
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|r| !r.fresh && r.image.size().width == 1)
+        );
+    }
+
+    #[test]
+    fn patch_rows_removes_moves_and_updates_in_place() {
+        let model = VecModel::from(vec![
+            with_art(row("a", "A")),
+            with_art(row("b", "B")),
+            with_art(row("c", "C")),
+        ]);
+        let inserted = patch(&model, vec![row("c", "C"), row("a", "A renamed")]);
+        assert_eq!(inserted, 0);
+        assert_eq!(ids(&model), ["c", "a"]);
+        let a = model.row_data(1).unwrap();
+        assert_eq!(a.title, "A renamed");
+        assert_eq!(
+            a.image.size().width,
+            1,
+            "same art url keeps the loaded image"
+        );
+        assert!(model.iter().all(|r| !r.fresh));
+    }
+
+    #[test]
+    fn patch_rows_drops_artwork_whose_url_changed() {
+        let model = VecModel::from(vec![with_art(row("a", "A"))]);
+        let mut moved = row("a", "A");
+        moved.image_url = "https://img/other".into();
+        patch(&model, vec![moved]);
+        assert_eq!(model.row_data(0).unwrap().image.size().width, 0);
+    }
+
+    #[test]
+    fn patch_groups_keeps_surviving_sections_and_adds_new_ones() {
+        let cards = Rc::new(VecModel::from(vec![row("a", "A")]));
+        let tracks = Rc::new(VecModel::<TrackData>::default());
+        let outer = VecModel::from(vec![SectionData {
+            title: "Old".into(),
+            layout: "cards".into(),
+            cards: ModelRc::from(cards.clone()),
+            tracks: ModelRc::from(tracks.clone()),
+        }]);
+        let group = |title: &str, rows: Vec<CardData>| GroupRows {
+            title: title.into(),
+            layout: "cards".into(),
+            cards: rows,
+            tracks: Vec::new(),
+        };
+        let patched = patch_groups(
+            &outer,
+            vec![(group_key("cards", "Old"), (cards.clone(), tracks, 0))],
+            vec![
+                group("Brand new", vec![row("x", "X")]),
+                group("Old", vec![row("a", "A"), row("b", "B")]),
+            ],
+        );
+        assert_eq!(patched.kept, [(1, 0)]);
+        assert_eq!(outer.row_count(), 2);
+        assert_eq!(outer.row_data(0).unwrap().title, "Brand new");
+        assert!(
+            Rc::ptr_eq(&patched.models[1].0, &cards),
+            "kept section reuses its model"
+        );
+        assert_eq!(ids(&cards), ["a", "b"]);
+        assert!(cards.row_data(1).unwrap().fresh);
+        assert!(patched.models[0].0.row_data(0).unwrap().fresh);
+    }
+
+    #[test]
+    fn card_art_url_picks_a_size_the_cdn_serves() {
+        let u = "https://resources.tidal.com/images/a/b/320x320.jpg";
+        assert_eq!(card_art_url("album", u, 320), u);
+        assert!(card_art_url("album", u, 640).ends_with("/640x640.jpg"));
+        assert!(card_art_url("playlist", u, 640).ends_with("/640x640.jpg"));
+        assert!(card_art_url("artist", u, 640).ends_with("/750x750.jpg"));
+        assert_eq!(card_art_url("mix", u, 640), u);
+        assert_eq!(grid_art_px(2), 320);
+        assert_eq!(grid_art_px(3), 640);
+        assert_eq!(grid_art_px(4), 640);
+    }
+
+    #[test]
+    fn origin_cover_swaps_the_size_segment() {
+        let base = "https://resources.tidal.com/images/4bbfd9de/8edd/400f/85a3/06d70061d82f";
+        assert_eq!(
+            origin_cover(&format!("{base}/640x640.jpg")).as_deref(),
+            Some(format!("{base}/origin.jpg").as_str())
+        );
+        assert_eq!(origin_cover(&format!("{base}/origin.jpg")), None);
+        assert_eq!(origin_cover("https://example.com/cover.png"), None);
+    }
+
+    #[test]
+    fn player_navigation_preserves_the_real_playlist_after_browsing_and_restore() {
+        let source = Page::Detail(Card {
+            kind: "playlist".into(),
+            id: "playlist-42".into(),
+            title: "Road trip".into(),
+            ..Default::default()
+        });
+        let saved = serde_json::to_string(&Some(source)).unwrap();
+        let mut state = State {
+            playback_source: serde_json::from_str(&saved).unwrap(),
+            history: vec![Page::Albums],
+            context: "Road trip".into(),
+            ..Default::default()
+        };
+        assert!(matches!(state.playback_page(), Page::Detail(card) if card.id == "playlist-42"));
+        state.playback_source = None;
+        state.context = "My Tracks".into();
+        assert!(matches!(state.playback_page(), Page::Tracks));
+    }
+
+    #[test]
+    fn player_navigation_waits_for_the_track_and_rejects_a_superseded_page() {
+        let mut state = State {
+            page_gen: 7,
+            reveal_track: Some((7, "target".into())),
+            ..Default::default()
+        };
+        assert_eq!(state.take_reveal_track(), None);
+        assert!(state.reveal_track.is_some());
+        state.page_tracks = ["other", "target"]
+            .map(|id| TrackItem {
+                id: id.into(),
+                ..Default::default()
+            })
+            .to_vec();
+        assert_eq!(state.take_reveal_track(), Some(1));
+        assert!(state.reveal_track.is_none());
+        state.reveal_track = Some((7, "target".into()));
+        state.page_gen = 8;
+        assert_eq!(state.take_reveal_track(), None);
+        assert!(state.reveal_track.is_none());
+    }
 
     #[test]
     fn play_next_preserves_the_current_track_and_shuffled_order() {
@@ -125,6 +321,14 @@ mod tests {
         assert_eq!(play_order, ["D", "B", "Y", "X", "A", "C"]);
         assert_eq!(play_order[state.pos], "B");
         assert_eq!(state.prefetched_for, None);
+    }
+
+    #[test]
+    fn last_quarter_of_the_track_preloads_the_next_song() {
+        assert!(!in_prefetch_zone(0.0));
+        assert!(!in_prefetch_zone(0.749));
+        assert!(in_prefetch_zone(0.75));
+        assert!(in_prefetch_zone(1.0));
     }
 
     #[test]
@@ -424,6 +628,26 @@ mod tests {
     }
 
     #[test]
+    fn zoom_preferences_default_to_actual_size_and_survive_restart() {
+        let meta = MetadataCache::in_memory().unwrap();
+        assert_eq!(Settings::load(&meta).zoom_percent, 100);
+        meta.put_json("settings", r#"{"quality":"high"}"#).unwrap();
+        assert_eq!(Settings::load(&meta).zoom_percent, 100);
+        for percent in crate::zoom::LEVELS {
+            let mut settings = Settings::load(&meta);
+            settings.zoom_percent = percent;
+            meta.put_json("settings", &serde_json::to_string(&settings).unwrap())
+                .unwrap();
+            assert_eq!(Settings::load(&meta).zoom_percent, percent);
+        }
+        for (stored, expected) in [(-100, 50), (99, 100), (250, 200)] {
+            meta.put_json("settings", &format!(r#"{{"zoom_percent":{stored}}}"#))
+                .unwrap();
+            assert_eq!(Settings::load(&meta).zoom_percent, expected);
+        }
+    }
+
+    #[test]
     fn loads_display_defaults_from_existing_settings() {
         let meta = MetadataCache::in_memory().unwrap();
         assert!(Settings::load(&meta).rate_matching);
@@ -447,15 +671,20 @@ mod tests {
     }
 
     #[test]
-    fn low_ram_mode_is_on_unless_the_user_turned_it_off() {
+    fn fancy_animation_is_off_unless_the_user_turned_it_on() {
         let meta = MetadataCache::in_memory().unwrap();
-        assert!(Settings::load(&meta).low_ram);
+        assert!(!Settings::load(&meta).fancy_animation);
 
         meta.put_json("settings", r#"{"quality":"high"}"#).unwrap();
-        assert!(Settings::load(&meta).low_ram);
+        assert!(!Settings::load(&meta).fancy_animation);
 
+        // The old Low RAM switch is gone; the lean profile is the default.
         meta.put_json("settings", r#"{"low_ram":false}"#).unwrap();
-        assert!(!Settings::load(&meta).low_ram);
+        assert!(!Settings::load(&meta).fancy_animation);
+
+        meta.put_json("settings", r#"{"fancy_animation":true}"#)
+            .unwrap();
+        assert!(Settings::load(&meta).fancy_animation);
     }
 
     #[test]
@@ -496,8 +725,13 @@ pub struct Ctx {
     pub play_gen: AtomicU64,
     /// Serializes replacement of the gapless queue with a prefetch completing off-thread.
     next_revision: Mutex<u64>,
+    /// Artwork downloads in flight.
     img_sem: tokio::sync::Semaphore,
+    /// Artwork decodes in flight (CPU-bound, so bounded by the cores).
+    decode_sem: tokio::sync::Semaphore,
     downloads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Scrubber target for the in-flight start, so a click during buffering is honoured.
+    desired_elapsed_ms: AtomicU64,
 }
 
 impl Ctx {
@@ -523,12 +757,20 @@ impl Ctx {
             play_gen: AtomicU64::new(0),
             next_revision: Mutex::new(0),
             img_sem: tokio::sync::Semaphore::new(8),
+            decode_sem: tokio::sync::Semaphore::new(
+                std::thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 8)),
+            ),
             downloads: Mutex::new(HashMap::new()),
+            desired_elapsed_ms: AtomicU64::new(0),
         }))
     }
 
     pub fn api(&self) -> Option<ApiHandle> {
         self.api.read().unwrap().clone()
+    }
+
+    fn audio_quality_key(&self) -> String {
+        self.settings.read().unwrap().quality.to_uppercase()
     }
 
     /// Local file for a track: straight from the SSD cache, else stream-and-save.
@@ -707,7 +949,7 @@ impl Ctx {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 enum Page {
     Home,
     Tracks,
@@ -780,6 +1022,12 @@ struct State {
     sections: Vec<Section>,
     /// Per home section: card model, track model, and an unused loaded-count slot.
     section_models: Vec<SectionModel>,
+    /// The section list on screen, patched in place when a newer copy arrives.
+    sections_model: Option<Rc<VecModel<SectionData>>>,
+    /// Page and cache key the sections on screen were drawn for.
+    sections_source: Option<(u64, String)>,
+    /// Background refreshes running for the page on screen.
+    sync: SyncState,
 
     /// Tracks behind the table on screen (after filtering) and its model.
     page_tracks: Vec<TrackItem>,
@@ -800,6 +1048,10 @@ struct State {
     order: Vec<usize>,
     pos: usize,
     context: String,
+    /// The actual source destination, independent of subsequent browsing.
+    playback_source: Option<Page>,
+    /// A page load may finish after its source link was clicked.
+    reveal_track: Option<(u64, String)>,
     shuffle: bool,
     repeat: i32,
     loading_track: bool,
@@ -812,6 +1064,8 @@ struct State {
     last_serial: u64,
     /// Saved position for a restored session before the audio file has been opened.
     pending_seek: Option<Duration>,
+    /// Last playable DASH head the player was opened on, so a later seek can reopen.
+    playable_gen: u64,
     volume_before_mute: f32,
     muted: bool,
 
@@ -828,6 +1082,27 @@ struct State {
 }
 
 impl State {
+    fn playback_page(&self) -> Page {
+        self.playback_source.clone().unwrap_or_else(|| {
+            if self.context == "My Tracks" || self.context == "Tracks" {
+                Page::Tracks
+            } else {
+                Page::Queue
+            }
+        })
+    }
+
+    fn take_reveal_track(&mut self) -> Option<usize> {
+        let (generation, id) = self.reveal_track.as_ref()?;
+        if *generation != self.page_gen {
+            self.reveal_track = None;
+            return None;
+        }
+        let index = self.page_tracks.iter().position(|track| track.id == *id)?;
+        self.reveal_track = None;
+        Some(index)
+    }
+
     fn insert_next(&mut self, track: TrackItem) {
         // Keep the backing queue in list order, while inserting immediately
         // after the current track in the independent shuffled order.
@@ -983,6 +1258,47 @@ pub fn with_ui<R>(f: impl FnOnce(&Rc<Ui>) -> R) -> Option<R> {
 
 thread_local! {
     static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) };
+    /// Drives the page up to its top when Esc is pressed on home.
+    static SCROLL_TO_TOP: slint::Timer = slint::Timer::default();
+}
+
+/// Glide the page to its top, quick at first and settling at the end. Any
+/// scroll of the user's own (or a page change) takes over and stops it.
+fn scroll_to_top(app: &App<'_>) {
+    let from = app.get_scroll_y();
+    SCROLL_TO_TOP.with(|t| t.stop());
+    if from >= 0.0 || crate::platform::reduce_motion() {
+        app.set_scroll_y(0.0);
+        return;
+    }
+    // Longer pages take a little longer, but never feel slow.
+    let duration = Duration::from_millis((250.0 + -from as f64 * 0.05).min(550.0) as u64);
+    let started = Instant::now();
+    let view = app.get_view();
+    let mut last = from;
+    SCROLL_TO_TOP.with(|t| {
+        t.start(
+            slint::TimerMode::Repeated,
+            crate::platform::frame_interval(),
+            move || {
+                let done = with_ui(|ui| {
+                    let app = ui.app();
+                    if app.get_view() != view || (app.get_scroll_y() - last).abs() > 0.5 {
+                        return true;
+                    }
+                    let t = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+                    let eased = 1.0 - (1.0 - t).powi(3);
+                    last = from * (1.0 - eased);
+                    app.set_scroll_y(last);
+                    t >= 1.0
+                })
+                .unwrap_or(true);
+                if done {
+                    SCROLL_TO_TOP.with(|t| t.stop());
+                }
+            },
+        );
+    });
 }
 
 /// Push the dev chunk grid. `blocks`: 0 queued, 1 in flight, 2 received.
@@ -999,6 +1315,23 @@ fn show_chunks(generation: u64, status: String, stats: String, blocks: Vec<i32>,
         app.set_debug_active(active);
         app.set_debug_blocks(ModelRc::new(VecModel::from(blocks)));
     });
+}
+
+/// Ask for one frame of the main window (nothing while it is closed).
+pub fn request_redraw() {
+    UI.with(|u| {
+        if let Some(ui) = u.borrow().as_ref() {
+            ui.win.window().request_redraw();
+        }
+    });
+}
+
+/// `TIDE_FANCY_ANIMATION=1` (or 0) overrides the Fancy Animation setting for
+/// this run. Kept out of `Settings`, which is saved whole (window placement
+/// on exit).
+pub fn fancy_animation_override() -> Option<bool> {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| std::env::var("TIDE_FANCY_ANIMATION").ok().map(|v| v != "0"))
 }
 
 /// Run `f` on the UI thread with the controller.
@@ -1023,7 +1356,20 @@ struct Grid {
     combine_others: bool,
     /// Per-group card models on screen, so artwork can be filled and dropped by range.
     models: Vec<Rc<VecModel<CardData>>>,
+    /// The group list on screen, patched in place when a newer copy arrives.
+    groups_model: Option<Rc<VecModel<SectionData>>>,
 }
+
+/// Refreshes of the page on screen still waiting on the server.
+#[derive(Default)]
+struct SyncState {
+    page_gen: u64,
+    running: u32,
+    since: Option<Instant>,
+}
+
+/// The toolbar wave fills for at least this long, so a quick check reads as one.
+const SYNC_MIN_SHOWN: Duration = Duration::from_millis(1200);
 
 /// Sort and group choices for a grid page; the first of each is the default.
 fn grid_options(kind: &str) -> (&'static [&'static str], &'static [&'static str]) {
@@ -1150,6 +1496,10 @@ fn fmt_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+fn in_prefetch_zone(progress: f32) -> bool {
+    progress >= PREFETCH_ZONE
+}
+
 /// Every credited artist as UI links; falls back to the single known artist for rows that
 /// predate the full list. Empty when no artist id is known (nothing to link to).
 fn artist_links(t: &TrackItem) -> Vec<ArtistLink> {
@@ -1195,6 +1545,7 @@ fn track_row(t: &TrackItem, favorite: bool) -> TrackData {
         explicit: t.explicit,
         favorite,
         cover: Image::default(),
+        fresh: false,
     }
 }
 
@@ -1233,7 +1584,241 @@ fn card_row(c: &Card) -> CardData {
         favorite: false,
         tint: tile_tint(&c.id, &c.title),
         detail: video_length(c.duration).into(),
+        fresh: false,
+        explicit: false,
     }
+}
+
+/// Bring `model` in line with `rows` through single-row edits, so the view keeps
+/// the instances (and loaded artwork) of every row that is still there. A kept
+/// row goes through `merge(old, new)`, which returns the row to store or `None`
+/// when nothing changed; a row that was not there before goes through `mark`.
+/// Returns how many rows were inserted.
+fn patch_rows<T: Clone + 'static>(
+    model: &VecModel<T>,
+    rows: Vec<T>,
+    key: impl Fn(&T) -> String,
+    merge: impl Fn(&T, T) -> Option<T>,
+    mark: impl Fn(&mut T),
+) -> usize {
+    let wanted: HashSet<String> = rows.iter().map(&key).collect();
+    for i in (0..model.row_count()).rev() {
+        if model
+            .row_data(i)
+            .is_some_and(|row| !wanted.contains(&key(&row)))
+        {
+            model.remove(i);
+        }
+    }
+    let mut inserted = 0;
+    let len = rows.len();
+    for (i, row) in rows.into_iter().enumerate() {
+        let k = key(&row);
+        let found = (i..model.row_count()).find_map(|j| {
+            model
+                .row_data(j)
+                .filter(|old| key(old) == k)
+                .map(|old| (j, old))
+        });
+        match found {
+            Some((j, old)) if j == i => {
+                if let Some(row) = merge(&old, row) {
+                    model.set_row_data(i, row);
+                }
+            }
+            Some((j, old)) => {
+                model.remove(j);
+                model.insert(i, merge(&old, row).unwrap_or(old));
+            }
+            None => {
+                let mut row = row;
+                mark(&mut row);
+                model.insert(i, row);
+                inserted += 1;
+            }
+        }
+    }
+    while model.row_count() > len {
+        model.remove(model.row_count() - 1);
+    }
+    inserted
+}
+
+fn card_key(row: &CardData) -> String {
+    format!("{}:{}", row.kind, row.id)
+}
+
+fn track_key(row: &TrackData) -> String {
+    row.id.to_string()
+}
+
+/// Keep the artwork already on screen unless the card now points at other art.
+fn merge_card(old: &CardData, mut row: CardData) -> Option<CardData> {
+    if row.image_url == old.image_url {
+        row.image = old.image.clone();
+    }
+    row.fresh = old.fresh;
+    (row != *old).then_some(row)
+}
+
+fn merge_track(old: &TrackData, mut row: TrackData) -> Option<TrackData> {
+    if row.cover_url == old.cover_url {
+        row.cover = old.cover.clone();
+    }
+    row.fresh = old.fresh;
+    (row != *old).then_some(row)
+}
+
+/// Rows that popped in lose the flag once the animation is over, so a view
+/// that rebuilds them later does not play it again.
+fn settle_fresh(cards: Vec<Rc<VecModel<CardData>>>, tracks: Vec<Rc<VecModel<TrackData>>>) {
+    if cards.is_empty() && tracks.is_empty() {
+        return;
+    }
+    slint::Timer::single_shot(Duration::from_millis(1200), move || {
+        for model in &cards {
+            for i in 0..model.row_count() {
+                if let Some(mut row) = model.row_data(i).filter(|row| row.fresh) {
+                    row.fresh = false;
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+        for model in &tracks {
+            for i in 0..model.row_count() {
+                if let Some(mut row) = model.row_data(i).filter(|row| row.fresh) {
+                    row.fresh = false;
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+    });
+}
+
+/// Remember `[from, upto)` as the window the view asked to keep for `key`, and
+/// return it clamped to the `n` rows there are now. The request is stored as
+/// made: a refresh replays it, the rows may have grown since, and a feed
+/// section's window runs past its cards into its tracks. Clamped to the card
+/// count, it would replay as an empty track window and drop every track cover.
+fn keep_window(
+    keep: &mut HashMap<String, (usize, usize)>,
+    key: &str,
+    from: usize,
+    upto: usize,
+    n: usize,
+) -> (usize, usize) {
+    keep.insert(key.to_string(), (from, upto));
+    let upto = upto.min(n);
+    (from.min(upto), upto)
+}
+
+/// How a section is laid out on screen.
+fn section_layout(s: &Section) -> &str {
+    if s.layout == "cards" && s.title.eq_ignore_ascii_case("Recently played") {
+        "rows"
+    } else {
+        &s.layout
+    }
+}
+
+/// A section or grid group as it should now look: its header and its rows.
+struct GroupRows {
+    title: String,
+    layout: String,
+    cards: Vec<CardData>,
+    tracks: Vec<TrackData>,
+}
+
+/// The outcome of patching a list of sections in place.
+struct PatchedGroups {
+    models: Vec<SectionModel>,
+    /// (new index, old index) of every section whose models were kept.
+    kept: Vec<(usize, usize)>,
+    fresh_cards: Vec<Rc<VecModel<CardData>>>,
+    fresh_tracks: Vec<Rc<VecModel<TrackData>>>,
+}
+
+/// Sections are matched across refreshes by layout and title.
+fn group_key(layout: &str, title: &str) -> String {
+    format!("{layout}\u{1f}{title}")
+}
+
+/// Patch the sections on screen towards `groups`. A section whose layout and
+/// title survive keeps its models, and only its changed rows are touched; a new
+/// section grows in. `old` is keyed with `group_key`.
+fn patch_groups(
+    outer: &VecModel<SectionData>,
+    old: Vec<(String, SectionModel)>,
+    groups: Vec<GroupRows>,
+) -> PatchedGroups {
+    let mut pool: Vec<Option<(String, SectionModel)>> = old.into_iter().map(Some).collect();
+    let mut out = PatchedGroups {
+        models: Vec::with_capacity(groups.len()),
+        kept: Vec::new(),
+        fresh_cards: Vec::new(),
+        fresh_tracks: Vec::new(),
+    };
+    let mut rows = Vec::with_capacity(groups.len());
+    for (i, group) in groups.into_iter().enumerate() {
+        let key = group_key(&group.layout, &group.title);
+        let reused = pool
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|(old, _)| *old == key))
+            .and_then(|at| pool[at].take().map(|(_, models)| (at, models)));
+        let models = match reused {
+            Some((at, (cards, tracks, n))) => {
+                if patch_rows(&cards, group.cards, card_key, merge_card, |row| {
+                    row.fresh = true
+                }) > 0
+                {
+                    out.fresh_cards.push(cards.clone());
+                }
+                if patch_rows(&tracks, group.tracks, track_key, merge_track, |row| {
+                    row.fresh = true
+                }) > 0
+                {
+                    out.fresh_tracks.push(tracks.clone());
+                }
+                out.kept.push((i, at));
+                (cards, tracks, n)
+            }
+            None => {
+                let cards: Vec<CardData> = group
+                    .cards
+                    .into_iter()
+                    .map(|row| CardData { fresh: true, ..row })
+                    .collect();
+                let tracks: Vec<TrackData> = group
+                    .tracks
+                    .into_iter()
+                    .map(|row| TrackData { fresh: true, ..row })
+                    .collect();
+                let models = (
+                    Rc::new(VecModel::from(cards)),
+                    Rc::new(VecModel::from(tracks)),
+                    0,
+                );
+                out.fresh_cards.push(models.0.clone());
+                out.fresh_tracks.push(models.1.clone());
+                models
+            }
+        };
+        rows.push(SectionData {
+            title: group.title.into(),
+            layout: group.layout.into(),
+            cards: ModelRc::from(models.0.clone()),
+            tracks: ModelRc::from(models.1.clone()),
+        });
+        out.models.push(models);
+    }
+    patch_rows(
+        outer,
+        rows,
+        |row| group_key(&row.layout, &row.title),
+        |old, row| (row != *old).then_some(row),
+        |_| {},
+    );
+    out
 }
 
 /// Ids of what is in My Collection, by kind.
@@ -1352,6 +1937,37 @@ fn sized_cover(url: &str, size: u32) -> String {
     url.replace("/160x160.jpg", &format!("/{size}x{size}.jpg"))
 }
 
+/// Collection grid artwork px: 640 for the two largest slider steps (tiles of
+/// 236pt and up are 470px+ on a 2x display), 320 below that.
+fn grid_art_px(grid_size: i32) -> u32 {
+    if grid_size >= 3 { 640 } else { 320 }
+}
+
+/// Cards carry 320px URLs; above that, ask for a size the CDN has for the kind.
+/// Albums and playlists have 640x640; artist pictures skip 640 (403) and have 750x750.
+/// Other kinds (mixes, videos, pages) keep their URL.
+fn card_art_url(kind: &str, url: &str, max_px: u32) -> String {
+    if max_px <= 320 || !url.ends_with("/320x320.jpg") {
+        return url.to_string();
+    }
+    let size = match kind {
+        "album" | "playlist" => "640x640",
+        "artist" => "750x750",
+        _ => return url.to_string(),
+    };
+    url.replace("/320x320.jpg", &format!("/{size}.jpg"))
+}
+
+/// Decode cap for the Now Playing original: about the largest the view gets on a 5K display.
+const LARGE_COVER_PX: u32 = 2048;
+
+/// `…/{W}x{H}.jpg` → `…/origin.jpg`, the uploaded master (no fixed size above 1280 exists).
+fn origin_cover(url: &str) -> Option<String> {
+    let (base, file) = url.rsplit_once('/')?;
+    let (w, h) = file.strip_suffix(".jpg")?.split_once('x')?;
+    (w.parse::<u32>().is_ok() && h.parse::<u32>().is_ok()).then(|| format!("{base}/origin.jpg"))
+}
+
 fn url_key(url: &str, max_px: u32) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1384,13 +2000,22 @@ async fn fetch_image(
     url: &str,
     max_px: u32,
 ) -> Option<(SharedPixelBuffer<Rgba8Pixel>, [u8; 3])> {
-    let _permit = ctx.img_sem.acquire().await.ok()?;
-    let path = ctx
-        .images
-        .get_or_download(&url_key(url, 0), url)
-        .await
-        .inspect_err(|e| tracing::warn!("artwork download failed: {e}"))
-        .ok()?;
+    let legacy = url_key(url, 0);
+    // Only downloads take a download slot. A page's network fetches carry on
+    // after it is left, and a cached cover queued behind them would keep the
+    // page we came back to blank for as long as they run.
+    let path = match ctx.images.cached(&legacy, url) {
+        Some(path) => path,
+        None => {
+            let _download = ctx.img_sem.acquire().await.ok()?;
+            ctx.images
+                .get_or_download(&legacy, url)
+                .await
+                .inspect_err(|e| tracing::warn!("artwork download failed: {e}"))
+                .ok()?
+        }
+    };
+    let _decode = ctx.decode_sem.acquire().await.ok()?;
     tokio::task::spawn_blocking(move || {
         // Cached files are named .jpg regardless of content, so sniff the real format.
         let mut img = image::ImageReader::open(&path)
@@ -1469,21 +2094,36 @@ impl Ui {
     /// Hiding destroys the native window and its GPU surfaces (see
     /// `platform::destroy_window_on_hide`); the Dock icon brings it back.
     pub fn close_window(self: &Rc<Self>) {
-        self.enter_background();
-        // Menu actions (⌘W included) run while Slint holds the native window,
-        // so it can only be torn down once the action has returned.
-        let weak = self.win.as_weak();
-        slint::Timer::single_shot(Duration::ZERO, move || {
-            if let Some(win) = weak.upgrade()
-                && let Err(e) = win.hide()
-            {
-                tracing::warn!("Could not close the window: {e}");
-            }
-        });
+        #[cfg(target_os = "macos")]
+        crate::window_state::remember(self.win.window(), &self.ctx);
+        let weak = Rc::downgrade(self);
+        let finish = move || {
+            // Menu actions (⌘W included) run while Slint holds the native
+            // window, so it can only be torn down once the action has returned.
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                ui.enter_background();
+                if let Err(e) = ui.win.hide() {
+                    tracing::warn!("Could not close the window: {e}");
+                }
+            });
+        };
+        // The window shrinks away first, then goes.
+        #[cfg(target_os = "macos")]
+        crate::platform::animate_window_out(self.win.window(), finish);
+        #[cfg(not(target_os = "macos"))]
+        finish();
     }
 
     /// Drop what only the window needs before it goes away.
     fn enter_background(self: &Rc<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            crate::window_state::remember(self.win.window(), &self.ctx);
+            crate::window_state::prepare_restore();
+        }
         // A video has nothing to draw into; keep music going, but not video.
         if self.video_active() && self.app().get_playing() {
             self.video_toggle_play();
@@ -1516,25 +2156,40 @@ impl Ui {
             }
             return;
         }
+        #[cfg(target_os = "macos")]
+        crate::window_state::place_before_show(self.win.window(), &self.ctx);
         if let Err(e) = self.win.show() {
             tracing::warn!("Could not reopen the window: {e}");
             return;
         }
         #[cfg(target_os = "macos")]
-        crate::platform::window_reopened(&self.win);
+        {
+            crate::platform::window_reopened(&self.win);
+            slint::Timer::single_shot(Duration::ZERO, || on_ui(|ui| ui.restore_window()));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn restore_window(&self) {
+        crate::window_state::restore(self.win.window(), &self.ctx);
     }
 
     // ------------------------------------------------------------ memory
 
-    fn low_ram(&self) -> bool {
-        self.ctx.settings.read().unwrap().low_ram
+    fn fancy_animation(&self) -> bool {
+        fancy_animation_override().unwrap_or(self.ctx.settings.read().unwrap().fancy_animation)
     }
 
-    fn set_low_ram(self: &Rc<Self>, on: bool) {
-        self.update_settings(|s| s.low_ram = on);
-        self.app().set_low_ram(on);
-        crate::platform::apply_memory_profile(on);
-        if on {
+    /// The lean memory profile: everything but Fancy Animation.
+    fn low_ram(&self) -> bool {
+        !self.fancy_animation()
+    }
+
+    fn set_fancy_animation(self: &Rc<Self>, on: bool) {
+        self.update_settings(|s| s.fancy_animation = on);
+        self.app().set_fancy_animation(on);
+        crate::platform::apply_memory_profile(!on);
+        if !on {
             self.nav_finish();
             self.state.borrow_mut().snaps.clear();
             crate::platform::purge_gpu_cache();
@@ -1579,8 +2234,8 @@ impl Ui {
                 .map(pixels)
                 .sum::<u64>();
         }
-        // One BGRA surface per drawable at physical size: three, or two in
-        // Low RAM mode. None while the window is closed.
+        // One BGRA surface per drawable at physical size: two, or three with
+        // Fancy Animation. None while the window is closed.
         let size = self.win.window().size();
         let buffers: u64 = if !self.win.window().is_visible() {
             0
@@ -1764,8 +2419,10 @@ impl Ui {
         ));
         bind!(on_set_grid_combine_others, |ui, on| ui
             .set_grid_arrangement(None, None, Some(on)));
-        bind!(on_set_grid_size, |ui, size| ui
-            .update_settings(|s| s.grid_size = size.clamp(0, 4)));
+        bind!(on_set_grid_size, |ui, size| ui.set_grid_size(size));
+        bind!(on_zoom_in, |ui| ui.change_zoom(1));
+        bind!(on_zoom_out, |ui| ui.change_zoom(-1));
+        bind!(on_reset_zoom, |ui| ui.set_zoom(100));
         bind!(on_create_in_collection, |ui, kind, name| ui
             .create_in_collection(&kind, name.trim()));
         bind!(on_toggle_page_favorite, |ui| ui.toggle_page_favorite());
@@ -1837,8 +2494,6 @@ impl Ui {
             }
         });
         bind!(on_play_track, |ui, id| ui.play_from_page(&id));
-        bind!(on_play_section_track, |ui, section, id| ui
-            .play_from_section(section.max(0) as usize, &id));
         bind!(on_play_all, |ui, shuffle| ui.play_all(shuffle));
         bind!(on_toggle_play, |ui| ui.toggle_play());
         bind!(on_next, |ui| ui.skip(1, true));
@@ -1858,6 +2513,8 @@ impl Ui {
             }
         });
         bind!(on_open_video, |ui| ui.show_video_view(true));
+        bind!(on_open_now_playing_album, |ui| ui.open_playing_album());
+        bind!(on_open_now_playing_context, |ui| ui.open_playing_source());
         bind!(on_close_video, |ui| ui.show_video_view(false));
         bind!(on_stop_video, |ui| ui.stop_video());
         bind!(on_set_video_quality, |ui, choice| ui
@@ -1876,13 +2533,13 @@ impl Ui {
         bind!(on_minimize, |ui| ui.win.window().set_minimized(true));
         bind!(on_close_window, |ui| ui.close_window());
         {
-            // The red close button: same as ⌘W. Slint hides the window itself.
+            // The red close button: same as ⌘W, animation included.
             let weak = Rc::downgrade(self);
             self.win.window().on_close_requested(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.enter_background();
+                    ui.close_window();
                 }
-                slint::CloseRequestResponse::HideWindow
+                slint::CloseRequestResponse::KeepWindowShown
             });
         }
         app.on_open_help(|| {
@@ -1933,7 +2590,7 @@ impl Ui {
         });
         bind!(on_set_keep_most_played, |ui, on| ui
             .update_settings(|s| s.keep_most_played = on));
-        bind!(on_set_low_ram, |ui, on| ui.set_low_ram(on));
+        bind!(on_set_fancy_animation, |ui, on| ui.set_fancy_animation(on));
         bind!(on_pkce_finish, |ui, url| ui
             .pkce_finish(url.trim().to_string()));
         self.dsp_wire();
@@ -1949,6 +2606,7 @@ impl Ui {
         app.set_app_version(env!("CARGO_PKG_VERSION").into());
         self.present_settings();
         self.dsp_boot();
+        crate::zoom::schedule(&self.win);
         self.present_signal();
         if !has_session {
             return;
@@ -2010,6 +2668,12 @@ impl Ui {
 
         let elapsed = Duration::from_millis(saved.elapsed_ms);
         let has_queue = !saved.queue.is_empty() && !saved.order.is_empty();
+        let source = self
+            .ctx
+            .meta
+            .get_json("playback-source")
+            .and_then(|json| serde_json::from_str::<Option<Page>>(&json).ok())
+            .flatten();
         {
             let mut st = self.state.borrow_mut();
             st.volume_before_mute = saved.volume;
@@ -2021,6 +2685,7 @@ impl Ui {
                 st.order = saved.order;
                 st.pos = saved.pos;
                 st.context = saved.context;
+                st.playback_source = source;
                 st.pending_seek = (!elapsed.is_zero()).then_some(elapsed);
             }
         }
@@ -2055,7 +2720,8 @@ impl Ui {
                         if matches!(ui.current_page(), Some(Page::Home))
                             && ui.app().get_home_tab() == 0
                         {
-                            ui.set_sections(sections);
+                            let page_gen = ui.state.borrow().page_gen;
+                            ui.show_sections("home", page_gen, sections);
                         }
                     });
                 }
@@ -2179,6 +2845,30 @@ impl Ui {
         });
     }
 
+    /// Now Playing art from the full-size original (`origin.jpg`, quality 100).
+    /// Until it arrives, or if it 403s, the view shows the 640px `np-cover`.
+    /// Kept out of `state.images`: originals can be several MB each.
+    fn load_large_cover(self: &Rc<Self>, track_id: &str, cover_url: &str) {
+        self.app().set_np_cover_large(Image::default());
+        if std::env::var_os("TIDE_NO_ART").is_some() {
+            return;
+        }
+        let Some(url) = origin_cover(cover_url) else {
+            return;
+        };
+        let id = track_id.to_string();
+        self.spawn(|ctx| async move {
+            let Some((buffer, _)) = fetch_image(&ctx, &url, LARGE_COVER_PX).await else {
+                return;
+            };
+            on_ui(move |ui| {
+                if ui.app().get_current_id() == id.as_str() {
+                    ui.app().set_np_cover_large(Image::from_rgba8(buffer));
+                }
+            });
+        });
+    }
+
     fn cards_model(
         self: &Rc<Self>,
         key: &str,
@@ -2200,12 +2890,7 @@ impl Ui {
         max_px: u32,
     ) {
         let n = model.row_count();
-        let upto = upto.min(n);
-        let from = from.min(upto);
-        self.state
-            .borrow_mut()
-            .art_keep
-            .insert(key.to_string(), (from, upto));
+        let (from, upto) = keep_window(&mut self.state.borrow_mut().art_keep, key, from, upto, n);
         for i in 0..n {
             if (from..upto).contains(&i) {
                 continue;
@@ -2214,10 +2899,10 @@ impl Ui {
                 && !row.image_url.is_empty()
                 && row.image.size().width > 0
             {
-                self.state
-                    .borrow_mut()
-                    .images
-                    .remove(&url_key(&row.image_url, max_px));
+                self.state.borrow_mut().images.remove(&url_key(
+                    &card_art_url(&row.kind, &row.image_url, max_px),
+                    max_px,
+                ));
             }
         }
         drop_card_images_outside(&model, from, upto);
@@ -2228,7 +2913,7 @@ impl Ui {
             else {
                 continue;
             };
-            let url = row.image_url.to_string();
+            let url = card_art_url(&row.kind, &row.image_url, max_px);
             let id = row.id.clone();
             let model = model.clone();
             let key = key.to_string();
@@ -2255,12 +2940,7 @@ impl Ui {
         max_px: u32,
     ) {
         let n = model.row_count();
-        let upto = upto.min(n);
-        let from = from.min(upto);
-        self.state
-            .borrow_mut()
-            .art_keep
-            .insert(key.to_string(), (from, upto));
+        let (from, upto) = keep_window(&mut self.state.borrow_mut().art_keep, key, from, upto, n);
         for i in 0..n {
             if (from..upto).contains(&i) {
                 continue;
@@ -2320,15 +3000,39 @@ impl Ui {
     }
 
     fn drop_grid_art(self: &Rc<Self>) {
+        self.drop_grid_art_at(self.grid_px());
+    }
+
+    fn drop_grid_art_at(self: &Rc<Self>, px: u32) {
         let models = self.state.borrow().grid.models.clone();
         for (i, model) in models.iter().enumerate() {
-            self.keep_card_images(
-                &format!("grid:{i}"),
-                ModelRc::from(model.clone()),
-                0,
-                0,
-                320,
-            );
+            self.keep_card_images(&format!("grid:{i}"), ModelRc::from(model.clone()), 0, 0, px);
+        }
+    }
+
+    /// Grid artwork size for the current grid-size setting (see `grid_art_px`).
+    fn grid_px(&self) -> u32 {
+        grid_art_px(self.ctx.settings.read().unwrap().grid_size)
+    }
+
+    /// The grid slider moved: if the artwork size changed, reload what is on screen at it.
+    fn set_grid_size(self: &Rc<Self>, size: i32) {
+        let before = self.grid_px();
+        self.update_settings(|s| s.grid_size = size.clamp(0, 4));
+        if self.grid_px() == before {
+            return;
+        }
+        let ranges: Vec<_> = {
+            let st = self.state.borrow();
+            (0..st.grid.models.len())
+                .map(|i| st.art_keep.get(&format!("grid:{i}")).copied())
+                .collect()
+        };
+        self.drop_grid_art_at(before);
+        for (group, range) in ranges.into_iter().enumerate() {
+            if let Some((from, upto)) = range {
+                self.grid_art(group, from, upto);
+            }
         }
     }
 
@@ -2364,8 +3068,6 @@ impl Ui {
         let rows: Vec<SectionData> = sections
             .iter()
             .map(|s| {
-                let rows_layout =
-                    s.layout == "cards" && s.title.eq_ignore_ascii_case("Recently played");
                 // Artwork is requested later, when the section scrolls near the viewport.
                 let cards = Rc::new(VecModel::from(
                     s.cards
@@ -2382,28 +3084,90 @@ impl Ui {
                 models.push((cards.clone(), tracks.clone(), 0));
                 SectionData {
                     title: s.title.as_str().into(),
-                    layout: if rows_layout {
-                        "rows".into()
-                    } else {
-                        s.layout.as_str().into()
-                    },
+                    layout: section_layout(s).into(),
                     cards: ModelRc::from(cards),
                     tracks: ModelRc::from(tracks),
                 }
             })
             .collect();
+        let outer = Rc::new(VecModel::from(rows));
         {
             let mut st = self.state.borrow_mut();
             st.sections = sections;
             st.section_models = models;
+            st.sections_model = Some(outer.clone());
+            st.sections_source = None;
         }
-        self.app()
-            .set_sections(ModelRc::from(Rc::new(VecModel::from(rows))));
+        self.app().set_sections(ModelRc::from(outer));
+    }
+
+    /// Sections loaded from `source` (a cache key) for page `page_gen`. The first
+    /// copy a page shows is drawn whole; a newer one from the server is patched
+    /// in, so only what changed moves and new cards grow in where they belong.
+    fn show_sections(self: &Rc<Self>, source: &str, page_gen: u64, sections: Vec<Section>) {
+        let outer = {
+            let st = self.state.borrow();
+            let same = st
+                .sections_source
+                .as_ref()
+                .is_some_and(|(g, key)| *g == page_gen && key == source);
+            st.sections_model
+                .clone()
+                .filter(|_| same && !st.sections.is_empty())
+        };
+        let Some(outer) = outer else {
+            self.set_sections(sections);
+            self.state.borrow_mut().sections_source = Some((page_gen, source.to_string()));
+            return;
+        };
+        let (fav_ids, collection, old, ranges) = {
+            let st = self.state.borrow();
+            let old: Vec<(String, SectionModel)> = st
+                .sections
+                .iter()
+                .zip(st.section_models.iter().cloned())
+                .map(|(s, models)| (group_key(section_layout(s), &s.title), models))
+                .collect();
+            let ranges: Vec<Option<(usize, usize)>> = (0..old.len())
+                .map(|i| st.art_keep.get(&format!("home:{i}")).copied())
+                .collect();
+            (st.fav_ids.clone(), st.collection.clone(), old, ranges)
+        };
+        let groups = sections
+            .iter()
+            .map(|s| GroupRows {
+                title: s.title.clone(),
+                layout: section_layout(s).to_string(),
+                cards: s
+                    .cards
+                    .iter()
+                    .map(|c| card_row_fav(c, &collection))
+                    .collect(),
+                tracks: s
+                    .tracks
+                    .iter()
+                    .map(|t| track_row(t, fav_ids.contains(&t.id)))
+                    .collect(),
+            })
+            .collect();
+        let patched = patch_groups(&outer, old, groups);
+        {
+            let mut st = self.state.borrow_mut();
+            st.sections = sections;
+            st.section_models = patched.models;
+        }
+        // Kept sections may have moved or gained rows: fill their artwork again.
+        for (now, before) in patched.kept {
+            if let Some((from, upto)) = ranges[before] {
+                self.section_visible(now, from, upto);
+            }
+        }
+        settle_fresh(patched.fresh_cards, patched.fresh_tracks);
     }
 
     /// Home section `index` is near the viewport: keep artwork for cards `[from, upto)`.
     fn section_visible(self: &Rc<Self>, index: usize, from: usize, upto: usize) {
-        let (card_model, track_model, small) = {
+        let (card_model, track_model, small, shift) = {
             let st = self.state.borrow();
             let Some(section) = st.sections.get(index) else {
                 return;
@@ -2413,7 +3177,13 @@ impl Ui {
             };
             let small = section.layout == "shortcuts"
                 || section.title.eq_ignore_ascii_case("Recently played");
-            (card_model.clone(), track_model.clone(), small)
+            // Feed rows list their tracks after the cards: shift the range onto the tracks.
+            let shift = if section_layout(section) == "rows" {
+                section.cards.len()
+            } else {
+                0
+            };
+            (card_model.clone(), track_model.clone(), small, shift)
         };
         self.keep_card_images(
             &format!("home:{index}"),
@@ -2425,8 +3195,8 @@ impl Ui {
         self.keep_track_covers(
             &format!("home-tracks:{index}"),
             &track_model,
-            from,
-            upto,
+            from.saturating_sub(shift),
+            upto.saturating_sub(shift),
             128,
         );
     }
@@ -2435,25 +3205,45 @@ impl Ui {
         let Some(model) = self.state.borrow().grid.models.get(group).cloned() else {
             return;
         };
+        let px = self.grid_px();
         self.keep_card_images(
             &format!("grid:{group}"),
             ModelRc::from(model),
             from,
             upto,
-            320,
+            px,
         );
     }
 
     // ------------------------------------------------------------ settings
 
+    pub(super) fn change_zoom(self: &Rc<Self>, direction: i32) {
+        let percent = self.ctx.settings.read().unwrap().zoom_percent;
+        self.set_zoom(crate::zoom::step(percent, direction));
+    }
+
+    fn set_zoom(self: &Rc<Self>, percent: i32) {
+        let percent = crate::zoom::normalize(percent);
+        if self.ctx.settings.read().unwrap().zoom_percent == percent {
+            return;
+        }
+        // Page-transition snapshots were captured at the old scale.
+        self.nav_finish();
+        self.state.borrow_mut().snaps.clear();
+        self.app().set_menu_open(false);
+        self.update_settings(|s| s.zoom_percent = percent);
+        crate::zoom::schedule(&self.win);
+    }
+
     fn present_settings(&self) {
         let app = self.app();
         let settings = self.ctx.settings.read().unwrap().clone();
+        app.set_zoom_percent(settings.zoom_percent);
         app.set_quality(settings.quality.into());
         app.set_show_collection(settings.show_collection);
         app.set_show_audio_metadata(settings.show_audio_metadata);
         app.set_keep_most_played(settings.keep_most_played);
-        app.set_low_ram(settings.low_ram);
+        app.set_fancy_animation(fancy_animation_override().unwrap_or(settings.fancy_animation));
         app.set_rate_matching(settings.rate_matching);
         app.set_restore_sample_rate(settings.restore_sample_rate);
         app.set_grid_size(settings.grid_size.clamp(0, 4));
@@ -2757,10 +3547,82 @@ impl Ui {
                 tracks: ModelRc::default(),
             })
             .collect();
-        self.state.borrow_mut().grid.models = models;
+        let outer = Rc::new(VecModel::from(sections));
+        {
+            let mut st = self.state.borrow_mut();
+            st.grid.models = models;
+            st.grid.groups_model = Some(outer.clone());
+        }
         let app = self.app();
         app.set_grid_cards(ModelRc::new(VecModel::from(flat)));
-        app.set_grid_groups(ModelRc::new(VecModel::from(sections)));
+        app.set_grid_groups(ModelRc::from(outer));
+    }
+
+    /// A newer copy of the grid from the server: patch the groups on screen
+    /// instead of redrawing them, so only new or changed cards move.
+    fn update_grid(self: &Rc<Self>, cards: &[Card]) {
+        let outer = self
+            .state
+            .borrow()
+            .grid
+            .groups_model
+            .clone()
+            .filter(|m| m.row_count() > 0);
+        let Some(outer) = outer else {
+            self.set_grid(cards);
+            return;
+        };
+        self.state.borrow_mut().grid.all = cards.to_vec();
+        let (groups, collection, old, ranges) = {
+            let st = self.state.borrow();
+            let groups = arrange_grid(
+                &st.grid.all,
+                &st.grid.filter,
+                &st.grid.sort,
+                &st.grid.group,
+                st.grid.combine_others,
+            );
+            let old: Vec<(String, SectionModel)> = (0..outer.row_count())
+                .filter_map(|i| outer.row_data(i))
+                .zip(st.grid.models.iter())
+                .map(|(row, cards)| {
+                    let tracks = Rc::new(VecModel::<TrackData>::default());
+                    (group_key("cards", &row.title), (cards.clone(), tracks, 0))
+                })
+                .collect();
+            let ranges: Vec<Option<(usize, usize)>> = (0..old.len())
+                .map(|i| st.art_keep.get(&format!("grid:{i}")).copied())
+                .collect();
+            (groups, st.collection.clone(), old, ranges)
+        };
+        let flat: Vec<CardData> = groups
+            .iter()
+            .flat_map(|(_, cards)| cards.iter().map(|c| card_row_fav(c, &collection)))
+            .collect();
+        let rows = groups
+            .iter()
+            .map(|(title, cards)| GroupRows {
+                title: title.clone(),
+                layout: "cards".into(),
+                cards: cards.iter().map(|c| card_row_fav(c, &collection)).collect(),
+                tracks: Vec::new(),
+            })
+            .collect();
+        let patched = patch_groups(&outer, old, rows);
+        self.state.borrow_mut().grid.models = patched
+            .models
+            .into_iter()
+            .map(|(cards, ..)| cards)
+            .collect();
+        // Only its length is read; the cards themselves live in the groups.
+        self.app()
+            .set_grid_cards(ModelRc::new(VecModel::from(flat)));
+        for (now, before) in patched.kept {
+            if let Some((from, upto)) = ranges[before] {
+                self.grid_art(now, from, upto);
+            }
+        }
+        settle_fresh(patched.fresh_cards, Vec::new());
     }
 
     /// Change the sort and / or grouping of the grid on screen and remember it for that page kind.
@@ -2922,12 +3784,47 @@ impl Ui {
             model
         };
         self.app().set_tracks(ModelRc::from(model));
+        self.reveal_playing_track();
         let count = if self.app().get_view() == "artist" {
             4
         } else {
             30
         };
         self.rows_visible(0, count);
+    }
+
+    /// A newer copy of the track list on screen: patch it row by row.
+    fn update_tracks(self: &Rc<Self>, tracks: Vec<TrackItem>, context: &str) {
+        let model = {
+            let st = self.state.borrow();
+            st.tracks_model
+                .clone()
+                .filter(|m| m.row_count() > 0 && st.page_context == context)
+        };
+        let Some(model) = model.filter(|_| self.app().get_filter_text().is_empty()) else {
+            self.set_tracks(tracks, context);
+            return;
+        };
+        let rows: Vec<TrackData> = {
+            let st = self.state.borrow();
+            tracks
+                .iter()
+                .map(|t| track_row(t, st.fav_ids.contains(&t.id)))
+                .collect()
+        };
+        let inserted = patch_rows(&model, rows, track_key, merge_track, |row| row.fresh = true);
+        self.state.borrow_mut().page_tracks = tracks;
+        let (from, upto) = self
+            .state
+            .borrow()
+            .art_keep
+            .get("tracks")
+            .copied()
+            .unwrap_or((0, 30));
+        self.keep_track_covers("tracks", &model, from, upto, 96);
+        if inserted > 0 {
+            settle_fresh(Vec::new(), vec![model]);
+        }
     }
 
     /// Lazily fetch artwork for the rows on screen, plus one extra page each way.
@@ -2992,6 +3889,10 @@ impl Ui {
             "queue" => Page::Queue,
             "settings" => Page::Settings,
             "dsp" => Page::Dsp,
+            "escape-home" => {
+                self.escape_home();
+                return;
+            }
             "focus-search" => {
                 let app = self.app();
                 app.set_focus_search(app.get_focus_search() + 1);
@@ -3007,11 +3908,50 @@ impl Ui {
         self.show(page, true);
     }
 
+    /// Esc: back to home where it was last left, as a new history entry.
+    /// Already on home, it scrolls to the top instead.
+    fn escape_home(self: &Rc<Self>) {
+        let app = self.app();
+        let left_at = {
+            let mut st = self.state.borrow_mut();
+            let pos = st.hist_pos;
+            if st.history.get(pos).is_some_and(|p| matches!(p, Page::Home)) {
+                if let Some(scroll) = st.hist_scroll.get_mut(pos) {
+                    *scroll = 0.0;
+                }
+                drop(st);
+                scroll_to_top(&app);
+                return;
+            }
+            let end = pos.min(st.history.len());
+            st.history[..end]
+                .iter()
+                .rposition(|p| matches!(p, Page::Home))
+                .and_then(|i| st.hist_scroll.get(i).copied())
+                .unwrap_or(0.0)
+        };
+        self.show(Page::Home, true);
+        if left_at != 0.0 {
+            let mut st = self.state.borrow_mut();
+            let pos = st.hist_pos;
+            if let Some(scroll) = st.hist_scroll.get_mut(pos) {
+                *scroll = left_at;
+            }
+            drop(st);
+            app.set_scroll_y(left_at);
+        }
+    }
+
     fn open_card(self: &Rc<Self>, card: CardData) {
         if card.id.is_empty() {
             return;
         }
         let page = match card.kind.as_str() {
+            // A track has no page of its own: opening it plays it.
+            "track" => {
+                self.play_track_card(&card.id, false);
+                return;
+            }
             "tracks" => Page::Tracks,
             "folder" => Page::Folder {
                 id: card.id.to_string(),
@@ -3079,7 +4019,7 @@ impl Ui {
     /// Snapshot of the page pane as it is on screen, without the top bar.
     fn capture_pane(&self) -> Option<Image> {
         let app = self.app();
-        // Low RAM mode keeps no snapshots: each is a full-resolution copy of
+        // Only Fancy Animation keeps snapshots: each is a full-resolution copy of
         // the page (about 15 MB on a Retina display).
         if !app.get_logged_in() || self.low_ram() {
             return None;
@@ -3232,7 +4172,7 @@ impl Ui {
         let weak = Rc::downgrade(self);
         nav.timer.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(8),
+            crate::platform::frame_interval(),
             move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.nav_tick();
@@ -3358,6 +4298,8 @@ impl Ui {
     }
 
     fn show(self: &Rc<Self>, page: Page, push: bool) {
+        self.state.borrow_mut().reveal_track = None;
+        self.app().set_reveal_track_index(-1);
         if self.app().get_video_open() {
             self.show_video_view(false);
         }
@@ -3421,6 +4363,11 @@ impl Ui {
         };
         app.set_scroll_y(scroll);
         app.set_page_revision(page_gen as i32);
+        self.state.borrow_mut().sync = SyncState {
+            page_gen,
+            ..Default::default()
+        };
+        app.set_syncing(false);
         {
             let st = self.state.borrow();
             app.set_can_go_back(st.hist_pos > 0);
@@ -3517,7 +4464,7 @@ impl Ui {
             Page::Mixes => self.show_grid(
                 "mixes",
                 "mixes",
-                "Mixes & Radio",
+                "Media & Radio",
                 page_gen,
                 |api| async move { api.mixes().await },
             ),
@@ -4123,6 +5070,10 @@ impl Ui {
 
     /// Open the context menu on an album, playlist, mix, artist or folder card.
     fn open_card_menu(self: &Rc<Self>, row: CardData, x: f32, y: f32) {
+        if row.kind == "track" {
+            self.open_track_menu(&row.id, x, y);
+            return;
+        }
         let app = self.app();
         if app.get_menu_open() || !app.get_logged_in() || row.id.is_empty() {
             return;
@@ -4298,11 +5249,21 @@ impl Ui {
         match action {
             "play" => {
                 self.state.borrow_mut().playing_card = Some((card.kind.clone(), card.id.clone()));
-                self.play_queue(tracks, 0, &card.title, Some(false));
+                self.play_queue(
+                    tracks,
+                    0,
+                    &card.title,
+                    Some(false),
+                    Some(Page::Detail(card.clone())),
+                );
             }
-            "play-next" if self.current_track().is_none() => {
-                self.play_queue(tracks, 0, &card.title, Some(false))
-            }
+            "play-next" if self.current_track().is_none() => self.play_queue(
+                tracks,
+                0,
+                &card.title,
+                Some(false),
+                Some(Page::Detail(card.clone())),
+            ),
             "play-next" => {
                 // Inserted last to first, so they follow in their own order.
                 for track in tracks.into_iter().rev() {
@@ -4528,7 +5489,7 @@ impl Ui {
             move |ui, sections| {
                 if ui.app().get_home_tab() == tab && matches!(ui.current_page(), Some(Page::Home)) {
                     ui.app().set_loading(false);
-                    ui.set_sections(sections);
+                    ui.show_sections(key, page_gen, sections);
                 }
             },
         );
@@ -4543,9 +5504,10 @@ impl Ui {
             self.app().set_loading(true);
             self.set_sections(Vec::new());
         }
-        self.load_catalog(key.into(), page_gen, fetch, |ui, sections| {
+        let source = key.to_string();
+        self.load_catalog(key.into(), page_gen, fetch, move |ui, sections| {
             ui.app().set_loading(false);
-            ui.set_sections(sections);
+            ui.show_sections(&source, page_gen, sections);
         });
     }
 
@@ -4591,6 +5553,7 @@ impl Ui {
         }
         match row.kind.as_str() {
             "folder" | "page" => {}
+            "track" => self.play_track_card(&row.id, true),
             "video" => {
                 let playing = self.video_active() && self.app().get_current_id() == row.id;
                 if playing {
@@ -4602,7 +5565,7 @@ impl Ui {
             "tracks" => {
                 let favs = self.state.borrow().favorites.clone();
                 self.state.borrow_mut().playing_card = Some(("tracks".into(), row.id.to_string()));
-                self.play_queue(favs, 0, "My Tracks", Some(false));
+                self.play_queue(favs, 0, "My Tracks", Some(false), Some(Page::Tracks));
             }
             _ => {
                 let card = card_from_row(&row);
@@ -4638,6 +5601,29 @@ impl Ui {
                     }
                 });
             }
+        }
+    }
+
+    /// A track shown as a slim item: play it with the section it sits in as the
+    /// queue. Already the current track: `toggle` pauses / resumes it (its play
+    /// button), otherwise it only resumes (clicking the row again).
+    fn play_track_card(self: &Rc<Self>, id: &str, toggle: bool) {
+        let app = self.app();
+        if app.get_current_id() == id {
+            if toggle || !app.get_playing() {
+                self.toggle_play();
+            }
+            return;
+        }
+        let section = self
+            .state
+            .borrow()
+            .sections
+            .iter()
+            .position(|s| s.tracks.iter().any(|t| t.id == id));
+        match section {
+            Some(index) => self.play_from_section(index, id),
+            None => self.play_from_page(id),
         }
     }
 
@@ -4692,6 +5678,53 @@ impl Ui {
         });
     }
 
+    /// A refresh of the page `page_gen` went out: fill the toolbar wave.
+    fn sync_begin(&self, page_gen: u64) {
+        let mut st = self.state.borrow_mut();
+        if st.page_gen != page_gen {
+            return;
+        }
+        if st.sync.page_gen != page_gen {
+            st.sync = SyncState {
+                page_gen,
+                ..Default::default()
+            };
+        }
+        st.sync.running += 1;
+        st.sync.since.get_or_insert_with(Instant::now);
+        drop(st);
+        self.app().set_syncing(true);
+    }
+
+    /// A refresh of the page `page_gen` came back. The wave settles once the last
+    /// one has, after it has shown for a moment.
+    fn sync_end(self: &Rc<Self>, page_gen: u64) {
+        let rest = {
+            let mut st = self.state.borrow_mut();
+            if st.sync.page_gen != page_gen || st.sync.running == 0 {
+                return;
+            }
+            st.sync.running -= 1;
+            if st.sync.running > 0 {
+                return;
+            }
+            let shown = st.sync.since.take().map_or(SYNC_MIN_SHOWN, |t| t.elapsed());
+            SYNC_MIN_SHOWN.saturating_sub(shown)
+        };
+        if rest.is_zero() {
+            self.app().set_syncing(false);
+            return;
+        }
+        let ui = Rc::clone(self);
+        slint::Timer::single_shot(rest, move || {
+            let st = ui.state.borrow();
+            if st.sync.page_gen == page_gen && st.sync.running == 0 {
+                drop(st);
+                ui.app().set_syncing(false);
+            }
+        });
+    }
+
     fn load_catalog<T, F, Fut, P>(self: &Rc<Self>, key: String, page_gen: u64, fetch: F, present: P)
     where
         T: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
@@ -4706,6 +5739,7 @@ impl Ui {
         {
             present(self, data);
         }
+        self.sync_begin(page_gen);
         self.spawn(move |ctx| async move {
             let mut changed = None;
             if let Some(api) = ctx.api() {
@@ -4732,6 +5766,7 @@ impl Ui {
                 if let Some(data) = changed.filter(|_| ui.state.borrow().page_gen == page_gen) {
                     present(ui, data);
                 }
+                ui.sync_end(page_gen);
             });
         });
     }
@@ -4807,8 +5842,12 @@ impl Ui {
         app.set_loading(cached.is_empty());
         self.set_grid(&cached);
         let cached_len = cached.len();
-        self.spawn(|ctx| async move {
-            let Some(api) = ctx.api() else { return };
+        self.sync_begin(page_gen);
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else {
+                on_ui(move |ui| ui.sync_end(page_gen));
+                return;
+            };
             match fetch(api).await {
                 Ok(cards) => {
                     let json = serde_json::to_string(&cards).unwrap_or_default();
@@ -4818,9 +5857,10 @@ impl Ui {
                         if ui.state.borrow().page_gen == page_gen {
                             ui.app().set_loading(false);
                             if changed || cached_len == 0 {
-                                ui.set_grid(&cards);
+                                ui.update_grid(&cards);
                             }
                         }
+                        ui.sync_end(page_gen);
                     });
                 }
                 Err(e) => {
@@ -4829,6 +5869,7 @@ impl Ui {
                         if ui.state.borrow().page_gen == page_gen {
                             ui.app().set_loading(false);
                         }
+                        ui.sync_end(page_gen);
                     });
                 }
             }
@@ -4856,12 +5897,14 @@ impl Ui {
         let cached_json = serde_json::to_string(&cached).unwrap_or_default();
         self.set_tracks(cached, context);
         let (cache_key, context) = (cache_key.to_string(), context.to_string());
-        self.spawn(|ctx| async move {
+        self.sync_begin(page_gen);
+        self.spawn(move |ctx| async move {
             let Some(api) = ctx.api() else {
                 on_ui(move |ui| {
                     if ui.state.borrow().page_gen == page_gen {
                         ui.app().set_loading(false);
                     }
+                    ui.sync_end(page_gen);
                 });
                 return;
             };
@@ -4874,9 +5917,10 @@ impl Ui {
                         if ui.state.borrow().page_gen == page_gen {
                             ui.app().set_loading(false);
                             if changed {
-                                ui.set_tracks(tracks, &context);
+                                ui.update_tracks(tracks, &context);
                             }
                         }
+                        ui.sync_end(page_gen);
                     });
                 }
                 Err(e) => {
@@ -4886,6 +5930,7 @@ impl Ui {
                             ui.app().set_loading(false);
                             ui.app().set_catalog_error(!had_cached_tracks);
                         }
+                        ui.sync_end(page_gen);
                     });
                 }
             }
@@ -4962,7 +6007,7 @@ impl Ui {
             .cloned();
         let Some(track) = track else { return };
         if self.current_track().is_none() {
-            self.play_queue(vec![track], 0, "", None);
+            self.play_queue(vec![track], 0, "", None, None);
             self.refresh_queue_page();
             return;
         }
@@ -5013,7 +6058,13 @@ impl Ui {
         if let Some(index) = tracks.iter().position(|t| t.id == id) {
             let playing = self.page_card().map(|c| (c.kind, c.id));
             self.state.borrow_mut().playing_card = playing;
-            self.play_queue(tracks, index, &context, None);
+            self.play_queue(
+                tracks,
+                index,
+                &context,
+                None,
+                self.playback_source_for_page(),
+            );
         }
     }
 
@@ -5028,7 +6079,7 @@ impl Ui {
             && let Some(index) = tracks.iter().position(|t| t.id == id)
         {
             self.state.borrow_mut().playing_card = None;
-            self.play_queue(tracks, index, &title, None);
+            self.play_queue(tracks, index, &title, None, self.playback_source_for_page());
         }
     }
 
@@ -5047,7 +6098,93 @@ impl Ui {
         } else {
             0
         };
-        self.play_queue(tracks, start, &context, Some(shuffle));
+        self.play_queue(
+            tracks,
+            start,
+            &context,
+            Some(shuffle),
+            self.playback_source_for_page(),
+        );
+    }
+
+    fn playback_source_for_page(&self) -> Option<Page> {
+        match self.current_page() {
+            Some(Page::Queue) => self.state.borrow().playback_source.clone(),
+            page => page,
+        }
+    }
+
+    fn open_playing_album(self: &Rc<Self>) {
+        let Some(track) = self.current_track() else {
+            return;
+        };
+        let Some(id) = track.album_id.filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let card = Card {
+            kind: "album".into(),
+            id,
+            title: track.album,
+            subtitle: track.artist,
+            image_url: track.cover_url,
+            ..Default::default()
+        };
+        self.show_from_player(Page::Detail(card), Some(track.id));
+    }
+
+    fn open_playing_source(self: &Rc<Self>) {
+        if self.video_active() {
+            self.show_from_player(Page::Videos, None);
+            return;
+        }
+        let Some(track) = self.current_track() else {
+            return;
+        };
+        let page = self.state.borrow().playback_page();
+        self.show_from_player(page, Some(track.id));
+    }
+
+    /// Reuse the normal navigation wait/fade, while Now Playing collapses.
+    fn show_from_player(self: &Rc<Self>, page: Page, track: Option<String>) {
+        self.nav_finish();
+        self.show(page, true);
+        if let Some(track) = track {
+            let generation = self.state.borrow().page_gen;
+            self.state.borrow_mut().reveal_track = Some((generation, track));
+            self.reveal_playing_track();
+        }
+        let app = self.app();
+        app.set_nav_has_under(false);
+        app.set_nav_has_over(false);
+        app.set_nav_under(Image::default());
+        app.set_nav_over(Image::default());
+        app.set_nav_reveal(1.0);
+        app.set_nav_fade(1.0);
+        app.set_nav_active(true);
+        let weak = Rc::downgrade(self);
+        let mut nav = self.nav.borrow_mut();
+        nav.phase = NavPhase::Waiting {
+            since: Instant::now(),
+        };
+        nav.pending = false;
+        nav.timer.start(
+            slint::TimerMode::Repeated,
+            crate::platform::frame_interval(),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.nav_tick();
+                }
+            },
+        );
+    }
+
+    fn reveal_playing_track(&self) {
+        let Some(index) = self.state.borrow_mut().take_reveal_track() else {
+            return;
+        };
+        let app = self.app();
+        app.set_reveal_track_index(index as i32);
+        app.set_reveal_track_revision(app.get_reveal_track_revision().wrapping_add(1));
     }
 
     fn play_queue(
@@ -5056,6 +6193,7 @@ impl Ui {
         index: usize,
         context: &str,
         shuffle: Option<bool>,
+        source: Option<Page>,
     ) {
         {
             let mut st = self.state.borrow_mut();
@@ -5070,6 +6208,7 @@ impl Ui {
             st.pos = if st.shuffle { 0 } else { index };
             st.queue = tracks;
             st.context = context.to_string();
+            st.playback_source = source;
             st.pending_seek = None;
         }
         self.app().set_shuffle(self.state.borrow().shuffle);
@@ -5122,6 +6261,9 @@ impl Ui {
             }
         };
         let _ = self.ctx.meta.save_playback_queue(&saved);
+        if let Ok(json) = serde_json::to_string(&self.state.borrow().playback_source) {
+            let _ = self.ctx.meta.put_json("playback-source", &json);
+        }
     }
 
     fn persist_cursor(&self) {
@@ -5169,6 +6311,7 @@ impl Ui {
         app.set_np_artist_id(track.artist_id.clone().unwrap_or_default().as_str().into());
         app.set_np_artists(link_model(artist_links(&track)));
         app.set_np_context(context.into());
+        app.set_np_album_id(track.album_id.as_deref().unwrap_or_default().into());
         app.set_np_explicit(track.explicit);
         app.set_np_favorite(favorite);
         app.set_duration_secs(track.duration_secs as i32);
@@ -5189,7 +6332,6 @@ impl Ui {
                 let Some(ui) = weak.upgrade() else { return };
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
-                    ui.app().set_np_cover_large(img.clone());
                     ui.app().set_np_tint(tint);
                     let path = ui.ctx.images.file_path(&url_key(&cover_url_for_cache, 0));
                     if path.exists() {
@@ -5199,6 +6341,7 @@ impl Ui {
                     }
                 }
             });
+            self.load_large_cover(&track.id, &cover_url);
         } else {
             app.set_np_cover(Image::default());
             app.set_np_cover_large(Image::default());
@@ -5325,19 +6468,32 @@ impl Ui {
         let generation = self.ctx.play_gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.ctx.player.pause();
         self.ctx.player.clear_queue();
+        self.ctx
+            .desired_elapsed_ms
+            .store(start_at.as_millis() as u64, Ordering::Relaxed);
+        let duration = Duration::from_secs(track.duration_secs as u64);
+        let quality = self.ctx.audio_quality_key();
+        self.ctx
+            .audio
+            .request_time(&track.id, &quality, start_at, duration);
         {
             let mut st = self.state.borrow_mut();
             st.loading_track = true;
             st.prefetched_for = None;
-            st.pending_seek = None;
+            st.pending_seek = (!start_at.is_zero()).then_some(start_at);
+            st.playable_gen = 0;
         }
         self.present_current();
         let app = self.app();
+        let total_secs = track.duration_secs.max(1) as f32;
+        let clamped = start_at.min(duration);
+        let progress = (clamped.as_secs_f32() / total_secs).clamp(0.0, 1.0);
         if !start_at.is_zero() {
-            let total_secs = track.duration_secs.max(1) as f32;
-            let clamped = start_at.min(Duration::from_secs(track.duration_secs as u64));
             app.set_elapsed(fmt_time(clamped.as_secs()).into());
-            app.set_progress((clamped.as_secs_f32() / total_secs).clamp(0.0, 1.0));
+            app.set_progress(progress);
+        }
+        if in_prefetch_zone(progress) {
+            self.prefetch_next();
         }
         app.set_playing(false);
         app.set_buffering(true);
@@ -5352,11 +6508,31 @@ impl Ui {
         self.spawn(|ctx| async move {
             let result = match ctx.resolve_audio(&track.id).await {
                 Ok(path) if ctx.play_gen.load(Ordering::SeqCst) == generation => {
+                    let quality = ctx.audio_quality_key();
+                    let wait_until = std::time::Instant::now() + Duration::from_secs(120);
+                    // A seek during buffering may have moved the download; start
+                    // once the playable file holds the block under the playhead.
+                    while ctx.play_gen.load(Ordering::SeqCst) == generation
+                        && ctx.audio.playable_index(&track.id, &quality) != 0
+                        && !ctx.audio.requested_ready(&track.id, &quality)
+                        && std::time::Instant::now() < wait_until
+                    {
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                    }
+                    if ctx.play_gen.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let start_at =
+                        Duration::from_millis(ctx.desired_elapsed_ms.load(Ordering::Relaxed));
+                    let file_path = ctx
+                        .audio
+                        .get_playable(&track.id, &quality)
+                        .unwrap_or(path);
                     let item = TrackQueueItem {
                         id: track.id.clone(),
                         title: track.title.clone(),
                         artist: track.artist.clone(),
-                        file_path: path,
+                        file_path,
                         duration: Duration::from_secs(track.duration_secs as u64),
                     };
                     let player_ctx = ctx.clone();
@@ -5378,20 +6554,28 @@ impl Ui {
                 if ui.ctx.play_gen.load(Ordering::SeqCst) != generation {
                     return;
                 }
+                let desired =
+                    Duration::from_millis(ui.ctx.desired_elapsed_ms.load(Ordering::Relaxed));
+                let elapsed = ui.ctx.player.elapsed();
+                let seek_moved = result.is_ok()
+                    && desired.abs_diff(elapsed) > Duration::from_millis(400);
                 {
+                    let quality = ui.ctx.audio_quality_key();
+                    let playable_gen = ui.ctx.audio.playable_generation(&track.id, &quality);
                     let mut st = ui.state.borrow_mut();
                     st.loading_track = false;
                     st.last_serial = ui.ctx.player.track_serial();
+                    st.pending_seek = seek_moved.then_some(desired);
+                    st.playable_gen = playable_gen;
                 }
                 let total_buffering_ms = t_buffering_start.elapsed().as_millis();
                 let app = ui.app();
-                app.set_buffering(false);
+                app.set_buffering(seek_moved);
                 match result {
                     Ok(()) => {
                         tracing::info!(track_id = %track.id, total_buffering_ms, "Buffering complete, playback starting");
                         app.set_playing(true);
                         ui.present_format();
-                        let elapsed = ui.ctx.player.elapsed();
                         ui.ctx.with_media(|m| {
                             let _ = m.set_playback_state(true, Some(elapsed));
                         });
@@ -5499,27 +6683,83 @@ impl Ui {
             return;
         };
         let clamped = fraction.clamp(0.0, 1.0);
+        let duration = Duration::from_secs(track.duration_secs as u64);
         let to = Duration::from_secs_f32(track.duration_secs as f32 * clamped);
-        if self.ctx.player.seek(to) {
-            let app = self.app();
-            app.set_progress(clamped);
-            app.set_elapsed(fmt_time(to.as_secs()).into());
-            let playing = self.ctx.player.is_playing();
-            self.ctx.with_media(|m| {
-                let _ = m.set_playback_state(playing, Some(to));
-            });
-            self.persist_cursor();
-        } else if self.ctx.player.current_id().is_none() {
-            // Audio isn't open yet (e.g. restored session while paused): stage the new offset.
-            self.state.borrow_mut().pending_seek = Some(to);
-            let app = self.app();
-            app.set_progress(clamped);
-            app.set_elapsed(fmt_time(to.as_secs()).into());
-            self.ctx.with_media(|m| {
-                let _ = m.set_playback_state(false, Some(to));
-            });
-            self.persist_cursor();
+        self.ctx
+            .desired_elapsed_ms
+            .store(to.as_millis() as u64, Ordering::Relaxed);
+        self.state.borrow_mut().pending_seek = Some(to);
+        let quality = self.ctx.audio_quality_key();
+        self.ctx
+            .audio
+            .request_time(&track.id, &quality, to, duration);
+        let app = self.app();
+        app.set_progress(clamped);
+        app.set_elapsed(fmt_time(to.as_secs()).into());
+        let playing = self.ctx.player.is_playing();
+        self.ctx.with_media(|m| {
+            let _ = m.set_playback_state(playing, Some(to));
+        });
+        self.persist_cursor();
+        if in_prefetch_zone(clamped) {
+            self.prefetch_next();
         }
+        if self.ctx.player.seek(to) {
+            self.state.borrow_mut().pending_seek = None;
+            app.set_buffering(false);
+            return;
+        }
+        app.set_buffering(true);
+        if !self.state.borrow().loading_track {
+            self.try_reopen_at(to);
+        }
+    }
+
+    /// Reopen the current playable file at `to` once the download has rebuilt
+    /// the DASH head for that time.
+    fn try_reopen_at(self: &Rc<Self>, to: Duration) {
+        let Some(track) = self.current_track() else {
+            return;
+        };
+        let quality = self.ctx.audio_quality_key();
+        let playable_gen = self.ctx.audio.playable_generation(&track.id, &quality);
+        if !self.ctx.audio.requested_ready(&track.id, &quality) {
+            return;
+        }
+        if playable_gen == self.state.borrow().playable_gen {
+            return;
+        }
+        let Some(path) = self.ctx.audio.get_playable(&track.id, &quality) else {
+            return;
+        };
+        self.state.borrow_mut().playable_gen = playable_gen;
+        let item = TrackQueueItem {
+            id: track.id.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            file_path: path,
+            duration: Duration::from_secs(track.duration_secs as u64),
+        };
+        self.spawn(move |ctx| async move {
+            let play = tokio::task::spawn_blocking(move || ctx.player.play_track_at(item, to))
+                .await
+                .unwrap_or_else(|e| Err(tide_audio::AudioError::Decoder(e.to_string())));
+            on_ui(move |ui| {
+                if play.is_err() {
+                    ui.state.borrow_mut().playable_gen = 0;
+                    return;
+                }
+                ui.state.borrow_mut().pending_seek = None;
+                ui.app().set_buffering(false);
+                ui.app().set_playing(ui.ctx.player.is_playing());
+                ui.present_format();
+                let elapsed = ui.ctx.player.elapsed();
+                ui.ctx.with_media(|m| {
+                    let _ = m.set_playback_state(ui.ctx.player.is_playing(), Some(elapsed));
+                });
+                ui.persist_cursor();
+            });
+        });
     }
 
     fn seek_to(self: &Rc<Self>, to: Duration) {
@@ -5612,6 +6852,11 @@ impl Ui {
 
     /// Called ~4x a second: progress, gapless prefetch and end-of-track handling.
     pub fn tick(self: &Rc<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            self.restore_window();
+            crate::window_state::remember(self.win.window(), &self.ctx);
+        }
         let app = self.app();
         self.dsp_flush();
         if !app.get_has_track() || self.state.borrow().loading_track {
@@ -5674,9 +6919,30 @@ impl Ui {
             self.skip(1, false);
             return;
         }
+        // Copy out before acting: `try_reopen_at` and the seek below borrow
+        // `state` mutably, and a `Ref` held across them panics (and aborts,
+        // since this runs inside an AppKit callback).
+        let pending_seek = self.state.borrow().pending_seek;
         if player.current_id().is_none() {
             // Restored session before audio has been opened: keep the saved elapsed/scrubber untouched.
+            if let Some(pending) = pending_seek {
+                self.try_reopen_at(pending);
+            }
             return;
+        }
+
+        if let Some(pending) = pending_seek {
+            let ready = self.current_track().is_some_and(|track| {
+                let quality = self.ctx.audio_quality_key();
+                self.ctx.audio.requested_ready(&track.id, &quality)
+            });
+            if ready && self.ctx.player.seek(pending) {
+                self.state.borrow_mut().pending_seek = None;
+                app.set_buffering(false);
+            } else {
+                self.try_reopen_at(pending);
+                return;
+            }
         }
 
         let Some(track) = self.current_track() else {
@@ -5686,12 +6952,13 @@ impl Ui {
         let total = Duration::from_secs(track.duration_secs.max(1) as u64);
         app.set_playing(player.is_playing());
         app.set_elapsed(fmt_time(elapsed.as_secs().min(total.as_secs())).into());
-        app.set_progress((elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0));
+        let progress = (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
+        app.set_progress(progress);
         if player.is_playing() && save_tick {
             self.persist_cursor();
         }
 
-        if player.is_playing() && total.saturating_sub(elapsed) < PREFETCH_BEFORE_END {
+        if in_prefetch_zone(progress) {
             self.prefetch_next();
         }
         if app.get_show_now_playing() {
@@ -5780,18 +7047,17 @@ impl Ui {
     }
 
     pub fn media_event(self: &Rc<Self>, event: MediaControlEvent) {
+        let playing = if self.video_active() {
+            self.app().get_playing()
+        } else {
+            self.ctx.player.is_playing()
+        };
         match event {
-            MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => {
-                self.toggle_play()
-            }
+            MediaControlEvent::Toggle => self.toggle_play(),
+            MediaControlEvent::Play if !playing => self.toggle_play(),
+            MediaControlEvent::Pause | MediaControlEvent::Stop if playing => self.toggle_play(),
             MediaControlEvent::Next => self.skip(1, true),
             MediaControlEvent::Previous => self.previous(),
-            MediaControlEvent::Stop => {
-                if self.ctx.player.is_playing() || (self.video_active() && self.app().get_playing())
-                {
-                    self.toggle_play();
-                }
-            }
             MediaControlEvent::SetPosition(pos) => self.seek_to(pos.0),
             _ => {}
         }
@@ -6079,7 +7345,8 @@ impl Ui {
 
     /// Drive the UI through its main views and save a PNG of each (`--snapshot <dir>`).
     pub fn run_snapshot_tour(self: &Rc<Self>, dir: PathBuf, play: bool) {
-        type Step = (u64, &'static str, Box<dyn Fn(&Rc<Ui>)>);
+        type StepFn = Box<dyn Fn(&Rc<Ui>)>;
+        type Step = (u64, &'static str, StepFn);
         let mut steps: Vec<Step> = vec![
             (7000, "01-home", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("tracks"))),
@@ -6239,8 +7506,51 @@ impl Ui {
             (1000, "09-settings-account", Box::new(|_| {})),
             (200, "", Box::new(|ui| ui.navigate_key("dsp"))),
             (1000, "09a-dsp", Box::new(|_| {})),
-            (200, "", Box::new(|ui| ui.navigate_key("tracks"))),
         ];
+        // View ▸ Zoom: the same callbacks the menu items and ⌘= / ⌘− / ⌘0 fire.
+        // Restore the saved preference afterwards so the tour leaves no trace.
+        let saved_zoom = Rc::new(std::cell::Cell::new(100));
+        let report = |label: &'static str| -> StepFn {
+            Box::new(move |ui| {
+                println!(
+                    "zoom {label}: {}% scale={} compact={}",
+                    ui.app().get_zoom_percent(),
+                    ui.win.window().scale_factor(),
+                    ui.app().get_compact_layout()
+                )
+            })
+        };
+        steps.push((200, "", {
+            let saved = saved_zoom.clone();
+            Box::new(move |ui| {
+                saved.set(ui.ctx.settings.read().unwrap().zoom_percent);
+                ui.app().invoke_reset_zoom();
+                ui.navigate_key("albums");
+            })
+        }));
+        steps.push((3000, "09b-zoom-100", report("100")));
+        for _ in 0..4 {
+            steps.push((150, "", Box::new(|ui| ui.app().invoke_zoom_in())));
+        }
+        steps.push((1500, "09c-zoom-200", report("200")));
+        // Past the top it stays at 200%.
+        steps.push((150, "", Box::new(|ui| ui.app().invoke_zoom_in())));
+        steps.push((800, "", report("200 clamp")));
+        for _ in 0..6 {
+            steps.push((150, "", Box::new(|ui| ui.app().invoke_zoom_out())));
+        }
+        steps.push((1500, "09d-zoom-50", report("50")));
+        steps.push((150, "", Box::new(|ui| ui.app().invoke_zoom_out())));
+        steps.push((800, "", report("50 clamp")));
+        steps.push((200, "", Box::new(|ui| ui.app().invoke_reset_zoom())));
+        steps.push((1500, "09e-zoom-reset", report("reset")));
+        steps.push((200, "", {
+            let saved = saved_zoom.clone();
+            Box::new(move |ui| {
+                ui.set_zoom(saved.get());
+                ui.navigate_key("tracks");
+            })
+        }));
         if play {
             // Exercise the whole audio pipeline silently.
             steps.push((100, "", Box::new(|ui| ui.set_volume(0.0))));
@@ -6333,6 +7643,12 @@ impl Ui {
             steps.push((200, "", Box::new(|ui| ui.stop_video())));
             steps.push((1000, "18-video-stopped", Box::new(|_| {})));
         }
+        // `TIDE_TOUR=now-playing` / `scroll`: only time those animations.
+        match std::env::var("TIDE_TOUR").as_deref() {
+            Ok("now-playing") => steps = now_playing_frame_tour(),
+            Ok("scroll") => steps = scroll_frame_tour(),
+            _ => {}
+        }
         let _ = std::fs::create_dir_all(&dir);
         fn run(ui: Rc<Ui>, mut steps: std::vec::IntoIter<Step>, dir: PathBuf) {
             let Some((delay, name, action)) = steps.next() else {
@@ -6377,4 +7693,147 @@ impl Ui {
         }
         run(self.clone(), steps.into_iter(), dir);
     }
+}
+
+/// Toggles Now Playing 16 times through the same path as the artwork click,
+/// printing a `MARK` with the wall time of each toggle. Run with
+/// `TIDE_FRAME_LOG=1` so the renderer prints every frame's timing too.
+#[allow(clippy::type_complexity)]
+fn now_playing_frame_tour() -> Vec<(u64, &'static str, Box<dyn Fn(&Rc<Ui>)>)> {
+    let mut steps: Vec<(u64, &'static str, Box<dyn Fn(&Rc<Ui>)>)> = Vec::new();
+    steps.push((
+        7000,
+        "np-00-ready",
+        // AppKit only draws a visible window, and the tour never raises it
+        // over other apps: keep the TIDE window in view while it runs.
+        Box::new(|ui| println!("frame-tour has_track={}", ui.app().get_has_track())),
+    ));
+    for i in 0..16 {
+        steps.push((
+            700,
+            // Taken as the second toggle starts collapsing: still fully open.
+            if i == 1 { "np-01-expanded" } else { "" },
+            Box::new(|ui| {
+                ui.toggle_now_playing();
+                let wall = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    * 1e3;
+                let dir = if ui.app().get_show_now_playing() {
+                    "open"
+                } else {
+                    "close"
+                };
+                eprintln!(
+                    "MARK {dir} wall={wall:.2} fancy={} gpu_cache={}MB",
+                    ui.fancy_animation(),
+                    crate::platform::gpu_cache_bytes() / (1024 * 1024)
+                );
+            }),
+        ));
+        if i == 2 {
+            // Mid-expand: the fading parts must be drawn from their cached layers.
+            steps.push((110, "np-02-mid-expand", Box::new(|_| {})));
+        }
+    }
+    steps
+}
+
+fn tour_wall_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1e3
+}
+
+/// Scrolls each heavy page down and back up with in-process scroll events
+/// every 4 ms (faster than any panel, so input never limits the frame rate),
+/// printing `MARK scroll-<page> start|end`. Run with `TIDE_FRAME_LOG=1`.
+#[allow(clippy::type_complexity)]
+fn scroll_frame_tour() -> Vec<(u64, &'static str, Box<dyn Fn(&Rc<Ui>)>)> {
+    let scroller: Rc<RefCell<Option<slint::Timer>>> = Rc::default();
+    let mut steps: Vec<(u64, &'static str, Box<dyn Fn(&Rc<Ui>)>)> = Vec::new();
+    steps.push((
+        7000,
+        "scroll-00-ready",
+        // Never raised over other apps; see `now_playing_frame_tour`.
+        Box::new(|_| {}),
+    ));
+    let pages: [(&'static str, &'static str); 5] = [
+        ("home", "home"),
+        ("tracks", "tracks"),
+        ("albums", "albums"),
+        ("playlists", "playlists"),
+        ("playlist-detail", ""),
+    ];
+    for (name, key) in pages {
+        steps.push((
+            300,
+            "",
+            Box::new(move |ui| {
+                if key.is_empty() {
+                    let cards = ui.app().get_grid_cards();
+                    if let Some(card) = cards.iter().find(|c| c.kind == "playlist") {
+                        ui.open_card(card);
+                    }
+                } else {
+                    ui.navigate_key(key);
+                }
+            }),
+        ));
+        // Down, then back up.
+        for (direction, delay) in [(-6.0f32, 4000u64), (6.0, 200)] {
+            let start = scroller.clone();
+            steps.push((
+                delay,
+                "",
+                Box::new(move |ui| {
+                    let weak = Rc::downgrade(ui);
+                    let timer = slint::Timer::default();
+                    timer.start(
+                        slint::TimerMode::Repeated,
+                        crate::platform::frame_interval(),
+                        move || {
+                            let Some(ui) = weak.upgrade() else { return };
+                            let win = ui.win.window();
+                            let size = win.size().to_logical(win.scale_factor());
+                            let app = ui.app();
+                            let position = slint::LogicalPosition::new(
+                                app.get_pane_x() + app.get_pane_width() / 2.0,
+                                (size.height / 2.0).max(app.get_pane_y() + 100.0),
+                            );
+                            win.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                                position,
+                                delta_x: 0.0,
+                                delta_y: direction,
+                            });
+                        },
+                    );
+                    *start.borrow_mut() = Some(timer);
+                    let dir = if direction < 0.0 { "down" } else { "up" };
+                    eprintln!("MARK scroll-{name}-{dir} start wall={:.2}", tour_wall_ms());
+                }),
+            ));
+            let stop = scroller.clone();
+            steps.push((
+                1500,
+                "",
+                Box::new(move |ui| {
+                    stop.borrow_mut().take();
+                    let dir = if direction < 0.0 { "down" } else { "up" };
+                    eprintln!(
+                        "MARK scroll-{name}-{dir} end wall={:.2} view={} scroll={} fancy={} gpu_cache={}MB",
+                        tour_wall_ms(),
+                        ui.app().get_view(),
+                        ui.app().get_scroll_y(),
+                        ui.fancy_animation(),
+                        crate::platform::gpu_cache_bytes() / (1024 * 1024),
+                    );
+                }),
+            ));
+        }
+    }
+    steps
 }

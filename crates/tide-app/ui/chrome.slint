@@ -1,7 +1,8 @@
 // Window chrome: sidebar, top bar and the bottom player bar.
 import { TrackMenuButton } from "context-menu.slint";
+import { HoverTip } from "common.slint";
 import { ScrollView } from "std-widgets.slint";
-import { CreateButton, App, Theme, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle } from "common.slint";
+import { CreateButton, App, Theme, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle, TideLoader } from "common.slint";
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -11,7 +12,7 @@ component NavItem inherits Rectangle {
     // Official item: 8px pad, 24px icon box, 8px gap, 12px radius, 14px type.
     height: 40px;
     Rectangle {
-        x: App.sidebar-collapsed ? 9px : 16px;
+        x: App.sidebar-compact ? 9px : 16px;
         width: parent.width - 2 * self.x;
         border-radius: 12px;
         background: selected ? Theme.selected : ta.has-hover ? #141414 : transparent;
@@ -23,14 +24,14 @@ component NavItem inherits Rectangle {
         }
 
         Icon {
-            x: App.sidebar-collapsed ? (parent.width - self.width) / 2 : 8px + (24px - self.width) / 2;
+            x: App.sidebar-compact ? (parent.width - self.width) / 2 : 8px + (24px - self.width) / 2;
             y: (parent.height - self.height) / 2;
             source: root.icon;
             size: 16px;
             tint: selected || ta.has-hover ? Theme.text : Theme.text-secondary;
         }
 
-        if !App.sidebar-collapsed: Text {
+        if !App.sidebar-compact: Text {
             x: 40px;
             height: 100%;
             text: root.label;
@@ -72,7 +73,7 @@ component SidebarPlaylist inherits Rectangle {
         radius: 3px;
     }
 
-    if !App.sidebar-collapsed: VerticalLayout {
+    if !App.sidebar-compact: VerticalLayout {
         x: 68px;
         width: parent.width - 72px - 16px;
         alignment: center;
@@ -95,8 +96,8 @@ component SidebarPlaylist inherits Rectangle {
 }
 
 export component Sidebar inherits Rectangle {
-    width: App.sidebar-collapsed ? 72px : 256px;
-    property <length> header-height: App.sidebar-collapsed ? 90px : 64px;
+    width: App.sidebar-compact ? max(72px, 72px / App.zoom-factor) : 256px;
+    property <length> header-height: App.sidebar-compact ? max(90px, 90px / App.zoom-factor) : 64px;
     background: Theme.bg;
     // Space for the macOS traffic lights.
     Rectangle {
@@ -105,9 +106,10 @@ export component Sidebar inherits Rectangle {
         DragArea { }
 
         IconButton {
-            x: App.sidebar-collapsed ? (parent.width - self.width) / 2 : parent.width - 38px;
-            y: App.sidebar-collapsed ? 43px : 13px;
-            icon: App.sidebar-collapsed ? @image-url("icons/chevron-right.svg") : @image-url("icons/collapse.svg");
+            x: App.sidebar-compact ? (parent.width - self.width) / 2 : parent.width - 38px;
+            y: App.sidebar-compact ? max(43px, 43px / App.zoom-factor) : 13px;
+            icon: App.sidebar-compact ? @image-url("icons/chevron-right.svg") : @image-url("icons/collapse.svg");
+            enabled: !App.compact-layout;
             size: 18px;
             tint: Theme.text-dim;
             clicked => { App.sidebar-collapsed = !App.sidebar-collapsed; }
@@ -139,7 +141,7 @@ export component Sidebar inherits Rectangle {
             }
 
             if App.show-collection: VerticalLayout {
-                if !App.sidebar-collapsed: Rectangle {
+                if !App.sidebar-compact: Rectangle {
                     height: 54px;
                     Text {
                         x: 24px;
@@ -152,7 +154,7 @@ export component Sidebar inherits Rectangle {
                 }
 
                 NavItem {
-                    label: "Mixes & Radio";
+                    label: "Media & Radio";
                     key: "mixes";
                     icon: @image-url("icons/radio.svg");
                 }
@@ -195,7 +197,7 @@ export component Sidebar inherits Rectangle {
 
             }
 
-            if !App.sidebar-collapsed: Rectangle {
+            if !App.sidebar-compact: Rectangle {
                 height: 54px;
                 Text {
                     x: 24px;
@@ -701,6 +703,25 @@ export component ErrorAlert inherits Rectangle {
     }
 }
 
+// One key of a shortcut hint (⌘F in the search field).
+component Kbd inherits Rectangle {
+    in property <string> glyph;
+    width: max(20px, label.preferred-width + 10px);
+    height: 20px;
+    border-radius: 5px;
+    background: #2a2a2a;
+    border-width: 1px;
+    border-color: #3a3a3a;
+    label := Text {
+        text: root.glyph;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        font-weight: Theme.medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 // Shared by the page header and full-window video player.
 export component HeaderTools inherits Rectangle {
     in property <bool> active: true;
@@ -718,7 +739,18 @@ export component HeaderTools inherits Rectangle {
         border-radius: 19.5px;
         background: Theme.pill;
         border-width: input.has-focus ? 1px : 0px;
-        border-color: #3a3a3a;
+        border-color: #5a5a5a;
+
+        // Focus ring sits just outside the pill.
+        if input.has-focus: Rectangle {
+            x: -3px;
+            y: -3px;
+            width: parent.width + 6px;
+            height: parent.height + 6px;
+            border-radius: 22.5px;
+            border-width: 1.5px;
+            border-color: #ffffff;
+        }
         search-ta := TouchArea {
             enabled: root.active;
             clicked => { input.focus(); root.activity(); }
@@ -746,14 +778,16 @@ export component HeaderTools inherits Rectangle {
             enabled: root.active;
             x: 48px;
             y: (parent.height - self.height) / 2;
-            width: parent.width - 48px - 40px;
+            width: parent.width - 48px - (self.text == "" ? 58px : 40px);
             height: 20px;
             text <=> App.search-text;
             color: Theme.text;
             font-size: 15px;
             single-line: true;
             vertical-alignment: center;
-            selection-background-color: #4a4a4a;
+            // On macOS the caret is the selection colour, not the text colour.
+            selection-background-color: #ffffff;
+            selection-foreground-color: #111111;
             accepted => {
                 App.search(self.text);
             }
@@ -766,6 +800,15 @@ export component HeaderTools inherits Rectangle {
                 input.select-all();
                 root.activity();
             }
+        }
+
+        if input.text == "": HorizontalLayout {
+            x: parent.width - self.preferred-width - 10px;
+            y: (parent.height - 20px) / 2;
+            height: 20px;
+            spacing: 4px;
+            Kbd { glyph: "⌘"; }
+            Kbd { glyph: "F"; }
         }
 
         if input.text != "": IconButton {
@@ -933,9 +976,43 @@ export component TopBar inherits Rectangle {
         }
     }
 
+    // Divider, then the tide mark: still while the page is current, filling
+    // with water while a page shown from cache is checked against the server.
+    Rectangle {
+        x: 106px;
+        y: 23px;
+        width: 1px;
+        height: 19px;
+        background: #2c2c2c;
+    }
+
+    Rectangle {
+        x: 117px;
+        y: 13px;
+        width: 36px;
+        height: 39px;
+        accessible-role: text;
+        accessible-label: App.syncing ? "Checking for updates" : "Up to date";
+        Image {
+            width: 26px;
+            height: 26px * 367 / 601;
+            source: @image-url("icons/wave.svg");
+            colorize: #5a5a5a;
+            image-fit: fill;
+        }
+        if App.syncing: TideLoader {
+            size: 26px;
+            tint: #d8d8d8;
+            init => {
+                self.epoch = animation-tick();
+            }
+        }
+    }
+
     HeaderTools {
+        width: min(407px, parent.width - 165px);
         x: parent.width - self.width;
-        active: !App.video-open;
+        active: !App.video-open && !App.show-now-playing;
     }
 }
 
@@ -1247,21 +1324,6 @@ component SignalPathPanel inherits Rectangle {
     }
 }
 
-// White pill tooltip shown above a hovered player-bar label.
-export component HoverTip inherits Rectangle {
-    in property <string> text;
-    height: 38px;
-    width: tip-label.preferred-width + 32px;
-    background: white;
-    border-radius: 19px;
-    tip-label := Text {
-        text: root.text;
-        color: black;
-        font-size: 14px;
-        font-weight: 500;
-    }
-}
-
 // Player-bar label: underlines on hover, and (optionally) pops a tooltip after a short pause.
 component PlayerLink inherits Rectangle {
     in property <string> text;
@@ -1552,7 +1614,8 @@ component Scrubber inherits Rectangle {
 
 export component PlayerBar inherits Rectangle {
     in property <bool> overlay: false;
-    height: 96px;
+    property <bool> compact: root.width < 960px;
+    height: App.player-height;
     background: overlay ? transparent : Theme.player-bg;
 
     // A video's thumbnail is 16:9; the titles move right to make room.
@@ -1569,6 +1632,7 @@ export component PlayerBar inherits Rectangle {
 
     // Left: artwork + titles
     TouchArea {
+        visible: !root.compact;
         width: root.width * 0.32;
         enabled: App.has-track;
         pointer-event(e) => {
@@ -1578,12 +1642,12 @@ export component PlayerBar inherits Rectangle {
         }
     }
 
-    if !overlay && !App.video-active: Cover {
+    if !overlay && !App.video-active && !root.compact: Rectangle {
         x: 16px;
-        y: App.video-active ? 20px : 17px;
+        y: 17px;
         width: root.art-w;
-        height: App.video-active ? 56px : 62px;
-        source: App.np-cover;
+        height: 62px;
+        if !App.has-track: Cover { source: App.np-cover; }
         TouchArea {
             mouse-cursor: pointer;
             pointer-event(e) => {
@@ -1601,6 +1665,7 @@ export component PlayerBar inherits Rectangle {
         }
     }
     HorizontalLayout {
+        visible: !root.compact;
         x: root.text-x;
         y: 0;
         width: max(120px, root.width * 0.32 - self.x);
@@ -1616,9 +1681,10 @@ export component PlayerBar inherits Rectangle {
                 PlayerLink {
                     context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.has-track ? App.np-title : "Nothing playing";
-                    clickable: App.video-active;
+                    clickable: App.video-active || App.np-album-id != "";
                     clicked => {
                         if (App.video-active) { App.open-video(); }
+                        else { App.open-now-playing-album(); }
                     }
                     tip: App.has-track ? App.np-title : "";
                     text-color: Theme.text;
@@ -1674,6 +1740,8 @@ export component PlayerBar inherits Rectangle {
                 PlayerLink {
                     context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.np-context;
+                    clickable: App.has-track;
+                    clicked => { App.open-now-playing-context(); }
                     tip: "Playing from: " + App.np-context;
                     max-w: max(80px, root.width * 0.32 - 215px);
                 }
@@ -1809,7 +1877,7 @@ export component PlayerBar inherits Rectangle {
         x: 0px;
         y: 64px;
         width: root.width;
-        bar-w: min(728px, root.width * 0.354);
+        bar-w: root.compact ? root.width - 100px : min(728px, root.width * 0.354);
         seek(v) => {
             App.seek(v);
         }
@@ -1817,7 +1885,9 @@ export component PlayerBar inherits Rectangle {
 
     // Right: queue, output, volume, DSP, now playing, quality
     HorizontalLayout {
-        x: root.width - self.width - 20px;
+        y: root.compact ? 96px : 0px;
+        height: root.compact ? 48px : root.height;
+        x: root.compact ? (root.width - self.width) / 2 : root.width - self.width - 20px;
         width: self.preferred-width;
         alignment: end;
         spacing: 8px;
@@ -1914,7 +1984,7 @@ export component PlayerBar inherits Rectangle {
     }
 
     vol-popup := PopupWindow {
-        x: root.width - 20px - 132px - 12px - 232px;
+        x: max(8px, root.width - 20px - 132px - 12px - 232px);
         y: -44px;
         width: 220px;
         height: 48px;
@@ -1954,7 +2024,7 @@ export component PlayerBar inherits Rectangle {
     }
 
     dev-popup := PopupWindow {
-        x: root.width - 20px - 132px - 12px - 292px;
+        x: max(8px, root.width - 20px - 132px - 12px - 292px);
         y: -58px;
         width: 250px;
         height: 62px;
