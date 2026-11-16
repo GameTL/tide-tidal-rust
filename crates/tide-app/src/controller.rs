@@ -2164,7 +2164,7 @@ impl Ui {
         }
         #[cfg(target_os = "macos")]
         {
-            crate::platform::window_reopened(&self.win);
+            crate::platform::window_reopened();
             slint::Timer::single_shot(Duration::ZERO, || on_ui(|ui| ui.restore_window()));
         }
     }
