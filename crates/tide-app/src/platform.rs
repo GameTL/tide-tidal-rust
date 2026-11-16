@@ -447,6 +447,7 @@ mod window_anim {
     use std::cell::RefCell;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use objc2::MainThreadMarker;
@@ -652,6 +653,8 @@ mod window_anim {
         window: Retained<NSWindow>,
         opening: bool,
         done: Option<Box<dyn FnOnce()>>,
+        /// Where the window is now, read by the animation thread on every step.
+        at: Arc<Mutex<Geometry>>,
     }
 
     thread_local! {
@@ -672,6 +675,11 @@ mod window_anim {
             return;
         };
         if run.opening {
+            // The last step may have raced a frame change and put the window
+            // back where it was; AppKit's frame has the final say.
+            if let (Some(server), Some(at)) = (server(), geometry(&run.window)) {
+                apply(server, at, 1.0, 1.0);
+            }
             // The server already shows it at full opacity; bring AppKit's
             // own idea of the alpha back in line.
             HOLD_ALPHA.store(false, Ordering::SeqCst);
@@ -699,14 +707,17 @@ mod window_anim {
         {
             old_done();
         }
+        let at = Arc::new(Mutex::new(at));
         RUN.set(Some((
             generation,
             Run {
                 window: window.retain(),
                 opening,
                 done,
+                at: at.clone(),
             },
         )));
+        let place = move || *at.lock().unwrap_or_else(|e| e.into_inner());
         if opening {
             // AppKit orders the window in at this alpha, so it is invisible
             // from its very first frame on screen.
@@ -734,7 +745,7 @@ mod window_anim {
                         if GENERATION.load(Ordering::SeqCst) != generation {
                             return;
                         }
-                        apply(server, at, SMALL, 0.0);
+                        apply(server, place(), SMALL, 0.0);
                         std::thread::sleep(frame);
                     }
                 }
@@ -752,7 +763,7 @@ mod window_anim {
                         let e = t * t;
                         (1.0 - (1.0 - SMALL) * e, 1.0 - e)
                     };
-                    apply(server, at, scale, alpha);
+                    apply(server, place(), scale, alpha);
                     if t >= 1.0 {
                         break;
                     }
@@ -775,6 +786,23 @@ mod window_anim {
             return false;
         }
         true
+    }
+
+    /// The window was moved or resized. The transform places the window on
+    /// screen as well as scaling it, so a running animation has to follow:
+    /// stepped from where it started, it would draw the window there and leave
+    /// it there, away from the frame AppKit has, until the next move. A window
+    /// does change frame as it opens when its saved frame no longer fits, say
+    /// after a display was unplugged.
+    pub(super) fn frame_changed(window: &NSWindow) {
+        RUN.with_borrow(|run| {
+            if let Some((_, run)) = run
+                && std::ptr::eq(&*run.window, window)
+                && let Some(now) = geometry(window)
+            {
+                *run.at.lock().unwrap_or_else(|e| e.into_inner()) = now;
+            }
+        });
     }
 
     /// The window is about to be ordered front: start it small and clear.
@@ -821,6 +849,7 @@ pub fn install_window_animation() {
         // SAFETY: only installed on NSWindow, so `this` is a live NSWindow.
         let window = unsafe { &*this.cast::<objc2_app_kit::NSWindow>() };
         if window_anim::is_main_window(window) {
+            restore_chrome(window);
             window_anim::will_open(window);
         }
         if let Some(original) = ORDER_FRONT.get() {
@@ -940,43 +969,39 @@ pub fn install_quit_animation() {
     }
 }
 
+/// The window was shown again after being closed: the menu bar is rebuilt
+/// with it. Its title bar is put back as it is ordered front, see
+/// [`restore_chrome`].
 #[cfg(target_os = "macos")]
-thread_local! {
-    /// The window was rebuilt and still has the default title bar.
-    static NEEDS_CHROME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// The window was shown again after being closed. Slint rebuilds the native
-/// window from its default attributes, without the backend's hook, so put
-/// the transparent title bar back; the menu bar is rebuilt as well.
-#[cfg(target_os = "macos")]
-pub fn window_reopened(win: &MainWindow) {
-    NEEDS_CHROME.set(true);
-    // Normally the window's first event applies it; this covers a window that
-    // gets none before it is drawn.
-    let weak = win.as_weak();
-    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-        if let Some(win) = weak.upgrade() {
-            restore_chrome(win.window());
-        }
-    });
+pub fn window_reopened() {
     configure_menu();
 }
 
+/// Slint rebuilds a closed window from its default attributes, without the
+/// backend's hook, so it comes back with a standard title bar. Put the
+/// transparent one back, before the window is on screen.
+///
+/// Slint places the *content* at the saved frame, so the rebuilt window is a
+/// title bar taller than that, its top under the menu bar. Left alone, AppKit
+/// pushes it down as it orders it front, and a style change made afterwards
+/// keeps the content where it then is: the window ends up a title bar lower
+/// and shorter than it was closed. Under a transparent title bar the content
+/// is the whole window, so its frame is the content rect Slint asked for.
 #[cfg(target_os = "macos")]
-fn restore_chrome(window: &slint::Window) {
+fn restore_chrome(ns: &objc2_app_kit::NSWindow) {
     use objc2_app_kit::{NSWindowStyleMask, NSWindowTitleVisibility};
 
-    if !NEEDS_CHROME.get() {
+    let mask = ns.styleMask();
+    if mask.contains(NSWindowStyleMask::FullSizeContentView) {
         return;
     }
-    let Some(ns) = window.with_winit_window(ns_window).flatten() else {
-        return;
-    };
-    NEEDS_CHROME.set(false);
+    let wanted = ns.contentRectForFrameRect(ns.frame());
     ns.setTitlebarAppearsTransparent(true);
     ns.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-    ns.setStyleMask(ns.styleMask() | NSWindowStyleMask::FullSizeContentView);
+    ns.setStyleMask(mask | NSWindowStyleMask::FullSizeContentView);
+    if !same_frame(ns.frame(), wanted) {
+        ns.setFrame_display(wanted, false);
+    }
     tracing::debug!("Restored the window's transparent title bar");
 }
 
@@ -1177,9 +1202,7 @@ fn start_window_move(w: &slint::winit_030::winit::window::Window) {
 /// view such as winit's). A press there then starts a WindowServer drag *and*
 /// reaches TIDE's DragArea, which moves the window as well; a double-click
 /// runs AppKit's Zoom/Fill *and* TIDE's animated zoom. Two movers fighting over
-/// one frame make drags jitter, and leave AppKit's idea of the frame out of
-/// step with where the window really is: maximized but shifted up, its top
-/// under the menu bar and a gap above the Dock.
+/// one frame make drags jitter.
 ///
 /// winit registers its view class with the first window, so this runs from the
 /// window event hook; it adds the override once, for every window after it.
@@ -1338,9 +1361,11 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
         #[cfg(target_os = "macos")]
         {
             disable_native_title_bar_drag();
-            restore_chrome(window);
             follow_window_move(window, event);
             if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                if let Some(ns) = window.with_winit_window(ns_window).flatten() {
+                    window_anim::frame_changed(&ns);
+                }
                 crate::window_state::observe(window, &ctx);
             }
             if matches!(
