@@ -1,0 +1,102 @@
+<!doctype html>
+<!-- Source for the DMG window background. Render with render-background.sh.
+     The window is 800x620 pt; dmg-settings.py puts the TIDE and Applications
+     icons at (250,100) and (550,100), over the two empty slots drawn here. -->
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 800px; height: 620px; overflow: hidden; }
+  body {
+    position: relative;
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: #e6e6e6;
+    background:
+      radial-gradient(520px 260px at 50% 0, rgba(51, 255, 238, .13), transparent 70%),
+      linear-gradient(#232323, #171717);
+  }
+  .abs { position: absolute; }
+  .step { display: flex; gap: 10px; align-items: flex-start; }
+  .num {
+    flex: none; width: 24px; height: 24px; border-radius: 50%;
+    background: #33ffee; color: #10201f;
+    font-size: 13px; font-weight: 700; line-height: 24px; text-align: center;
+  }
+  .step h2 { font-size: 15px; font-weight: 600; line-height: 24px; color: #fff; }
+  .step p { font-size: 12.5px; line-height: 17px; color: #b4b4b4; margin-top: 2px; }
+  .step b { color: #fff; font-weight: 600; }
+  .path { color: #33ffee; font-weight: 600; }
+
+  /* Finder draws icon labels black in light mode and white in dark mode,
+     so the label sits on a mid-tone pill that both can be read against. */
+  .label-pill {
+    width: 132px; height: 24px; top: 151px; border-radius: 12px;
+    background: #767676;
+  }
+  .slot {
+    width: 108px; height: 108px; top: 46px; border-radius: 24px;
+    border: 1.5px dashed rgba(255, 255, 255, .16);
+  }
+  .rule { left: 28px; right: 28px; top: 196px; height: 1px; background: rgba(255, 255, 255, .1); }
+  .shot img { display: block; width: 100%; }
+  .ring {
+    position: absolute; border: 3px solid #ff5a36; border-radius: 12px;
+    box-shadow: 0 0 0 3px rgba(255, 90, 54, .28);
+  }
+</style>
+
+<!-- Step 1: drag to Applications -->
+<div class="abs step" style="left: 28px; top: 18px;">
+  <div class="num">1</div>
+  <div><h2>Drag TIDE into Applications</h2></div>
+</div>
+<div class="abs slot" style="left: 196px;"></div>
+<div class="abs slot" style="left: 496px;"></div>
+<div class="abs label-pill" style="left: 184px;"></div>
+<div class="abs label-pill" style="left: 484px;"></div>
+<svg class="abs" style="left: 340px; top: 76px;" width="120" height="48" viewBox="0 0 120 48">
+  <path d="M8 24 H100" stroke="#33ffee" stroke-width="5" stroke-linecap="round"/>
+  <path d="M84 8 L102 24 L84 40" fill="none" stroke="#33ffee" stroke-width="5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<div class="abs rule"></div>
+
+<!-- Step 2: first launch is blocked -->
+<div class="abs step" style="left: 28px; top: 212px; width: 470px;">
+  <div class="num">2</div>
+  <div>
+    <h2>Open TIDE from Applications</h2>
+    <p>macOS blocks it the first time. Click <b>Done</b> &mdash; not Move to Bin.</p>
+  </div>
+</div>
+
+<!-- Step 3: System Settings -->
+<div class="abs step" style="left: 28px; top: 282px; width: 470px;">
+  <div class="num">3</div>
+  <div>
+    <h2>Allow it in System Settings</h2>
+    <p><span class="path">System Settings &rsaquo; Privacy &amp; Security</span>, scroll down
+       to <b>Security</b> and click <b>Open Anyway</b>.</p>
+  </div>
+</div>
+<div class="abs shot" style="left: 28px; top: 372px; width: 470px; border-radius: 12px; overflow: hidden;">
+  <img src="gatekeeper-settings.png" alt="">
+  <!-- "Open Anyway" button: x 718-932, y 206-254 of 976x394 -->
+  <div class="ring" style="left: 72.4%; top: 49.5%; width: 24.3%; height: 17.8%;"></div>
+</div>
+
+<!-- Step 4: confirm -->
+<div class="abs step" style="left: 524px; top: 212px; width: 252px; z-index: 2;">
+  <div class="num">4</div>
+  <div>
+    <h2>Confirm Open Anyway</h2>
+    <p>Then enter your password or use Touch&nbsp;ID. You only do this once.</p>
+  </div>
+</div>
+<!-- The screenshot has a transparent shadow margin; the dialog itself is the
+     middle 520x740, so the image is oversized to make that part fill the column. -->
+<div class="abs shot" style="left: 473px; top: 221px; width: 354px;">
+  <img src="gatekeeper-dialog.png" alt="">
+  <!-- "Open Anyway" button: x 182-638, y 735-790 of 820x1040 -->
+  <div class="ring" style="left: 21.6%; top: 70.2%; width: 56.8%; height: 6.2%; border-radius: 14px;"></div>
+</div>

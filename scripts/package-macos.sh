@@ -152,10 +152,28 @@ fi
 if [ "$format" = dmg ]; then
     out_path="$bundle_parent/TIDE-${version}-${arch_label}.dmg"
     rm -f "$out_path"
-    # Drag-to-install layout: TIDE.app next to a link to /Applications.
-    ln -s /Applications "$staging/Applications"
-    hdiutil create -volname "$app_name" -srcfolder "$staging" -fs HFS+ \
-        -format UDZO -ov "$out_path" >&2
+    # Drag-to-install layout: TIDE.app next to a link to /Applications, over a
+    # background that walks through the Gatekeeper "Open Anyway" steps.
+    # dmgbuild writes the window layout (.DS_Store) without driving Finder.
+    dmg_assets=crates/tide-app/assets/dmg
+    if command -v dmgbuild >/dev/null 2>&1; then
+        dmgbuild_cmd=dmgbuild
+    elif python3 -c 'import dmgbuild' >/dev/null 2>&1; then
+        dmgbuild_cmd="python3 -m dmgbuild"
+    else
+        dmgbuild_cmd=""
+    fi
+    if [ -n "$dmgbuild_cmd" ]; then
+        $dmgbuild_cmd -s "$dmg_assets/dmg-settings.py" \
+            -D app="$app" -D background="$PWD/$dmg_assets/background.tiff" \
+            "$app_name" "$out_path" >&2
+    else
+        echo "warning: dmgbuild not found (pipx install dmgbuild);" \
+            "building the dmg without the instructions background." >&2
+        ln -s /Applications "$staging/Applications"
+        hdiutil create -volname "$app_name" -srcfolder "$staging" -fs HFS+ \
+            -format UDZO -ov "$out_path" >&2
+    fi
     if [ -n "$identity" ]; then
         codesign --force --timestamp --sign "$identity" "$out_path" >&2
     fi

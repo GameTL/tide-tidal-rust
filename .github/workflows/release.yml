@@ -177,6 +177,10 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
           echo "signed=1" >> "$GITHUB_OUTPUT"
 
+      # Lays out the dmg window and its instructions background.
+      - name: Install dmgbuild
+        run: pipx install dmgbuild
+
       - name: Package universal dmg
         id: pack
         env:
