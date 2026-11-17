@@ -3333,13 +3333,10 @@ impl Ui {
             on_ui(move |ui| {
                 let app = ui.app();
                 if scriptable {
-                    app.set_pkce_status("Sign in to TIDAL in your browser. TIDE continues by itself when you're done.".into());
+                    app.set_pkce_status("Waiting for you to sign in…".into());
                 } else {
                     // This browser can't be asked for the address: copying it is enough.
-                    app.set_pkce_status(
-                        "Sign in to TIDAL in your browser. When you land on a page that doesn't load, copy its address (⌘L, then ⌘C) and TIDE continues by itself."
-                            .into(),
-                    );
+                    app.set_pkce_status("Waiting for the copied address…".into());
                     app.set_pkce_manual(true);
                     app.set_pkce_offer_safari(true);
                 }
@@ -3372,8 +3369,7 @@ impl Ui {
                             let app = ui.app();
                             app.set_pkce_manual(true);
                             app.set_pkce_status(
-                                "TIDE isn't allowed to read the address from your browser. Copy the address of the page you land on (⌘L, then ⌘C) and TIDE continues by itself."
-                                    .into(),
+                                "TIDE can't read your browser, so copy the address (step 3).".into(),
                             );
                         });
                         from_clipboard
