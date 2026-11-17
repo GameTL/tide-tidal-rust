@@ -16,7 +16,7 @@ exclude = ["vendor"]
 i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
 
 [workspace.package]
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Tinapat Game Limsila <limsila.limsila@gmail.com>"]
