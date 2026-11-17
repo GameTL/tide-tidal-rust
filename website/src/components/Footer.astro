@@ -1,6 +1,7 @@
 ---
 import { Image } from 'astro:assets';
 import { github, latestMacDmg } from '../data/links';
+import { site } from '../data/site';
 import logo from '../assets/tide.png';
 ---
 <section class="sec sec-cta">
@@ -23,6 +24,7 @@ import logo from '../assets/tide.png';
       <span>Not affiliated with TIDAL. Requires a TIDAL subscription.</span>
     </div>
     <nav aria-label="Footer">
+      <a href={site.author.url}>By {site.author.name}</a>
       <a href={github}>GitHub</a>
       <a href={`${github}/releases`}>Releases</a>
       <a href={`${github}/blob/staging/SECURITY.md`}>Security</a>

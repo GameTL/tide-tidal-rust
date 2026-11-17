@@ -37,7 +37,7 @@ export const site = {
     'open source music player',
   ],
   license: 'MIT OR Apache-2.0',
-  author: { name: 'GameTL', url: 'https://github.com/GameTL' },
+  author: { name: 'GameTL', url: 'https://gametl.github.io/', github: 'https://github.com/GameTL' },
   github,
   // Ownership tokens for Google Search Console ("HTML tag" method, URL-prefix
   // property) and Bing Webmaster Tools. Paste the content="..." value; an

@@ -62,7 +62,7 @@ const jsonLd = {
       })),
       featureList: features,
       keywords: site.keywords.join(', '),
-      author: { '@type': 'Person', name: site.author.name, url: site.author.url },
+      author: { '@type': 'Person', name: site.author.name, url: site.author.url, sameAs: [site.author.github] },
       sameAs: [site.github],
     },
     {
