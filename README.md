@@ -16,7 +16,7 @@ curl -fsSL https://gametl.github.io/tide-tidal-rust/install.sh | sh
 ```
 
 Installs the latest release to `/Applications/TIDE.app` and opens without a
-security prompt. Or [download the dmg](https://github.com/GameTL/tide-tidal-rust/releases/latest/download/TIDE-macos-universal.dmg):
+security prompt. Or [download the dmg](https://github.com/GameTL/tide-tidal-rust/releases/latest):
 TIDE is a personal project and isn't signed through Apple's paid Developer
 Program, so on first launch click Done, then System Settings › Privacy &
 Security › **Open Anyway**.

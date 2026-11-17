@@ -19,7 +19,27 @@ set -eu
 # halfway through runs nothing.
 main() {
 
-DMG_URL="${TIDE_DMG_URL:-https://github.com/GameTL/tide-tidal-rust/releases/latest/download/TIDE-macos-universal.dmg}"
+REPO_URL="https://github.com/GameTL/tide-tidal-rust"
+
+# Releases name their dmg after the version (TIDE-1.2.3-macos-universal.dmg).
+# releases/latest redirects to the newest tag, which gives that version.
+latest_dmg_url() {
+    tag=$(curl -fsSLI --retry 2 -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest") || return 1
+    tag=${tag##*/}
+    case "$tag" in
+        v[0-9]*) ;;
+        *) echo "Could not find the latest TIDE release (got '$tag')." >&2; return 1 ;;
+    esac
+    printf '%s/releases/download/%s/TIDE-%s-macos-universal.dmg\n' "$REPO_URL" "$tag" "${tag#v}"
+}
+
+download_dmg() {
+    url=${TIDE_DMG_URL:-}
+    if [ -z "$url" ]; then
+        url=$(latest_dmg_url) || return 1
+    fi
+    curl -fsSL --retry 2 -o "$dmg" "$url"
+}
 
 # ── look ────────────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
@@ -130,7 +150,7 @@ printf '\n  %s≈ %s~ %s≈  %sTIDE%s %s· native TIDAL player for macOS%s\n\n' 
 
 # ── download ────────────────────────────────────────────────────────────────
 progress_file=$dmg
-step "Downloading the latest release" curl -fsSL --retry 2 -o "$dmg" "$DMG_URL"
+step "Downloading the latest release" download_dmg
 progress_file=""
 
 # ── unpack ──────────────────────────────────────────────────────────────────

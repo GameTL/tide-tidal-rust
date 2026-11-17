@@ -226,6 +226,19 @@ jobs:
           name: release-macos-universal
           path: dist
 
+      # Installed copies only accept updates signed by the key they embed, so a
+      # wrong secret must stop the release before anything is tagged.
+      - name: Check the update key matches the app
+        env:
+          TIDE_UPDATE_KEY: ${{ secrets.TIDE_UPDATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TIDE_UPDATE_KEY:-}" ]; then
+            echo "TIDE_UPDATE_KEY is not set; skipping."
+            exit 0
+          fi
+          sh scripts/sign-update.sh --check-key
+
       - name: Create tag
         env:
           NEXT: ${{ needs.resolve-version.outputs.next }}
@@ -273,9 +286,6 @@ jobs:
           set -euo pipefail
           name=$(cat dist/dmg-basename.txt)
           mv dist/TIDE-release.dmg "dist/$name"
-          # Fixed name so releases/latest/download/TIDE-macos-universal.dmg
-          # always serves the newest build (the website's download button).
-          cp "dist/$name" dist/TIDE-macos-universal.dmg
           if git rev-parse "$LAST" >/dev/null 2>&1 && [ "$LAST" != "v0.0.0" ]; then
             notes=$(git log "$LAST".."$NEXT" --pretty='- %s (%h)' --no-merges || true)
           else
@@ -283,13 +293,13 @@ jobs:
           fi
           if gh release view "$NEXT" >/dev/null 2>&1; then
             # shellcheck disable=SC2086 # UPDATE_ASSETS is a list of paths
-            gh release upload "$NEXT" "dist/$name" dist/TIDE-macos-universal.dmg $UPDATE_ASSETS --clobber
+            gh release upload "$NEXT" "dist/$name" $UPDATE_ASSETS --clobber
           else
             gh release create "$NEXT" \
               --title "$NEXT" \
               --target main \
               --notes "$notes" \
-              "dist/$name" dist/TIDE-macos-universal.dmg $UPDATE_ASSETS
+              "dist/$name" $UPDATE_ASSETS
           fi
 
   # Deploying from here would run on the PR's merge ref, which the github-pages
