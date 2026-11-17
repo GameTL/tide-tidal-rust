@@ -6,15 +6,21 @@ import { github, latestMacDmg } from './links';
 
 export const site = {
   name: 'TIDE',
-  title: 'TIDE: native, bit-perfect TIDAL player for macOS',
+  title: 'TIDE: native TIDAL desktop app for macOS, written in Rust',
   tagline: 'The native player for your TIDAL subscription.',
   description:
-    'TIDE is a fast, native TIDAL player for macOS, written in pure Rust. Instant loading, bit-perfect playback without exclusive mode, a parametric EQ (DSP) with AutoEq profiles, and a music video quality selector. Free and open source.',
+    'TIDE is a fast, native TIDAL desktop app for macOS, written in pure Rust. Instant loading, bit-perfect playback without exclusive mode, a parametric EQ (DSP) with AutoEq profiles, and a music video quality selector. Free and open source.',
+  // Other names people search for; also emitted as alternateName in JSON-LD.
+  alternateNames: ['TIDE for TIDAL', 'TIDE TIDAL Rust', 'tide-tidal-rust'],
   keywords: [
     'TIDE for TIDAL',
+    'TIDE TIDAL Rust',
+    'tide-tidal-rust',
     'TIDAL player',
     'TIDAL subscription',
     'TIDAL desktop app',
+    'TIDAL desktop app for macOS',
+    'macOS desktop app',
     'TIDAL for macOS',
     'native TIDAL client',
     'Rust TIDAL client',
@@ -33,8 +39,16 @@ export const site = {
   license: 'MIT OR Apache-2.0',
   author: { name: 'GameTL', url: 'https://github.com/GameTL' },
   github,
+  // Ownership tokens for Google Search Console ("HTML tag" method, URL-prefix
+  // property) and Bing Webmaster Tools. Paste the content="..." value; an
+  // empty string emits no tag. Without a verified property the sitemap cannot
+  // be submitted, and a github.io project page is rarely found on its own.
+  verification: { google: '' as string, bing: '' as string },
+  // IndexNow key (public by design): served at <site>/<key>.txt, and pinged by
+  // the Pages workflow after each deploy so Bing, DuckDuckGo and Yandex recrawl.
+  indexNowKey: '8a260b7f4d363c5becd742606d9ed0f9',
   downloadUrl: latestMacDmg,
-  ogImage: { path: 'og.png', width: 1200, height: 630, alt: 'TIDE, a native TIDAL player for macOS' },
+  ogImage: { path: 'og.png', width: 1200, height: 630, alt: 'TIDE, a native TIDAL desktop app for macOS' },
 } as const;
 
 export const features = [
@@ -58,7 +72,7 @@ export type Faq = { q: string; a: string };
 export const faqs: Faq[] = [
   {
     q: 'What is TIDE?',
-    a: 'TIDE is a free, open-source desktop player for TIDAL, written in pure Rust for macOS. It plays your TIDAL library bit-perfect, adds a parametric EQ, and replaces the Electron-based official app with a native one.',
+    a: 'TIDE is a free, open-source desktop app for macOS that plays TIDAL, written in pure Rust. It plays your TIDAL library bit-perfect, adds a parametric EQ, and replaces the Electron-based official app with a native one.',
   },
   {
     q: 'Is TIDE an official TIDAL app?',
