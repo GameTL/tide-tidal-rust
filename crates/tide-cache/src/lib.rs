@@ -426,11 +426,12 @@ impl MetadataCache {
     }
 
     pub fn clear_json(&self) -> Result<(), CacheError> {
-        // Account data goes; app preferences stay.
-        self.conn
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM kv WHERE key != 'settings'", [])?;
+        // Account data goes; app preferences and the EQs (which belong to this
+        // computer's sound outputs, not to the account) stay.
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM kv WHERE key NOT IN ('settings', 'dsp', 'autoeq_index')",
+            [],
+        )?;
         Ok(())
     }
 
@@ -1625,6 +1626,21 @@ pub fn default_image_cache_dir() -> Result<PathBuf, CacheError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logging_out_keeps_preferences_and_eqs_but_not_account_data() {
+        let cache = MetadataCache::in_memory().unwrap();
+        for key in ["settings", "dsp", "autoeq_index", "home", "favorites"] {
+            cache.put_json(key, "{}").unwrap();
+        }
+        cache.clear_json().unwrap();
+        for key in ["settings", "dsp", "autoeq_index"] {
+            assert!(cache.get_json(key).is_some(), "{key} should survive");
+        }
+        for key in ["home", "favorites"] {
+            assert!(cache.get_json(key).is_none(), "{key} should be cleared");
+        }
+    }
 
     #[test]
     fn test_metadata_cache_favorites() {

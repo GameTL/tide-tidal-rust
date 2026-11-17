@@ -30,6 +30,11 @@ const AUTOEQ_SHOWN: usize = 80;
 /// Slider / drag ticks closer than this share one undo step.
 const UNDO_LIVE_GAP: Duration = Duration::from_millis(400);
 const UNDO_LIMIT: usize = 50;
+/// Marks a JSON file as a backup of every output's EQs and the presets.
+const BACKUP_FORMAT: &str = "tide-dsp-backup";
+const BACKUP_VERSION: u32 = 1;
+/// A backup is a few kilobytes; anything far larger is not one.
+const BACKUP_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Dot colours, by band number.
 const BAND_COLORS: [(u8, u8, u8); 8] = [
     (0x14, 0xb8, 0xa6),
@@ -137,6 +142,71 @@ struct DspStore {
     /// Sound output name → its equalisers.
     devices: BTreeMap<String, DeviceDsp>,
     presets: Vec<EqProfile>,
+}
+
+/// The DSP store as a file: the same data, tagged so another JSON file is refused.
+#[derive(Serialize, Deserialize)]
+struct DspBackup {
+    format: String,
+    version: u32,
+    #[serde(default)]
+    devices: BTreeMap<String, DeviceDsp>,
+    #[serde(default)]
+    presets: Vec<EqProfile>,
+}
+
+fn tidy_profile(profile: &mut EqProfile) {
+    profile.preamp = profile.preamp.clamp(-eq::MAX_GAIN, eq::MAX_GAIN);
+    profile.bands.truncate(MAX_BANDS);
+    for band in &mut profile.bands {
+        *band = band.clamped();
+    }
+}
+
+impl DspStore {
+    fn to_backup(&self) -> String {
+        serde_json::to_string_pretty(&DspBackup {
+            format: BACKUP_FORMAT.to_string(),
+            version: BACKUP_VERSION,
+            devices: self.devices.clone(),
+            presets: self.presets.clone(),
+        })
+        .unwrap_or_default()
+    }
+
+    /// Merge a backup in: its outputs and presets replace the ones of the same
+    /// name, and everything else stays. Returns how many of each it held.
+    fn restore_backup(&mut self, text: &str) -> Result<(usize, usize), String> {
+        let backup: DspBackup =
+            serde_json::from_str(text).map_err(|e| format!("not a TIDE EQ backup ({e})"))?;
+        if backup.format != BACKUP_FORMAT {
+            return Err("not a TIDE EQ backup".to_string());
+        }
+        if backup.version > BACKUP_VERSION {
+            return Err("made by a newer version of TIDE".to_string());
+        }
+        if backup.devices.is_empty() && backup.presets.is_empty() {
+            return Err("the backup holds no EQs".to_string());
+        }
+        let counts = (backup.devices.len(), backup.presets.len());
+        for (name, mut device) in backup.devices {
+            device.migrate_preamp();
+            device.preamp = Some(device.gain().clamp(PREAMP_MIN, PREAMP_MAX));
+            tidy_profile(&mut device.usr);
+            tidy_profile(&mut device.spk);
+            device.update_auto_preamp();
+            self.devices.insert(name, device);
+        }
+        for mut preset in backup.presets {
+            tidy_profile(&mut preset);
+            match self.presets.iter_mut().find(|p| p.name == preset.name) {
+                Some(existing) => *existing = preset,
+                None => self.presets.push(preset),
+            }
+        }
+        self.presets.sort_by_key(|p| p.name.to_lowercase());
+        Ok(counts)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,6 +442,16 @@ fn autoeq_matches(entries: &[AutoEqEntry], query: &str) -> Vec<usize> {
         .map(|(i, _)| i)
         .take(AUTOEQ_SHOWN)
         .collect()
+}
+
+/// "3 outputs and 1 preset".
+fn backup_summary(outputs: usize, presets: usize) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "{outputs} output{} and {presets} preset{}",
+        plural(outputs),
+        plural(presets)
+    )
 }
 
 async fn fetch_text(url: &str) -> Result<String, String> {
@@ -882,6 +962,8 @@ impl Ui {
             "import" => ui.dsp_import(),
             "export-parametric" => ui.dsp_export(false),
             "export-graphic" => ui.dsp_export(true),
+            "backup" => ui.dsp_backup(),
+            "restore" => ui.dsp_restore(),
             "save-preset" => ui.dsp_save_preset(),
             "reset" => ui.dsp_edit(|eq, selected| {
                 eq.preamp = 0.0;
@@ -1055,6 +1137,96 @@ impl Ui {
         }
     }
 
+    /// Save every output's EQs and all presets as one JSON file. The EQs stay
+    /// saved in the app as before; the file is a copy to keep or move.
+    fn dsp_backup(self: &Rc<Self>) {
+        let (text, outputs, presets) = {
+            let dsp = self.dsp.borrow();
+            (
+                dsp.store.to_backup(),
+                dsp.store.devices.len(),
+                dsp.store.presets.len(),
+            )
+        };
+        let weak = Rc::downgrade(self);
+        let spawned = slint::spawn_local(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Back up all EQs")
+                .set_file_name("TIDE EQ backup.json")
+                .add_filter("TIDE EQ backup", &["json"])
+                .save_file()
+                .await
+            else {
+                return;
+            };
+            let written = file.write(text.as_bytes()).await;
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            match written {
+                Ok(()) => notice(
+                    &ui.app(),
+                    &format!(
+                        "Backed up {} to {}",
+                        backup_summary(outputs, presets),
+                        file.file_name()
+                    ),
+                ),
+                Err(e) => tracing::error!("Could not back up the EQs: {e}"),
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::error!("Could not open the file dialog: {e}");
+        }
+    }
+
+    /// Bring back the EQs and presets of a backup file, and save them.
+    fn dsp_restore(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        let spawned = slint::spawn_local(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Restore EQ backup")
+                .add_filter("TIDE EQ backup", &["json"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let bytes = file.read().await;
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let restored = if bytes.len() > BACKUP_MAX_BYTES {
+                Err("the file is too large".to_string())
+            } else {
+                let mut dsp = ui.dsp.borrow_mut();
+                let restored = dsp.store.restore_backup(&String::from_utf8_lossy(&bytes));
+                if restored.is_ok() {
+                    dsp.selected = None;
+                    dsp.forget_history();
+                    dsp.dirty = true;
+                }
+                restored
+            };
+            match restored {
+                Ok((outputs, presets)) => {
+                    ui.dsp_apply();
+                    ui.dsp_present();
+                    ui.present_signal();
+                    ui.dsp_flush();
+                    notice(
+                        &ui.app(),
+                        &format!("Restored {}", backup_summary(outputs, presets)),
+                    );
+                }
+                Err(e) => tracing::error!("Could not restore {}: {e}", file.file_name()),
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::error!("Could not open the file dialog: {e}");
+        }
+    }
+
     // ---------------------------------------------------------- AutoEq
 
     /// Show the AutoEq browser. The index comes from GitHub when there is no
@@ -1202,6 +1374,66 @@ mod tests {
         assert_eq!(autoeq_matches(&entries, "660s2 oratory"), vec![1]);
         assert_eq!(autoeq_matches(&entries, ""), vec![0, 1]);
         assert!(autoeq_matches(&entries, "focal").is_empty());
+    }
+
+    #[test]
+    fn a_backup_restores_every_output_and_preset() {
+        let mut store = DspStore::default();
+        let mut desk = DeviceDsp::default();
+        desk.spk.name = "Desk".to_string();
+        desk.spk.bands.push(Band::peak(108.0, -5.0, 7.2));
+        desk.preamp = Some(-4.0);
+        store.devices.insert("Speakers".to_string(), desk.clone());
+        store.presets.push(desk.spk.clone());
+        let text = store.to_backup();
+
+        // A logged-out, wiped store gets everything back.
+        let mut fresh = DspStore::default();
+        assert_eq!(fresh.restore_backup(&text), Ok((1, 1)));
+        assert_eq!(fresh.devices["Speakers"], desk);
+        assert_eq!(fresh.presets, store.presets);
+
+        // Outputs and presets the backup does not name are left alone.
+        let mut other = DspStore::default();
+        other
+            .devices
+            .insert("Headphones".to_string(), DeviceDsp::default());
+        other
+            .devices
+            .insert("Speakers".to_string(), DeviceDsp::default());
+        other.restore_backup(&text).unwrap();
+        assert_eq!(other.devices.len(), 2);
+        assert_eq!(other.devices["Speakers"], desk);
+    }
+
+    #[test]
+    fn a_restore_refuses_other_files_and_tames_wild_values() {
+        let mut store = DspStore::default();
+        assert!(store.restore_backup("{}").is_err());
+        assert!(store.restore_backup(r#"{"devices":{"A":{}}}"#).is_err());
+        assert!(store.restore_backup("Preamp: -3 dB").is_err());
+        assert!(
+            store
+                .restore_backup(r#"{"format":"tide-dsp-backup","version":1}"#)
+                .is_err()
+        );
+        assert!(
+            store
+                .restore_backup(r#"{"format":"tide-dsp-backup","version":99,"devices":{"A":{}}}"#)
+                .is_err()
+        );
+        assert!(store.devices.is_empty());
+
+        store
+            .restore_backup(
+                r#"{"format":"tide-dsp-backup","version":1,"devices":{"A":{"preamp":400.0,
+                "usr":{"bands":[{"kind":"Peak","freq":9e9,"gain":900.0,"q":0.0,"enabled":true}]}}}}"#,
+            )
+            .unwrap();
+        let device = &store.devices["A"];
+        assert_eq!(device.preamp, Some(PREAMP_MAX));
+        assert_eq!(device.usr.bands[0], device.usr.bands[0].clamped());
+        assert!(device.usr.bands[0].gain <= eq::MAX_GAIN);
     }
 
     #[test]

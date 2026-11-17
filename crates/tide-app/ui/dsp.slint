@@ -263,7 +263,27 @@ export component DspView inherits Rectangle {
                     vertical-alignment: center;
                 }
 
+                Rectangle { }
 
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        text: "Back up EQs…";
+                        clicked => {
+                            App.dsp-action("backup");
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        text: "Restore…";
+                        clicked => {
+                            App.dsp-action("restore");
+                        }
+                    }
+                }
             }
 
             HoldText {
