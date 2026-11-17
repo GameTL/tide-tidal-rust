@@ -40,11 +40,11 @@ const jsonLd = {
       '@type': 'SoftwareApplication',
       '@id': `${home}#app`,
       name: site.name,
-      alternateName: 'TIDE for TIDAL',
+      alternateName: site.alternateNames,
       description,
       url: home,
       applicationCategory: 'MultimediaApplication',
-      applicationSubCategory: 'Music player',
+      applicationSubCategory: 'Desktop music player',
       operatingSystem: 'macOS',
       processorRequirements: 'Apple Silicon or Intel (universal binary)',
       downloadUrl: site.downloadUrl,
@@ -62,7 +62,7 @@ const jsonLd = {
       })),
       featureList: features,
       keywords: site.keywords.join(', '),
-      author: { '@type': 'Person', name: site.author.name, url: site.author.url },
+      author: { '@type': 'Person', name: site.author.name, url: site.author.url, sameAs: [site.author.github] },
       sameAs: [site.github],
     },
     {
@@ -103,6 +103,8 @@ const jsonLdHtml = JSON.stringify(jsonLd).replace(/</g, '\\u003c');
     <meta name="color-scheme" content="dark" />
     <meta name="application-name" content={site.name} />
     <meta name="author" content={site.author.name} />
+    {site.verification.google && <meta name="google-site-verification" content={site.verification.google} />}
+    {site.verification.bing && <meta name="msvalidate.01" content={site.verification.bing} />}
 
     <link rel="icon" type="image/png" sizes="32x32" href={`${base}favicon-32.png`} />
     <link rel="icon" type="image/png" sizes="192x192" href={`${base}icon-192.png`} />

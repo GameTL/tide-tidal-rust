@@ -54,3 +54,19 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      # Tell IndexNow (Bing, DuckDuckGo, Yandex, Seznam) the page changed. The
+      # key is public and served from the site itself; Google ignores IndexNow
+      # and needs the sitemap submitted in Search Console instead.
+      - name: Ping IndexNow
+        continue-on-error: true
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          key=$(sed -n "s/.*indexNowKey: '\([0-9a-f]*\)'.*/\1/p" website/src/data/site.ts)
+          [ -n "$key" ] || exit 0
+          curl -fsS -o /dev/null -w 'IndexNow: %{http_code}\n' --get \
+            --data-urlencode "url=${PAGE_URL}" \
+            --data-urlencode "key=${key}" \
+            --data-urlencode "keyLocation=${PAGE_URL}${key}.txt" \
+            https://api.indexnow.org/indexnow
