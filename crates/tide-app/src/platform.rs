@@ -1844,13 +1844,12 @@ mod tests {
 //
 // TIDAL's Max-quality (PKCE) login ends on a fixed web address that cannot
 // point back at a desktop app. To finish the login without asking the user to
-// paste that address, TIDE looks for it in two places, and only while a login
-// is in progress:
-//   * the tabs of the default browser, when it is scriptable (Safari and
-//     Chromium-family browsers; macOS asks for permission the first time);
-//   * the clipboard, so copying the address is enough in any other browser.
-// Both checks compare against the redirect prefix inside the helper script, so
-// no other tab address or clipboard content ever reaches TIDE.
+// paste that address, TIDE looks for it in the tabs of the default browser
+// when it is scriptable (Safari and Chromium-family browsers; macOS asks for
+// permission the first time), and only while a login is in progress. The
+// comparison against the redirect prefix happens inside the helper script, so
+// no other tab address ever reaches TIDE. With any other browser the user
+// copies the address and pastes it into TIDE; the clipboard is never read.
 
 /// Where TIDAL sends the browser after a successful Max-quality login.
 pub const LOGIN_REDIRECT_PREFIX: &str = "https://tidal.com/android/login/auth";
@@ -1931,32 +1930,6 @@ pub fn redirect_from_browser(bundle_id: &str) -> Result<Option<String>, String> 
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(url.starts_with(LOGIN_REDIRECT_PREFIX).then_some(url))
-}
-
-/// Look for the login redirect on the clipboard. `last_change` remembers the
-/// pasteboard change counter so unchanged content is never read twice.
-pub fn redirect_from_clipboard(last_change: &mut i64) -> Option<String> {
-    let script = format!(
-        r#"ObjC.import("AppKit");
-        function run(argv) {{
-            var pb = $.NSPasteboard.generalPasteboard;
-            var count = pb.changeCount;
-            if (String(count) === argv[0]) return count + "\n";
-            var s = pb.stringForType($.NSPasteboardTypeString);
-            var text = s.isNil() ? "" : s.js.trim();
-            return count + "\n" + (text.indexOf("{LOGIN_REDIRECT_PREFIX}") === 0 ? text : "");
-        }}"#
-    );
-    let out = std::process::Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", &script, &last_change.to_string()])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (count, url) = text.split_once('\n')?;
-    *last_change = count.trim().parse().ok()?;
-    let url = url.trim();
-    url.starts_with(LOGIN_REDIRECT_PREFIX)
-        .then(|| url.to_string())
 }
 
 /// Open `url` in a specific browser instead of the default one.

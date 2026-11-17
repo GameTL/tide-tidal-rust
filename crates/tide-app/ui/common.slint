@@ -549,7 +549,7 @@ export global App {
     in property <string> pkce-status: "";
     // A Max-quality login is waiting for the browser to come back.
     in property <bool> pkce-waiting: false;
-    // Show the paste box (the address could not be picked up automatically).
+    // TIDE cannot read the address from this browser: show the copy and paste steps.
     in property <bool> pkce-manual: false;
     in property <bool> pkce-offer-safari: false;
     in-out property <string> cache-max: "20";

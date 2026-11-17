@@ -160,38 +160,48 @@ component SmallButton inherits Rectangle {
     }
 }
 
+// The numbered circle in front of a login step.
+component StepBadge inherits Rectangle {
+    in property <int> number;
+    // Already behind the user: a check instead of the number.
+    in property <bool> done;
+    // A step to do now.
+    in property <bool> current;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.current ? Theme.lossless : #1f1f22;
+    if !root.done: Text {
+        text: root.number;
+        color: root.current ? #10201f : Theme.text-secondary;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.done: Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/check.svg");
+        size: 14px;
+        tint: Theme.lossless;
+    }
+}
+
 // One numbered step of the login walkthrough.
 component LoginStep inherits HorizontalLayout {
     in property <int> number;
     in property <string> title;
     in property <string> detail;
-    // Already behind the user: a check instead of the number.
     in property <bool> done;
-    // The step to do now.
     in property <bool> current;
     spacing: 12px;
     VerticalLayout {
         alignment: start;
-        Rectangle {
-            width: 24px;
-            height: 24px;
-            border-radius: 12px;
-            background: root.current ? Theme.lossless : #1f1f22;
-            if !root.done: Text {
-                text: root.number;
-                color: root.current ? #10201f : Theme.text-secondary;
-                font-size: 12px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-            if root.done: Icon {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                source: @image-url("icons/check.svg");
-                size: 14px;
-                tint: Theme.lossless;
-            }
+        StepBadge {
+            number: root.number;
+            done: root.done;
+            current: root.current;
         }
     }
 
@@ -221,7 +231,9 @@ component LoginStep inherits HorizontalLayout {
 }
 
 // The login, step by step. TIDAL's sign-in ends on its own "Page not found"
-// page, which looks like a failure unless the listener expects it.
+// page, which looks like a failure unless the listener expects it. TIDE reads
+// that page's address from Safari and Chromium browsers itself; with any other
+// browser (App.pkce-manual) the listener copies it and pastes it into step 4.
 component LoginSteps inherits VerticalLayout {
     in property <string> button-text;
     spacing: 12px;
@@ -242,7 +254,7 @@ component LoginSteps inherits VerticalLayout {
     LoginStep {
         number: 3;
         title: App.pkce-manual ? "Copy the address of “Page not found”" : "Wait for “Page not found”";
-        detail: App.pkce-manual ? "Press ⌘L, then ⌘C. TIDE finishes by itself." : "That page is expected. TIDE finishes by itself.";
+        detail: App.pkce-manual ? "Press ⌘L, then ⌘C." : "That page is expected. TIDE finishes by itself.";
         current: App.pkce-waiting;
         // What the last page looks like, so it is recognised.
         VerticalLayout {
@@ -283,11 +295,57 @@ component LoginSteps inherits VerticalLayout {
             }
         }
     }
+
+    if App.pkce-manual: HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            StepBadge {
+                number: 4;
+                current: App.pkce-waiting;
+            }
+        }
+
+        Rectangle {
+            height: 38px;
+            horizontal-stretch: 1;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: paste.has-focus ? #3a3a3a : #222222;
+            background: #0a0a0a;
+            if paste.text == "": Text {
+                x: 12px;
+                text: "Paste the address here";
+                color: Theme.text-secondary;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            paste := EditableInput {
+                x: 12px;
+                width: parent.width - 24px;
+                height: 18px;
+                color: Theme.text;
+                font-size: 13px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                accepted => {
+                    App.pkce-finish(self.text);
+                }
+            }
+        }
+
+        SmallButton {
+            text: "Finish";
+            clicked => {
+                App.pkce-finish(paste.text);
+                paste.text = "";
+            }
+        }
+    }
 }
 
-// Max-quality (PKCE) login. TIDAL's sign-in page opens in the default browser
-// and TIDE picks up the result by itself; the paste box only appears when that
-// isn't possible.
+// Max-quality (PKCE) login. TIDAL's sign-in page opens in the default browser.
 export component MaxLogin inherits VerticalLayout {
     in property <string> button-text: "Log in with TIDAL";
     in property <bool> centered: false;
@@ -330,44 +388,6 @@ export component MaxLogin inherits VerticalLayout {
         font-size: 13px;
         wrap: word-wrap;
         horizontal-alignment: centered ? center : left;
-    }
-    if App.pkce-manual: HorizontalLayout {
-        spacing: 10px;
-        Rectangle {
-            height: 38px;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: paste.has-focus ? #3a3a3a : #222222;
-            background: #0a0a0a;
-            if paste.text == "": Text {
-                x: 12px;
-                text: "…or paste the address here";
-                color: Theme.text-secondary;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-            paste := EditableInput {
-                x: 12px;
-                width: parent.width - 24px;
-                height: 18px;
-                color: Theme.text;
-                font-size: 13px;
-                single-line: true;
-                vertical-alignment: center;
-                selection-background-color: #4a4a4a;
-                accepted => {
-                    App.pkce-finish(self.text);
-                }
-            }
-        }
-
-        SmallButton {
-            text: "Finish";
-            clicked => {
-                App.pkce-finish(paste.text);
-                paste.text = "";
-            }
-        }
     }
 }
 

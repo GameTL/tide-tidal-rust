@@ -51,10 +51,8 @@ login is in progress (at most ten minutes):
   starts with `https://tidal.com/android/login/auth`. macOS asks for your
   permission the first time. The comparison runs inside the script, so no
   other tab address is returned to TIDE.
-- **Any other browser (Firefox, Zen, ...).** Copy the address; TIDE notices
-  a clipboard entry that starts with the same prefix. Other clipboard
-  content is ignored and never leaves the helper script. You can also paste
-  the address into the box that appears.
+- **Any other browser (Firefox, Zen, ...).** Copy the address and paste it
+  into the box in TIDE's login steps. TIDE never reads the clipboard.
 
 TIDE does not read browser profiles, history or cookies. The one-time code
 is exchanged over HTTPS and is useless afterwards.
