@@ -72,6 +72,8 @@ pub struct Settings {
     /// Last window placement, kept with preferences so logout preserves it.
     #[cfg(target_os = "macos")]
     pub window: Option<crate::window_state::WindowState>,
+    /// An update the listener chose to skip; only Check for Updates… offers it again.
+    pub skipped_version: String,
 }
 
 fn default_true() -> bool {
@@ -93,6 +95,7 @@ impl Default for Settings {
             fancy_animation: false,
             #[cfg(target_os = "macos")]
             window: None,
+            skipped_version: String::new(),
         }
     }
 }
@@ -2532,6 +2535,13 @@ impl Ui {
         bind!(on_drag_window, |ui| crate::platform::drag_window(&ui.win));
         bind!(on_minimize, |ui| ui.win.window().set_minimized(true));
         bind!(on_close_window, |ui| ui.close_window());
+        bind!(on_check_for_updates, |ui| ui.check_for_updates());
+        bind!(on_update_now, |ui| crate::update::install_now(&ui));
+        bind!(on_update_skip, |ui| ui.skip_update());
+        bind!(on_update_dismiss, |ui| crate::update::dismiss(&ui));
+        app.on_open_update_page(|| {
+            let _ = open::that(crate::update::RELEASES_PAGE);
+        });
         {
             // The red close button: same as ⌘W, animation included.
             let weak = Rc::downgrade(self);
@@ -3479,6 +3489,36 @@ impl Ui {
                 tokio::time::sleep(Duration::from_secs(15 * 60)).await;
             }
         });
+    }
+
+    /// Look for a newer release now and then every few hours (release builds only).
+    pub fn start_update_checks(self: &Rc<Self>) {
+        if crate::update::enabled() {
+            self.spawn(crate::update::run_checks);
+        }
+    }
+
+    /// TIDE → Check for Updates…: ignores a skipped version and always answers.
+    fn check_for_updates(self: &Rc<Self>) {
+        if !crate::update::enabled() {
+            crate::alerts::notice(
+                &self.app(),
+                &format!(
+                    "Development build {}: updates come from git",
+                    crate::update::CURRENT
+                ),
+            );
+            return;
+        }
+        self.spawn(|ctx| async move { crate::update::check(&ctx, true).await });
+    }
+
+    /// Skip this version: no toast for it again unless asked from the menu.
+    fn skip_update(self: &Rc<Self>) {
+        if let Some(version) = crate::update::offered_version() {
+            self.update_settings(|s| s.skipped_version = version);
+        }
+        self.app().set_update_state("".into());
     }
 
     fn set_sidebar(self: &Rc<Self>, cards: &[Card]) {

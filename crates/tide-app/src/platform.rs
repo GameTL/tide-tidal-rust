@@ -1596,11 +1596,14 @@ pub fn configure_app_icon() {
 /// Marks the app menu's own Settings item ("TIDE" in ASCII).
 #[cfg(target_os = "macos")]
 const SETTINGS_TAG: isize = 0x5449_4445;
+/// Marks the app menu's own Check for Updates… item.
+#[cfg(target_os = "macos")]
+const UPDATES_TAG: isize = SETTINGS_TAG + 1;
 
 #[cfg(target_os = "macos")]
 objc2::define_class!(
-    /// Target of the app menu's Settings item, and the observer that puts it
-    /// back after Slint rebuilds the menu bar.
+    /// Target of the app menu's own items (Check for Updates…, Settings), and
+    /// the observer that puts them back after Slint rebuilds the menu bar.
     #[unsafe(super(objc2::runtime::NSObject))]
     #[thread_kind = objc2::MainThreadOnly]
     #[name = "TIDEMenuTarget"]
@@ -1610,6 +1613,11 @@ objc2::define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&objc2::runtime::AnyObject>) {
             crate::controller::on_ui(|ui| ui.app().invoke_navigate("settings".into()));
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            crate::controller::on_ui(|ui| ui.app().invoke_check_for_updates());
         }
 
         #[unsafe(method(menuDidAddItem:))]
@@ -1657,8 +1665,8 @@ fn menu_target(mtm: objc2::MainThreadMarker) -> objc2::rc::Retained<MenuTarget> 
 }
 
 /// Slint builds the standard macOS app menu, but exposes no app-menu roles.
-/// Show Settings in the app menu once the window is shown, and after every
-/// menu bar rebuild.
+/// Show Check for Updates… and Settings in the app menu once the window is
+/// shown, and after every menu bar rebuild.
 #[cfg(target_os = "macos")]
 pub fn configure_menu() {
     fn install_when_ready(attempts_left: u8) {
@@ -1674,9 +1682,9 @@ pub fn configure_menu() {
     install_when_ready(25);
 }
 
-/// Slint's own Settings item stays in View, hidden: a rebuild removes every
-/// item Slint added from the menu it added it to, and AppKit aborts if one of
-/// them has moved. The app menu gets a separate item instead.
+/// Slint's own items stay in View, hidden: a rebuild removes every item Slint
+/// added from the menu it added it to, and AppKit aborts if one of them has
+/// moved. The app menu gets separate items instead.
 #[cfg(target_os = "macos")]
 fn install_settings_item() -> Option<()> {
     use objc2::{MainThreadMarker, MainThreadOnly as _};
@@ -1690,36 +1698,47 @@ fn install_settings_item() -> Option<()> {
     let app_item = bar.itemAtIndex(0)?;
     let app_menu = app_item.submenu()?;
     let view = bar.itemWithTitle(&NSString::from_str("View"))?.submenu()?;
-    let slint_settings = view.itemWithTitle(&NSString::from_str("Settings…"))?;
     let name = NSString::from_str(env!("CARGO_BIN_NAME"));
     app_item.setTitle(&name);
     app_menu.setTitle(&name);
-    // AppKit won't give a second item the same shortcut, so ⌘, moves too.
-    let key = slint_settings.keyEquivalent();
-    let mask = slint_settings.keyEquivalentModifierMask();
-    slint_settings.setHidden(true);
-    slint_settings.setKeyEquivalent(&NSString::new());
-    let item = match app_menu.itemWithTag(SETTINGS_TAG) {
-        Some(item) => item,
-        None => {
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &slint_settings.title(),
-                    Some(objc2::sel!(openSettings:)),
-                    &NSString::new(),
-                )
-            };
-            item.setTag(SETTINGS_TAG);
-            unsafe { item.setTarget(Some(&target)) };
-            app_menu.insertItem_atIndex(&item, 1);
-            tracing::debug!("Added Settings to the TIDE application menu");
-            item
+    // About TIDE, Check for Updates…, Settings…, as other Mac apps order them.
+    let mirrored = [
+        (
+            "Check for Updates…",
+            UPDATES_TAG,
+            objc2::sel!(checkForUpdates:),
+        ),
+        ("Settings…", SETTINGS_TAG, objc2::sel!(openSettings:)),
+    ];
+    for (index, (title, tag, action)) in mirrored.into_iter().enumerate() {
+        let slint_item = view.itemWithTitle(&NSString::from_str(title))?;
+        // AppKit won't give a second item the same shortcut, so ⌘, moves too.
+        let key = slint_item.keyEquivalent();
+        let mask = slint_item.keyEquivalentModifierMask();
+        slint_item.setHidden(true);
+        slint_item.setKeyEquivalent(&NSString::new());
+        let item = match app_menu.itemWithTag(tag) {
+            Some(item) => item,
+            None => {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &slint_item.title(),
+                        Some(action),
+                        &NSString::new(),
+                    )
+                };
+                item.setTag(tag);
+                unsafe { item.setTarget(Some(&target)) };
+                app_menu.insertItem_atIndex(&item, 1 + index as isize);
+                tracing::debug!("Added {title} to the TIDE application menu");
+                item
+            }
+        };
+        if key.length() > 0 {
+            item.setKeyEquivalent(&key);
+            item.setKeyEquivalentModifierMask(mask);
         }
-    };
-    if key.length() > 0 {
-        item.setKeyEquivalent(&key);
-        item.setKeyEquivalentModifierMask(mask);
     }
     Some(())
 }

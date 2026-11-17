@@ -4,6 +4,7 @@ mod logfile;
 mod mem;
 mod platform;
 mod signal;
+mod update;
 #[cfg(target_os = "macos")]
 mod window_state;
 mod zoom;
@@ -89,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.boot(has_session);
     ui.start_token_refresh();
     ui.start_offline_keeper();
+    ui.start_update_checks();
 
     let ticker = slint::Timer::default();
     let tick_ui = ui.clone();

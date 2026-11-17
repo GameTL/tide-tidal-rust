@@ -7,13 +7,17 @@
 #   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Name (TEAMID)"
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  (app-specific password)
 #     -> notarize and staple (needs APPLE_SIGNING_IDENTITY)
+#
+# --app-zip (with --dmg) also writes TIDE-<version>-<arch>.app.zip next to the
+# dmg: the bare app, which TIDE's over-the-air updater downloads.
 set -eu
 
 profile=release
 universal=0
 app_display=TIDE
 format=zip
-usage="Usage: $0 [release|debug] [--universal] [--dmg] [--name NAME]"
+app_zip=0
+usage="Usage: $0 [release|debug] [--universal] [--dmg] [--app-zip] [--name NAME]"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -27,6 +31,10 @@ while [ $# -gt 0 ]; do
             ;;
         --dmg)
             format=dmg
+            shift
+            ;;
+        --app-zip)
+            app_zip=1
             shift
             ;;
         --name)
@@ -152,6 +160,12 @@ fi
 if [ "$format" = dmg ]; then
     out_path="$bundle_parent/TIDE-${version}-${arch_label}.dmg"
     rm -f "$out_path"
+    if [ "$app_zip" = 1 ]; then
+        # The bare app, for the over-the-air updater.
+        update_zip="$bundle_parent/TIDE-${version}-${arch_label}.app.zip"
+        rm -f "$update_zip"
+        ditto -c -k --keepParent "$app" "$update_zip"
+    fi
     # Drag-to-install layout: TIDE.app next to a link to /Applications, over a
     # background that walks through the Gatekeeper "Open Anyway" steps.
     # dmgbuild writes the window layout (.DS_Store) without driving Finder.
