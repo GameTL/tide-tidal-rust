@@ -2255,15 +2255,15 @@ export component LoginView inherits Rectangle {
     }
 
     ScrollView {
-        content-height: max(root.height, 472px);
+        content-height: max(root.height, 592px);
         VerticalLayout {
-            height: max(root.height, 472px);
+            height: max(root.height, 592px);
             alignment: center;
             HorizontalLayout {
                 alignment: center;
                 Rectangle {
                     width: min(520px, root.width - 32px);
-                    height: 440px;
+                    height: 560px;
                     border-radius: 16px;
                     background: #0e0e0e;
                     border-width: 1px;
@@ -2272,12 +2272,22 @@ export component LoginView inherits Rectangle {
                         padding: 40px;
                         spacing: 18px;
                         alignment: center;
-                        Text {
-                            text: "T I D E";
-                            color: Theme.text;
-                            font-size: 30px;
-                            font-weight: 800;
-                            horizontal-alignment: center;
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "T I D E";
+                                color: Theme.text;
+                                font-size: 30px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                            }
+
+                            if App.app-version != "": Text {
+                                text: "v" + App.app-version;
+                                color: Theme.text-dim;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
                         }
 
                         Text {

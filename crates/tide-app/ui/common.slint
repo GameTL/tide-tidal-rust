@@ -354,6 +354,18 @@ export global App {
     // False for a plain confirmation ("Added to playlist").
     in property <bool> alert-error: true;
     in property <int> alert-serial: 0;
+    // Update toast. update-state: "" (hidden) | available | downloading |
+    // installing | failed. update-progress is the download, 0..1.
+    in-out property <string> update-state: "";
+    in property <string> update-from: "";
+    in property <string> update-to: "";
+    in property <float> update-progress: 0.0;
+    in property <string> update-error: "";
+    callback check-for-updates();
+    callback update-now();
+    callback update-skip();
+    callback update-dismiss();
+    callback open-update-page();
     in property <float> progress: 0.0;
     in property <int> duration-secs: 0;
     in-out property <bool> show-remaining: false;
@@ -537,7 +549,7 @@ export global App {
     in property <string> pkce-status: "";
     // A Max-quality login is waiting for the browser to come back.
     in property <bool> pkce-waiting: false;
-    // Show the paste box (the address could not be picked up automatically).
+    // TIDE cannot read the address from this browser: show the copy and paste steps.
     in property <bool> pkce-manual: false;
     in property <bool> pkce-offer-safari: false;
     in-out property <string> cache-max: "20";

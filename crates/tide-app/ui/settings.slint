@@ -1,6 +1,6 @@
 // Settings page (⌘,).
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Toggle } from "common.slint";
+import { App, Theme, EditableInput, Toggle, Icon } from "common.slint";
 
 component Card inherits Rectangle {
     border-radius: 12px;
@@ -160,50 +160,162 @@ component SmallButton inherits Rectangle {
     }
 }
 
-// Max-quality (PKCE) login. TIDAL's sign-in page opens in the default browser
-// and TIDE picks up the result by itself; the paste box only appears when that
-// isn't possible.
-export component MaxLogin inherits VerticalLayout {
-    in property <string> button-text: "Log in with TIDAL";
-    in property <bool> centered: false;
+// The numbered circle in front of a login step.
+component StepBadge inherits Rectangle {
+    in property <int> number;
+    // Already behind the user: a check instead of the number.
+    in property <bool> done;
+    // A step to do now.
+    in property <bool> current;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.current ? Theme.lossless : #1f1f22;
+    if !root.done: Text {
+        text: root.number;
+        color: root.current ? #10201f : Theme.text-secondary;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.done: Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/check.svg");
+        size: 14px;
+        tint: Theme.lossless;
+    }
+}
+
+// One numbered step of the login walkthrough.
+component LoginStep inherits HorizontalLayout {
+    in property <int> number;
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> done;
+    in property <bool> current;
     spacing: 12px;
-    HorizontalLayout {
-        alignment: centered ? center : start;
-        spacing: 10px;
-        SmallButton {
-            text: App.pkce-waiting ? "Open the browser again" : root.button-text;
-            primary: true;
-            clicked => {
-                App.pkce-start();
-            }
+    VerticalLayout {
+        alignment: start;
+        StepBadge {
+            number: root.number;
+            done: root.done;
+            current: root.current;
+        }
+    }
+
+    VerticalLayout {
+        alignment: start;
+        spacing: 2px;
+        horizontal-stretch: 1;
+        Text {
+            text: root.title;
+            color: root.done ? Theme.text-secondary : Theme.text;
+            font-size: 14px;
+            font-weight: 600;
+            min-height: 24px;
+            vertical-alignment: center;
+            wrap: word-wrap;
         }
 
-        if App.pkce-offer-safari: SmallButton {
-            text: "Use Safari instead";
-            clicked => {
-                App.pkce-start-safari();
+        if root.detail != "": Text {
+            text: root.detail;
+            color: Theme.text-secondary;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+
+    @children
+}
+
+// The login, step by step. TIDAL's sign-in ends on its own "Page not found"
+// page, which looks like a failure unless the listener expects it. TIDE reads
+// that page's address from Safari and Chromium browsers itself; with any other
+// browser (App.pkce-manual) the listener copies it and pastes it into step 4.
+component LoginSteps inherits VerticalLayout {
+    in property <string> button-text;
+    spacing: 12px;
+    LoginStep {
+        number: 1;
+        title: "Click " + root.button-text;
+        detail: App.pkce-waiting ? "" : "TIDAL opens in your browser.";
+        done: App.pkce-waiting;
+        current: !App.pkce-waiting;
+    }
+
+    LoginStep {
+        number: 2;
+        title: "Sign in to your TIDAL account";
+        current: App.pkce-waiting;
+    }
+
+    LoginStep {
+        number: 3;
+        title: App.pkce-manual ? "Copy the address of “Page not found”" : "Wait for “Page not found”";
+        detail: App.pkce-manual ? "Press ⌘L, then ⌘C." : "That page is expected. TIDE finishes by itself.";
+        current: App.pkce-waiting;
+        // What the last page looks like, so it is recognised.
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 96px;
+                height: 54px;
+                border-radius: 6px;
+                background: black;
+                border-width: 1px;
+                border-color: #2a2a2a;
+                Text {
+                    y: 12px;
+                    width: parent.width;
+                    text: "Page not found";
+                    color: white;
+                    font-size: 9px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 32px;
+                    width: 30px;
+                    height: 11px;
+                    border-radius: 5.5px;
+                    background: #1f1f22;
+                    Text {
+                        text: "Home";
+                        color: white;
+                        font-size: 6px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
     }
 
-    if App.pkce-status != "": Text {
-        text: App.pkce-status;
-        color: Theme.max;
-        font-size: 13px;
-        wrap: word-wrap;
-        horizontal-alignment: centered ? center : left;
-    }
     if App.pkce-manual: HorizontalLayout {
-        spacing: 10px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            StepBadge {
+                number: 4;
+                current: App.pkce-waiting;
+            }
+        }
+
         Rectangle {
             height: 38px;
+            horizontal-stretch: 1;
             border-radius: 8px;
             border-width: 1px;
             border-color: paste.has-focus ? #3a3a3a : #222222;
             background: #0a0a0a;
             if paste.text == "": Text {
                 x: 12px;
-                text: "…or paste the address here";
+                text: "Paste the address here";
                 color: Theme.text-secondary;
                 font-size: 13px;
                 vertical-alignment: center;
@@ -230,6 +342,52 @@ export component MaxLogin inherits VerticalLayout {
                 paste.text = "";
             }
         }
+    }
+}
+
+// Max-quality (PKCE) login. TIDAL's sign-in page opens in the default browser.
+export component MaxLogin inherits VerticalLayout {
+    in property <string> button-text: "Log in with TIDAL";
+    in property <bool> centered: false;
+    // The login screen always shows the steps; Settings once the login started.
+    property <bool> show-steps: root.centered || App.pkce-waiting || App.pkce-manual;
+    spacing: 12px;
+    if root.show-steps && root.centered: LoginSteps {
+        button-text: root.button-text;
+    }
+    if root.show-steps && root.centered: Rectangle {
+        height: 4px;
+    }
+    HorizontalLayout {
+        alignment: centered ? center : start;
+        spacing: 10px;
+        SmallButton {
+            text: App.pkce-waiting ? "Open the browser again" : root.button-text;
+            primary: true;
+            clicked => {
+                App.pkce-start();
+            }
+        }
+
+        if App.pkce-offer-safari: SmallButton {
+            text: "Use Safari instead";
+            clicked => {
+                App.pkce-start-safari();
+            }
+        }
+    }
+
+    // In Settings the button stays put and the steps unfold under it.
+    if root.show-steps && !root.centered: LoginSteps {
+        button-text: root.button-text;
+    }
+
+    if App.pkce-status != "": Text {
+        text: App.pkce-status;
+        color: Theme.max;
+        font-size: 13px;
+        wrap: word-wrap;
+        horizontal-alignment: centered ? center : left;
     }
 }
 

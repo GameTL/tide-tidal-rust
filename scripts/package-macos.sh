@@ -7,13 +7,17 @@
 #   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Name (TEAMID)"
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  (app-specific password)
 #     -> notarize and staple (needs APPLE_SIGNING_IDENTITY)
+#
+# --app-zip (with --dmg) also writes TIDE-<version>-<arch>.app.zip next to the
+# dmg: the bare app, which TIDE's over-the-air updater downloads.
 set -eu
 
 profile=release
 universal=0
 app_display=TIDE
 format=zip
-usage="Usage: $0 [release|debug] [--universal] [--dmg] [--name NAME]"
+app_zip=0
+usage="Usage: $0 [release|debug] [--universal] [--dmg] [--app-zip] [--name NAME]"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -27,6 +31,10 @@ while [ $# -gt 0 ]; do
             ;;
         --dmg)
             format=dmg
+            shift
+            ;;
+        --app-zip)
+            app_zip=1
             shift
             ;;
         --name)
@@ -152,10 +160,34 @@ fi
 if [ "$format" = dmg ]; then
     out_path="$bundle_parent/TIDE-${version}-${arch_label}.dmg"
     rm -f "$out_path"
-    # Drag-to-install layout: TIDE.app next to a link to /Applications.
-    ln -s /Applications "$staging/Applications"
-    hdiutil create -volname "$app_name" -srcfolder "$staging" -fs HFS+ \
-        -format UDZO -ov "$out_path" >&2
+    if [ "$app_zip" = 1 ]; then
+        # The bare app, for the over-the-air updater.
+        update_zip="$bundle_parent/TIDE-${version}-${arch_label}.app.zip"
+        rm -f "$update_zip"
+        ditto -c -k --keepParent "$app" "$update_zip"
+    fi
+    # Drag-to-install layout: TIDE.app next to a link to /Applications, over a
+    # background that walks through the Gatekeeper "Open Anyway" steps.
+    # dmgbuild writes the window layout (.DS_Store) without driving Finder.
+    dmg_assets=crates/tide-app/assets/dmg
+    if command -v dmgbuild >/dev/null 2>&1; then
+        dmgbuild_cmd=dmgbuild
+    elif python3 -c 'import dmgbuild' >/dev/null 2>&1; then
+        dmgbuild_cmd="python3 -m dmgbuild"
+    else
+        dmgbuild_cmd=""
+    fi
+    if [ -n "$dmgbuild_cmd" ]; then
+        $dmgbuild_cmd -s "$dmg_assets/dmg-settings.py" \
+            -D app="$app" -D background="$PWD/$dmg_assets/background.tiff" \
+            "$app_name" "$out_path" >&2
+    else
+        echo "warning: dmgbuild not found (pipx install dmgbuild);" \
+            "building the dmg without the instructions background." >&2
+        ln -s /Applications "$staging/Applications"
+        hdiutil create -volname "$app_name" -srcfolder "$staging" -fs HFS+ \
+            -format UDZO -ov "$out_path" >&2
+    fi
     if [ -n "$identity" ]; then
         codesign --force --timestamp --sign "$identity" "$out_path" >&2
     fi

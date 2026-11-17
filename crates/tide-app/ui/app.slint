@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit } from "common.slint";
-import { Sidebar, TopBar, PlayerBar, DebugPanel, ErrorAlert, CreateDialog } from "chrome.slint";
+import { Sidebar, TopBar, PlayerBar, DebugPanel, ErrorAlert, UpdateToast, CreateDialog } from "chrome.slint";
 import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView, ModulesPage } from "views.slint";
 import { FeedView } from "feed.slint";
 import { VideoView } from "video.slint";
@@ -118,6 +118,14 @@ export component MainWindow inherits Window {
                 shortcut: @keys(Control + ",");
                 activated => {
                     App.navigate("settings");
+                }
+            }
+
+            // Moved into the TIDE menu at launch (platform::configure_menu).
+            MenuItem {
+                title: "Check for Updates…";
+                activated => {
+                    App.check-for-updates();
                 }
             }
 
@@ -359,10 +367,17 @@ export component MainWindow inherits Window {
         height: parent.height;
     }
 
+    // The update toast sits above the player bar; an alert stacks above it.
+    if App.update-state != "" && !App.capturing: UpdateToast {
+        width: min(520px, parent.width - 32px);
+        x: (parent.width - self.width) / 2;
+        y: parent.height - App.player-height - 16px - self.height;
+    }
+
     // One error alert at a time, above the player bar.
     if App.alert-text != "" && !App.capturing: ErrorAlert {
         width: min(520px, parent.width - 32px);
         x: (parent.width - self.width) / 2;
-        y: parent.height - App.player-height - 16px - self.height;
+        y: parent.height - App.player-height - 16px - self.height - (App.update-state != "" && !App.capturing ? 60px + 8px : 0px);
     }
 }

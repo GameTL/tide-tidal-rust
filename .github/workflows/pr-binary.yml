@@ -23,33 +23,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Dev zip (1)
+  check:
+    # Check only: the universal dev zip took too long on macos-latest and was
+    # cancelled, failing PRs that only needed to compile.
+    name: Check build
     runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Package universal zip
-        id: pack
-        env:
-          TIDE_DEV_BUNDLE: '1'
-        run: |
-          set -euo pipefail
-          chmod +x scripts/package-macos.sh
-          zip_path=$(sh scripts/package-macos.sh release --universal)
-          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
-
-      - name: Upload PR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tide-pr-${{ github.event.pull_request.number }}
-          path: ${{ steps.pack.outputs.zip }}
-          retention-days: 7
-          if-no-files-found: error
+      - name: cargo check
+        run: cargo check --workspace --locked

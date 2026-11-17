@@ -19,10 +19,12 @@ gh api "repos/${repo}/releases" --paginate >"$tmp" 2>/dev/null || printf '[]\n' 
 generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 jq -n --arg generated "$generated" --slurpfile raw "$tmp" '
-  # Prefer the dmg; older releases only shipped a zip.
+  # Prefer the versioned dmg (TIDE-1.2.3-macos-universal.dmg). Releases up to
+  # 1.0.2 also carried an unversioned copy, and older ones only shipped a zip.
   def mac_url:
     (.assets // []) as $a
-    | ([$a[] | select(.name | test("macos-universal\\.dmg$"; "i"))]
+    | ([$a[] | select(.name | test("^TIDE-[0-9].*macos-universal\\.dmg$"; "i"))]
+       + [$a[] | select(.name | test("macos-universal\\.dmg$"; "i"))]
        + [$a[] | select(.name | test("macos-universal\\.zip$"; "i"))])
     | .[0].browser_download_url? // null;
   {

@@ -72,6 +72,8 @@ pub struct Settings {
     /// Last window placement, kept with preferences so logout preserves it.
     #[cfg(target_os = "macos")]
     pub window: Option<crate::window_state::WindowState>,
+    /// An update the listener chose to skip; only Check for Updates… offers it again.
+    pub skipped_version: String,
 }
 
 fn default_true() -> bool {
@@ -93,6 +95,7 @@ impl Default for Settings {
             fancy_animation: false,
             #[cfg(target_os = "macos")]
             window: None,
+            skipped_version: String::new(),
         }
     }
 }
@@ -2532,6 +2535,13 @@ impl Ui {
         bind!(on_drag_window, |ui| crate::platform::drag_window(&ui.win));
         bind!(on_minimize, |ui| ui.win.window().set_minimized(true));
         bind!(on_close_window, |ui| ui.close_window());
+        bind!(on_check_for_updates, |ui| ui.check_for_updates());
+        bind!(on_update_now, |ui| crate::update::install_now(&ui));
+        bind!(on_update_skip, |ui| ui.skip_update());
+        bind!(on_update_dismiss, |ui| crate::update::dismiss(&ui));
+        app.on_open_update_page(|| {
+            let _ = open::that(crate::update::RELEASES_PAGE);
+        });
         {
             // The red close button: same as ⌘W, animation included.
             let weak = Rc::downgrade(self);
@@ -2609,6 +2619,7 @@ impl Ui {
         crate::zoom::schedule(&self.win);
         self.present_signal();
         if !has_session {
+            self.detect_login_browser();
             return;
         }
         self.restore_cached();
@@ -3290,12 +3301,27 @@ impl Ui {
         self.present_settings();
     }
 
+    /// Show the login steps that fit the default browser before the listener
+    /// clicks anything: TIDE can read the final address from Safari and
+    /// Chromium browsers, and needs it pasted from any other.
+    fn detect_login_browser(self: &Rc<Self>) {
+        self.spawn(|_ctx| async move {
+            let browser = tokio::task::spawn_blocking(crate::platform::default_browser_id).await.ok().flatten();
+            let scriptable = browser.is_some_and(|id| crate::platform::browser_is_scriptable(&id));
+            on_ui(move |ui| {
+                let app = ui.app();
+                if !app.get_pkce_waiting() {
+                    app.set_pkce_manual(!scriptable);
+                }
+            });
+        });
+    }
+
     /// Start the Max-quality login in the default browser (or `browser`, a
     /// bundle id) and wait for the browser to land on TIDAL's redirect address.
     fn pkce_start(self: &Rc<Self>, browser: Option<&'static str>) {
         let app = self.app();
         app.set_pkce_waiting(true);
-        app.set_pkce_manual(false);
         app.set_pkce_offer_safari(false);
         app.set_pkce_status("Opening TIDAL in your browser…".into());
         let attempt = self.ctx.pkce_attempt.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3322,58 +3348,44 @@ impl Ui {
             let mut scriptable = crate::platform::browser_is_scriptable(&browser_id);
             on_ui(move |ui| {
                 let app = ui.app();
-                if scriptable {
-                    app.set_pkce_status("Sign in to TIDAL in your browser. TIDE continues by itself when you're done.".into());
-                } else {
-                    // This browser can't be asked for the address: copying it is enough.
-                    app.set_pkce_status(
-                        "Sign in to TIDAL in your browser. When you land on a page that doesn't load, copy its address (⌘L, then ⌘C) and TIDE continues by itself."
-                            .into(),
-                    );
-                    app.set_pkce_manual(true);
-                    app.set_pkce_offer_safari(true);
-                }
+                // A browser that can't be asked for the address: the steps say to
+                // copy it and paste it, so no status line is needed.
+                app.set_pkce_manual(!scriptable);
+                app.set_pkce_offer_safari(!scriptable);
+                app.set_pkce_status(if scriptable { "Waiting for you to sign in…" } else { "" }.into());
             });
 
-            // Watch for the redirect until it shows up, the attempt is replaced, or we give up.
-            let mut clipboard_change = -1i64;
+            // Watch the browser for the redirect until it shows up, the attempt is
+            // replaced, or we give up. Any other browser finishes through the paste box.
             let deadline = tokio::time::Instant::now() + LOGIN_WAIT;
             while tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 if ctx.pkce_attempt.load(Ordering::SeqCst) != attempt {
                     return;
                 }
+                if !scriptable {
+                    continue;
+                }
                 let id = browser_id.clone();
-                let found = tokio::task::spawn_blocking(move || {
-                    let from_browser = if scriptable { crate::platform::redirect_from_browser(&id) } else { Ok(None) };
-                    let from_clipboard = crate::platform::redirect_from_clipboard(&mut clipboard_change);
-                    (from_browser, from_clipboard, clipboard_change)
-                })
-                .await;
-                let Ok((from_browser, from_clipboard, change)) = found else { continue };
-                clipboard_change = change;
-                let redirect = match from_browser {
-                    Ok(url) => url.or(from_clipboard),
-                    Err(e) => {
-                        // Not allowed to ask the browser (or it failed): fall back to copy/paste.
+                let found = tokio::task::spawn_blocking(move || crate::platform::redirect_from_browser(&id)).await;
+                match found {
+                    Ok(Ok(Some(redirect))) => {
+                        if ctx.pkce_attempt.load(Ordering::SeqCst) == attempt {
+                            on_ui(move |ui| ui.pkce_finish(redirect));
+                        }
+                        return;
+                    }
+                    Ok(Ok(None)) | Err(_) => {}
+                    Ok(Err(e)) => {
+                        // Not allowed to ask the browser (or it failed): fall back to copy and paste.
                         tracing::warn!("cannot read the login address from the browser: {e}");
                         scriptable = false;
                         on_ui(|ui| {
                             let app = ui.app();
                             app.set_pkce_manual(true);
-                            app.set_pkce_status(
-                                "TIDE isn't allowed to read the address from your browser. Copy the address of the page you land on (⌘L, then ⌘C) and TIDE continues by itself."
-                                    .into(),
-                            );
+                            app.set_pkce_status("TIDE can't read your browser. Copy and paste the address (steps 3 and 4).".into());
                         });
-                        from_clipboard
                     }
-                };
-                if let Some(redirect) = redirect {
-                    if ctx.pkce_attempt.load(Ordering::SeqCst) == attempt {
-                        on_ui(move |ui| ui.pkce_finish(redirect));
-                    }
-                    return;
                 }
             }
             on_ui(|ui| {
@@ -3479,6 +3491,36 @@ impl Ui {
                 tokio::time::sleep(Duration::from_secs(15 * 60)).await;
             }
         });
+    }
+
+    /// Look for a newer release now and then every few hours (release builds only).
+    pub fn start_update_checks(self: &Rc<Self>) {
+        if crate::update::enabled() {
+            self.spawn(crate::update::run_checks);
+        }
+    }
+
+    /// TIDE → Check for Updates…: ignores a skipped version and always answers.
+    fn check_for_updates(self: &Rc<Self>) {
+        if !crate::update::enabled() {
+            crate::alerts::notice(
+                &self.app(),
+                &format!(
+                    "Development build {}: updates come from git",
+                    crate::update::CURRENT
+                ),
+            );
+            return;
+        }
+        self.spawn(|ctx| async move { crate::update::check(&ctx, true).await });
+    }
+
+    /// Skip this version: no toast for it again unless asked from the menu.
+    fn skip_update(self: &Rc<Self>) {
+        if let Some(version) = crate::update::offered_version() {
+            self.update_settings(|s| s.skipped_version = version);
+        }
+        self.app().set_update_state("".into());
     }
 
     fn set_sidebar(self: &Rc<Self>, cards: &[Card]) {
@@ -7311,6 +7353,7 @@ impl Ui {
         app.set_current_id("".into());
         app.set_user_code("".into());
         app.set_auth_status("".into());
+        self.detect_login_browser();
         app.set_sections(ModelRc::default());
         app.set_tracks(ModelRc::default());
         app.set_grid_cards(ModelRc::default());

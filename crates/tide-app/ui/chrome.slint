@@ -703,6 +703,143 @@ export component ErrorAlert inherits Rectangle {
     }
 }
 
+// A small rounded button for the update toast.
+component ToastButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    callback clicked();
+    height: 28px;
+    border-radius: 14px;
+    background: primary ? (ta.has-hover ? #e6e6e6 : white) : (ta.has-hover ? #333333 : #2a2a2a);
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.text;
+            color: root.primary ? black : Theme.text;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The update toast: a newer release, its download, or why it failed. Grey like
+// a confirmation notice, but it stays until answered.
+export component UpdateToast inherits Rectangle {
+    width: 520px;
+    height: 60px;
+    background: #1c1c1c;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #3a3a3a;
+    TouchArea { }
+
+    property <string> state: App.update-state;
+    property <bool> busy: state == "downloading" || state == "installing";
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 4px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                text: state == "downloading" ? "Downloading TIDE " + App.update-to + "…"
+                    : state == "installing" ? "Installing TIDE " + App.update-to + "…"
+                    : state == "failed" ? "Could not update TIDE"
+                    : "New version of TIDE";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            if state == "available": Text {
+                text: App.update-from + "  →  " + App.update-to;
+                color: Theme.text-secondary;
+                font-size: 12px;
+            }
+            if state == "failed": Text {
+                text: App.update-error;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                overflow: elide;
+            }
+            if root.busy: Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: #333333;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * (root.state == "installing" ? 1.0 : App.update-progress);
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: Theme.lossless;
+                    animate width { duration: 150ms; }
+                }
+            }
+        }
+
+        if state == "available": VerticalLayout {
+            alignment: center;
+            ToastButton {
+                text: "Skip this version";
+                clicked => { App.update-skip(); }
+            }
+        }
+        if state == "available": VerticalLayout {
+            alignment: center;
+            ToastButton {
+                text: "Update now";
+                primary: true;
+                clicked => { App.update-now(); }
+            }
+        }
+        if state == "failed": VerticalLayout {
+            alignment: center;
+            ToastButton {
+                text: "Download page";
+                clicked => { App.open-update-page(); }
+            }
+        }
+        if state == "failed": VerticalLayout {
+            alignment: center;
+            ToastButton {
+                text: "Try again";
+                primary: true;
+                clicked => { App.update-now(); }
+            }
+        }
+        if state == "downloading": Text {
+            text: Math.round(App.update-progress * 100) + "%";
+            color: Theme.text-secondary;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: @image-url("icons/x.svg");
+                size: 13px;
+                enabled: !root.busy;
+                opacity: root.busy ? 0 : 1;
+                clicked => { App.update-dismiss(); }
+            }
+        }
+    }
+}
+
 // One key of a shortcut hint (⌘F in the search field).
 component Kbd inherits Rectangle {
     in property <string> glyph;
