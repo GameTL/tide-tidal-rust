@@ -14,9 +14,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.diff.outputs.app }}
+      website: ${{ steps.diff.outputs.website }}
+      workflows: ${{ steps.diff.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff against base
+        id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: sh scripts/changed.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+
+  # Skipped (counts as passing) when only the website or docs changed.
   rust:
     name: Rust
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: macos-latest
+    env:
+      # Repo .cargo/config.toml caps jobs at 2 for laptops. The runner can take more.
+      CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +52,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # fmt --check skipped for now: existing tree needs a dedicated rustfmt pass.
+      - name: display-refresh
+        run: sh scripts/lint-display-refresh.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -36,6 +63,8 @@ jobs:
 
   website:
     name: Website
+    needs: changes
+    if: needs.changes.outputs.website == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:

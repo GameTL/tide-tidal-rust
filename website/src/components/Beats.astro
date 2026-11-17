@@ -1,5 +1,6 @@
 ---
-const base = import.meta.env.BASE_URL;
+import { Picture } from 'astro:assets';
+import bitPerfect from '../assets/screenshots/bit-perfect.png';
 ---
 <section class="sec">
   <div class="container split">
@@ -17,11 +18,12 @@ const base = import.meta.env.BASE_URL;
       <p class="fine">Tap the quality pill to see the signal path, and why it is or isn’t bit-perfect.</p>
     </div>
     <figure class="signal-shot">
-      <img
-        src={`${base}screenshots/bit-perfect.png`}
+      <Picture
+        src={bitPerfect}
+        formats={['avif', 'webp']}
+        widths={[420, 840]}
+        sizes="(max-width: 468px) calc(100vw - 48px), 420px"
         alt="TIDE signal path popup: a 24-bit 48 kHz FLAC source, sample rate conversion to 44.1 kHz, and MacBook Pro speakers, with the bit-perfect playback toggle"
-        width="967"
-        height="1226"
         loading="lazy"
       />
     </figure>

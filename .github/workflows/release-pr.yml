@@ -116,14 +116,27 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Detect app changes since last tag
+        id: changes
+        env:
+          LAST: ${{ steps.last_tag.outputs.tag }}
+        run: sh scripts/changed.sh "$LAST" origin/staging | tee -a "$GITHUB_OUTPUT"
+
       - name: Create or update release PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXT: ${{ steps.version.outputs.next }}
           BUMP: ${{ steps.bump.outputs.bump }}
           CHANGES: ${{ steps.changelog.outputs.body }}
+          APP_CHANGED: ${{ steps.changes.outputs.app }}
         run: |
           set -euo pipefail
+
+          if [ "$APP_CHANGED" = "true" ]; then
+            effect="Merging this PR will tag the release, publish the macOS universal dmg, and update the website."
+          else
+            effect="No app changes since the last tag (website/docs only): merging this PR deploys the website without building or tagging a new release."
+          fi
 
           title="Release ${NEXT}"
           body=$(cat <<EOF
@@ -136,7 +149,7 @@ jobs:
           ${CHANGES}
 
           ---
-          Merging this PR will tag the release, publish the macOS universal zip, and update the website.
+          ${effect}
           EOF
           )
 

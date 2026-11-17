@@ -389,22 +389,35 @@ export component DspView inherits Rectangle {
                 background: #19191c;
             }
 
+            // Same look as CatalogTabs (search / artist pages), split 50/50 so
+            // each EQ keeps its own On/Off pill.
             Rectangle {
-                height: 48px;
+                height: 46px;
+                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
                 HorizontalLayout {
                     spacing: 0px;
                     for tab[i] in ["USR EQ", "SPK EQ"]: Rectangle {
                         horizontal-stretch: 1;
-                        TouchArea { clicked => { App.dsp-select-tab(i); } }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { App.dsp-select-tab(i); }
+                        }
                         HorizontalLayout {
-                            padding-right: 16px;
-                            padding-left: i == 0 ? 0px : 16px;
-                            Text {
-                                text: tab;
-                                color: App.dsp-tab == i ? Theme.text : Theme.text-secondary;
-                                font-size: 15px;
-                                font-weight: 500;
-                                vertical-alignment: center;
+                            padding-right: i == 0 ? 24px : 0px;
+                            Rectangle {
+                                width: label.preferred-width;
+                                label := Text {
+                                    text: tab;
+                                    color: App.dsp-tab == i ? Theme.text : Theme.text-secondary;
+                                    font-size: 14px;
+                                    font-weight: Theme.medium;
+                                    vertical-alignment: center;
+                                }
+                                if App.dsp-tab == i: Rectangle {
+                                    y: parent.height - 2px;
+                                    height: 2px;
+                                    background: Theme.text;
+                                }
                             }
                             Rectangle { }
                             VerticalLayout {
@@ -418,15 +431,8 @@ export component DspView inherits Rectangle {
                                 }
                             }
                         }
-                        if App.dsp-tab == i: Rectangle {
-                            y: parent.height - 2px;
-                            height: 2px;
-                            background: white;
-                        }
                     }
                 }
-                Rectangle { x: parent.width / 2; width: 1px; height: parent.height; background: #26262a; }
-                Rectangle { y: parent.height - 1px; height: 1px; background: #19191c; }
             }
 
             HoldText {

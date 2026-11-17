@@ -1,0 +1,4 @@
+# Cap parallel rustc in this workspace. Skia + Slint + Clippy at full
+# core count exhausts a laptop. GitHub CI raises this via CARGO_BUILD_JOBS.
+[build]
+jobs = 2

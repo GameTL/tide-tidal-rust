@@ -37,6 +37,7 @@ export component TrackMenuButton inherits Rectangle {
     }
 
     trigger := FocusScope {
+        changed has-focus => { App.menu-trigger-focused = self.has-focus; }
         key-pressed(event) => {
             if (event.text == Key.Return || event.text == Key.Space) {
                 root.open-menu();

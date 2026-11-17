@@ -1,0 +1,14 @@
+---
+description: Keep local Clippy from exhausting RAM
+alwaysApply: true
+---
+
+# Clippy RAM
+
+Hard caps (not agent-only):
+
+- `~/.cargo/config.toml` and this repo's `.cargo/config.toml` set `[build] jobs = 2`. Cargo, rust-analyzer, Homebrew, and rustup all honor that.
+- `~/.local/bin/cargo` forces `cargo clippy --jobs 2` and strips a higher `-j` from the caller.
+- GitHub CI sets `CARGO_BUILD_JOBS` to raise the cap on the runner.
+
+Do not run `cargo clippy --workspace --all-targets` on a developer machine at full parallelism. Prefer `cargo clippy -p <crate> -- -D warnings`. rust-analyzer stays on `cargo check`; never set `rust-analyzer.check.command` to `clippy` or `rust-analyzer.cargo.features` to `"all"`.

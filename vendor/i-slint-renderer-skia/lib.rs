@@ -47,6 +47,7 @@ pub mod memory {
     static PURGE_NOW: AtomicBool = AtomicBool::new(false);
     static TWO_DRAWABLES: AtomicBool = AtomicBool::new(false);
     static CACHE_USAGE: AtomicUsize = AtomicUsize::new(0);
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
 
     /// Budget of the GPU resource cache in bytes; 0 keeps Skia's default.
     pub fn set_gpu_cache_limit(bytes: usize) {
@@ -70,12 +71,27 @@ pub mod memory {
     }
 
     /// Bytes held by the GPU resource cache as of the last frame.
+    /// Frames submitted since the process started. Lets the app wait for
+    /// real content before it reveals a window.
+    pub fn frames_rendered() -> u64 {
+        FRAMES.load(Ordering::Relaxed)
+    }
+
     pub fn gpu_cache_usage() -> usize {
         CACHE_USAGE.load(Ordering::Relaxed)
     }
 
     pub(crate) fn two_drawables() -> bool {
         TWO_DRAWABLES.load(Ordering::Relaxed)
+    }
+
+    /// TIDE patch: window-sized offscreen layers drawn since the last frame log.
+    pub(crate) static FULL_LAYERS: AtomicUsize = AtomicUsize::new(0);
+
+    /// TIDE patch: `TIDE_FRAME_LOG` is set (read once).
+    pub(crate) fn frame_log() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("TIDE_FRAME_LOG").is_some())
     }
 
     /// Per-surface state: what was last applied to its context.
@@ -100,6 +116,7 @@ pub mod memory {
 
     /// Called once per frame, after the frame's work has been submitted.
     pub(crate) fn after_frame(gr_context: &mut skia_safe::gpu::DirectContext, applied: &Applied) {
+        FRAMES.fetch_add(1, Ordering::Relaxed);
         let limit = CACHE_LIMIT.load(Ordering::Relaxed);
         if limit != applied.limit.get() {
             applied.limit.set(limit);
@@ -759,11 +776,15 @@ impl SkiaRenderer {
         let window_adapter = self.window_adapter()?;
         let window = window_adapter.window();
 
-        surface.render(
+        // TIDE patch: `TIDE_FRAME_LOG=1` prints each frame's timing (stderr).
+        let started = memory::frame_log().then(std::time::Instant::now);
+        let draw_ms = std::cell::Cell::new(0.0f64);
+        let outcome = surface.render(
             window,
             surface_size,
             &|skia_canvas, gr_context, back_buffer_age| {
-                self.render_to_canvas(
+                let draw_started = started.map(|_| std::time::Instant::now());
+                let dirty = self.render_to_canvas(
                     skia_canvas,
                     rotation_angle_degrees,
                     translation,
@@ -772,10 +793,28 @@ impl SkiaRenderer {
                     Some(surface.as_ref()),
                     window,
                     post_render_cb,
-                )
+                );
+                if let Some(t) = draw_started {
+                    draw_ms.set(t.elapsed().as_secs_f64() * 1e3);
+                }
+                dirty
             },
             &self.pre_present_callback,
-        )
+        );
+        if let Some(started) = started {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64()
+                * 1e3;
+            eprintln!(
+                "FRAME wall={wall:.2} total={:.2} draw={:.2} layers={}",
+                started.elapsed().as_secs_f64() * 1e3,
+                draw_ms.get(),
+                memory::FULL_LAYERS.swap(0, std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+        outcome
     }
 
     fn render_to_canvas(

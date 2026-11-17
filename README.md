@@ -7,7 +7,19 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 > endorsed by, or supported by TIDAL. You need your own TIDAL subscription.
 
 **Site:** [gametl.github.io/tide-tidal-rust](https://gametl.github.io/tide-tidal-rust/)  
-**Releases:** merge a release PR (`staging` → `main`) to publish a universal macOS zip and refresh the download page.
+**Releases:** merge a release PR (`staging` → `main`) to publish a universal macOS dmg and refresh the download page.
+
+## Install
+
+```sh
+curl -fsSL https://gametl.github.io/tide-tidal-rust/install.sh | sh
+```
+
+Installs the latest release to `/Applications/TIDE.app` and opens without a
+security prompt. Or [download the dmg](https://github.com/GameTL/tide-tidal-rust/releases/latest/download/TIDE-macos-universal.dmg):
+TIDE is a personal project and isn't signed through Apple's paid Developer
+Program, so on first launch click Done, then System Settings › Privacy &
+Security › **Open Anyway**.
 
 ## Features
 
@@ -19,6 +31,9 @@ A lightweight, native macOS desktop player for TIDAL, written in pure Rust
 - Local-first: library metadata, artwork and audio are cached on disk, so
   already-played music starts without touching the network
 - macOS media keys and Now Playing integration
+- Interface zoom from 50% to 200% in 25-point steps, remembered across launches.
+  Use **View → Zoom In / Zoom Out**, **⌘= / ⌘−** (⌘+ also works), or **⌘0**
+  for Actual Size (100%).
 
 ## Run
 

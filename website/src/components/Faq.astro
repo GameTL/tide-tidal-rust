@@ -1,0 +1,21 @@
+---
+import { faqs } from '../data/site';
+
+// Answers may contain `code`; split on backticks so odd parts render as <code>.
+const parts = (s: string) => s.split('`').map((text, i) => ({ text, code: i % 2 === 1 }));
+---
+<section class="sec" id="faq" aria-labelledby="faq-title">
+  <div class="container">
+    <div class="sec-head">
+      <h2 id="faq-title">Questions</h2>
+    </div>
+    <div class="faq">
+      {faqs.map((f) => (
+        <details class="faq-item">
+          <summary><h3>{f.q}</h3></summary>
+          <p>{parts(f.a).map((p) => (p.code ? <code>{p.text}</code> : p.text))}</p>
+        </details>
+      ))}
+    </div>
+  </div>
+</section>

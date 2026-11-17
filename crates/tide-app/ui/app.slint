@@ -13,8 +13,9 @@ export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, E
 
 export component MainWindow inherits Window {
     title: "TIDE";
-    min-width: 960px;
-    min-height: 620px;
+    // Preserve the native minimum window size at every zoom level.
+    min-width: 960px / App.zoom-factor;
+    min-height: 620px / App.zoom-factor;
     preferred-width: 1440px;
     preferred-height: 900px;
     background: Theme.bg;
@@ -23,7 +24,9 @@ export component MainWindow inherits Window {
 
     init => {
         Palette.color-scheme = ColorScheme.dark;
+        App.compact-layout = self.width < 960px;
     }
+    changed width => { App.compact-layout = self.width < 960px; }
 
     // Native macOS menu bar. Hide (⌘H), Hide Others and Quit (⌘Q) come from
     // the standard application menu that Slint adds automatically.
@@ -92,6 +95,25 @@ export component MainWindow inherits Window {
         Menu {
             title: "View";
             MenuItem {
+                title: "Zoom In";
+                shortcut: @keys(Control + "=");
+                enabled: App.zoom-percent < 200;
+                activated => { App.zoom-in(); }
+            }
+            MenuItem {
+                title: "Zoom Out";
+                shortcut: @keys(Control + "-");
+                enabled: App.zoom-percent > 50;
+                activated => { App.zoom-out(); }
+            }
+            MenuItem {
+                title: "Actual Size (100%)";
+                shortcut: @keys(Control + "0");
+                enabled: App.zoom-percent != 100;
+                activated => { App.reset-zoom(); }
+            }
+            MenuSeparator { }
+            MenuItem {
                 title: "Settings…";
                 shortcut: @keys(Control + ",");
                 activated => {
@@ -101,7 +123,14 @@ export component MainWindow inherits Window {
 
             MenuItem {
                 title: "Now Playing";
+                shortcut: @keys(Return);
+                enabled: App.has-track && !App.video-open && !App.show-now-playing && !App.menu-open && !App.menu-trigger-focused && App.create-kind == "" && App.edit-focus <= 0;
+                activated => { App.open-now-playing(); }
+            }
+            MenuItem {
+                title: "Toggle Now Playing";
                 shortcut: @keys(Control + L);
+                enabled: App.has-track && !App.menu-open && App.create-kind == "";
                 activated => {
                     App.open-now-playing();
                 }
@@ -126,7 +155,8 @@ export component MainWindow inherits Window {
                 activated => { App.navigate("focus-search"); }
             }
             MenuSeparator { }
-            // Esc returns to the home page, as a new history entry.
+            // Esc returns to the home page, as a new history entry, scrolled to
+            // where home was left; on home, Esc scrolls back to the top.
             MenuItem {
                 title: "Music";
                 shortcut: @keys(Escape);
@@ -134,13 +164,15 @@ export component MainWindow inherits Window {
                     if (App.create-kind != "") { App.create-kind = ""; }
                     else if (App.menu-open) { App.escape-menu(); }
                     else if (App.video-open) { App.close-video(); }
-                    else { App.navigate("home"); }
+                    else if (App.show-now-playing) { App.show-now-playing = false; }
+                    else { App.navigate("escape-home"); }
                 }
             }
             MenuItem { title: "Explore"; activated => { App.navigate("explore"); } }
             MenuItem { title: "Feed"; activated => { App.navigate("feed"); } }
             MenuSeparator { }
-            MenuItem { title: "Mixes & Radio"; activated => { App.navigate("mixes"); } }
+            // Native menus reserve '&' for mnemonics; '&&' displays a literal '&'.
+            MenuItem { title: "Media && Radio"; activated => { App.navigate("mixes"); } }
             MenuItem { title: "Playlists"; activated => { App.navigate("playlists"); } }
             MenuItem { title: "Albums"; activated => { App.navigate("albums"); } }
             MenuItem { title: "Tracks"; activated => { App.navigate("tracks"); } }
@@ -171,18 +203,16 @@ export component MainWindow inherits Window {
         width: 100%;
         height: 100%;
 
+        // KeyBinding only participates along the keyboard focus path. Give
+        // playback shortcuts a target before the first click after launch/login.
+        init => { self.focus(); }
+
         KeyBinding {
-            enabled: !App.menu-open && App.create-kind == "";
+            enabled: !App.menu-open && App.create-kind == "" && App.edit-focus <= 0;
             keys: @keys(" ");
             activated => {
                 App.toggle-play();
             }
-        }
-
-        KeyBinding {
-            enabled: App.video-active && !App.video-open && !App.menu-open && App.create-kind == "";
-            keys: @keys(Return);
-            activated => { App.open-video(); }
         }
 
         KeyBinding {
@@ -290,19 +320,25 @@ export component MainWindow inherits Window {
         PlayerBar { }
         }
 
-        if App.show-now-playing && !App.capturing: NowPlayingView {
+        // Keep the artwork mounted so expansion and collapse use one surface.
+        if App.has-track && !App.video-active: NowPlayingView {
+            visible: !App.capturing;
             width: parent.width;
             height: parent.height;
             PlayerBar {
                 y: parent.height - self.height;
                 overlay: true;
+                opacity: parent.expansion;
+                cache-rendering-hint: parent.expansion > 0 && parent.expansion < 1;
+                visible: parent.presenting;
             }
         }
         // Keep one live surface mounted: it grows from the player-bar thumbnail
         // and returns to that same slot without replacing or freezing the frame.
-        if App.video-active && !App.capturing: VideoView {
+        if App.video-active: VideoView {
+            visible: !App.capturing;
             x: 16px * (1 - self.expansion);
-            y: (parent.height - 76px) * (1 - self.expansion);
+            y: (parent.height - App.player-height + 20px) * (1 - self.expansion);
             width: 100px + (parent.width - 100px) * self.expansion;
             height: 56px + (parent.height - 56px) * self.expansion;
         }
@@ -327,6 +363,6 @@ export component MainWindow inherits Window {
     if App.alert-text != "" && !App.capturing: ErrorAlert {
         width: min(520px, parent.width - 32px);
         x: (parent.width - self.width) / 2;
-        y: parent.height - 96px - 16px - self.height;
+        y: parent.height - App.player-height - 16px - self.height;
     }
 }

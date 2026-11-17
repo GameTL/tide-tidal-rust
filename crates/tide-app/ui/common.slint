@@ -22,6 +22,8 @@ export struct TrackData {
     explicit: bool,
     favorite: bool,
     cover: image,
+    /// Arrived with a background refresh: the row pops in once.
+    fresh: bool,
 }
 
 export struct CardData {
@@ -41,6 +43,10 @@ export struct CardData {
     tint: color,
     /// Small caps line under the subtitle: a video's length ("2 MIN").
     detail: string,
+    /// Arrived with a background refresh: the card pops in once.
+    fresh: bool,
+    /// Tracks shown as cards: the E badge after the title.
+    explicit: bool,
 }
 
 export struct SectionData {
@@ -140,6 +146,14 @@ export global Theme {
 }
 
 export global App {
+    in property <int> zoom-percent: 100;
+    out property <float> zoom-factor: zoom-percent / 100.0;
+    callback zoom-in();
+    callback zoom-out();
+    callback reset-zoom();
+    // Logical viewport gets smaller as the interface is magnified.
+    in-out property <bool> compact-layout: false;
+    out property <length> player-height: compact-layout ? 144px : 96px;
     // Session
     in property <bool> logged-in: false;
     in property <string> username: "";
@@ -172,6 +186,8 @@ export global App {
     in property <bool> catalog-error;
     in-out property <int> artist-tab;
     in property <bool> loading: false;
+    // A page shown from cache is being checked against the server.
+    in property <bool> syncing: false;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     // Back / forward transition (see the pane overlay in app.slint).
@@ -197,6 +213,8 @@ export global App {
     in-out property <int> edit-revision;
     // How many text fields have focus. ⌘Z / ⌘⇧Z / ⌘Y undo the EQ when this is 0.
     in-out property <int> edit-focus: 0;
+    // Return belongs to the focused More button before the Now Playing shortcut.
+    in-out property <bool> menu-trigger-focused: false;
 
     public function edit(command: string) {
         edit-command = command;
@@ -264,6 +282,7 @@ export global App {
     in-out property <int> search-tab;
     in property <[CardData]> sidebar-playlists;
     in-out property <bool> sidebar-collapsed;
+    out property <bool> sidebar-compact: sidebar-collapsed || compact-layout;
     in-out property <bool> sidebar-ascending: true;
     in property <bool> show-collection;
     out property <bool> bpm-available: false;
@@ -275,6 +294,7 @@ export global App {
     in property <string> np-title: "";
     in property <string> np-artist: "";
     in property <string> np-context: "";
+    in property <string> np-album-id: "";
     in property <string> np-artist-id: "";
     in property <[ArtistLink]> np-artists;
     /// The artist shown in the player-bar hover card (the one under the pointer).
@@ -484,7 +504,6 @@ export global App {
     callback filter(string);
     callback rows-visible(int, int);
     callback play-track(string);
-    callback play-section-track(int, string);
     callback play-all(bool);
     callback toggle-play();
     callback next();
@@ -496,6 +515,10 @@ export global App {
     callback cycle-repeat();
     callback toggle-favorite(string);
     callback open-now-playing();
+    callback open-now-playing-album();
+    callback open-now-playing-context();
+    in property <int> reveal-track-index: -1;
+    in property <int> reveal-track-revision: 0;
     callback login();
     callback open-browser();
     callback logout();
@@ -519,11 +542,11 @@ export global App {
     in property <bool> pkce-offer-safari: false;
     in-out property <string> cache-max: "20";
     in property <bool> keep-most-played: true;
-    in property <bool> low-ram;
+    in property <bool> fancy-animation;
     callback pkce-start-safari();
     callback set-cache-max(string);
     callback set-keep-most-played(bool);
-    callback set-low-ram(bool);
+    callback set-fancy-animation(bool);
     in property <string> app-version: "";
     // Bumped to move keyboard focus into the search field.
     in property <int> focus-search: 0;
@@ -697,6 +720,59 @@ export component IconButton inherits Rectangle {
     }
 }
 
+export component HoverTip inherits Rectangle {
+    in property <string> text;
+    height: 38px;
+    width: tip-label.preferred-width + 32px;
+    background: white;
+    border-radius: 19px;
+    tip-label := Text {
+        text: root.text;
+        color: black;
+        font-size: 14px;
+        font-weight: 500;
+    }
+}
+
+export component MinimizeButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> label: "Minimize Now Playing (Esc)";
+    out property <bool> hovered: ta.has-hover;
+    callback clicked();
+    property <bool> armed: false;
+    width: 96px;
+    height: 36px;
+    border-radius: 18px;
+    background: ta.pressed ? #ffffff42 : ta.has-hover ? #ffffff2e : #ffffff1a;
+    animate background { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        changed has-hover => { root.armed = false; }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/chevron-down.svg");
+        size: 22px;
+        tint: Theme.text;
+    }
+    Timer {
+        interval: 350ms;
+        running: root.enabled && ta.has-hover && !root.armed;
+        triggered => { root.armed = true; }
+    }
+    if root.armed && ta.has-hover && root.enabled: HoverTip {
+        x: parent.width - self.width;
+        y: -(self.height + 8px);
+        text: "Esc to minimize";
+    }
+}
+
 // Shared debug-panel toggle for page, video and Now Playing headers.
 export component DebugButton inherits Rectangle {
     in property <bool> enabled: true;
@@ -814,8 +890,10 @@ export component TideLoader inherits Rectangle {
     width: size;
     height: size * 367 / 601;
 
+    // When the first loop starts; set it to animation-tick() to begin from empty.
+    in property <duration> epoch: 0ms;
     // One loop: rise (0 → .45), hold and splash (→ .55), drain (→ .95), rest.
-    property <float> phase: mod(animation-tick() / 3200ms, 1.0);
+    property <float> phase: mod((animation-tick() - root.epoch) / 3200ms, 1.0);
     property <float> roll: mod(animation-tick() / 900ms, 1.0);
     property <float> level: phase < 0.45 ? ease(phase / 0.45) : phase < 0.55 ? 1.0 : phase < 0.95 ? 1.0 - ease((phase - 0.55) / 0.4) : 0.0;
     property <length> amp: root.height * 0.07;
@@ -1049,13 +1127,14 @@ export component QualityBadge inherits Rectangle {
 }
 
 // Title + optional quality chip. Must be a Rectangle so absolute x/y in free
-// layouts (MediaCard) stick — a bare HorizontalLayout flows to the end.
+// layouts (GridItem) stick — a bare HorizontalLayout flows to the end.
 export component TitleWithQuality inherits Rectangle {
     in property <string> title;
     in property <string> quality;
     in property <length> font-size: 15px;
     in property <int> font-weight: Theme.medium;
     in property <color> title-color: Theme.text;
+    in property <bool> explicit: false;
     HorizontalLayout {
         width: 100%;
         height: 100%;
@@ -1068,6 +1147,10 @@ export component TitleWithQuality inherits Rectangle {
             font-weight: root.font-weight;
             overflow: elide;
             vertical-alignment: center;
+        }
+        if root.explicit: VerticalLayout {
+            alignment: center;
+            ExplicitBadge { }
         }
         if root.quality != "": VerticalLayout {
             alignment: center;

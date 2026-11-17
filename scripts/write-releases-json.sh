@@ -19,9 +19,11 @@ gh api "repos/${repo}/releases" --paginate >"$tmp" 2>/dev/null || printf '[]\n' 
 generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 jq -n --arg generated "$generated" --slurpfile raw "$tmp" '
+  # Prefer the dmg; older releases only shipped a zip.
   def mac_url:
-    (.assets // [])
-    | map(select(.name | test("macos-universal\\.zip$"; "i")))
+    (.assets // []) as $a
+    | ([$a[] | select(.name | test("macos-universal\\.dmg$"; "i"))]
+       + [$a[] | select(.name | test("macos-universal\\.zip$"; "i"))])
     | .[0].browser_download_url? // null;
   {
     generatedAt: $generated,
