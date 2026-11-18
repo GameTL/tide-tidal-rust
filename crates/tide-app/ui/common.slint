@@ -113,6 +113,13 @@ export struct EqBand {
     tint: color,
 }
 
+// An upsampling target on the DSP page: a multiple of the base rate (44.1 or
+// 48 kHz) and the rates it reaches on the current output.
+export struct UpsampleOption {
+    tier: int,
+    label: string,
+}
+
 // A row in the AutoEq browser.
 export struct EqHit {
     name: string,
@@ -402,6 +409,10 @@ export global App {
     callback dsp-set-eq-enabled(int, bool);
     callback dsp-set-preamp(string, float);
     callback dsp-toggle-auto-preamp();
+    in property <int> dsp-upsample: 0; // 0 off, else ×2 / ×4 / ×8 of the base rate
+    in property <[UpsampleOption]> dsp-upsample-options;
+    in property <string> dsp-upsample-note;
+    callback dsp-set-upsample(int);
     in property <bool> dsp-usr-on: false;
     in property <bool> dsp-spk-on: false;
     in property <float> dsp-range: 15; // editor spans ±this many dB

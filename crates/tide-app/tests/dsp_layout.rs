@@ -77,3 +77,71 @@ fn backup_and_restore_buttons_work_at_wide_and_minimum_windows() {
         }
     }
 }
+
+#[test]
+fn upsampling_pills_offer_off_and_every_rate_of_the_output() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    app.set_logged_in(true);
+    app.set_view("dsp".into());
+    app.set_dsp_device("ADAM Audio D3V".into());
+    app.set_dsp_upsample(2);
+    app.set_dsp_upsample_note("Now playing: 44.1 kHz upsampled to 88.2 kHz (2×).".into());
+    app.set_dsp_upsample_options(slint::ModelRc::new(slint::VecModel::from(vec![
+        UpsampleOption {
+            tier: 2,
+            label: "88.2 / 96 kHz".into(),
+        },
+        UpsampleOption {
+            tier: 4,
+            label: "176.4 / 192 kHz".into(),
+        },
+        UpsampleOption {
+            tier: 8,
+            label: "Max".into(),
+        },
+    ])));
+    let picked = Rc::new(RefCell::new(Vec::new()));
+    app.on_dsp_set_upsample({
+        let picked = picked.clone();
+        move |tier| picked.borrow_mut().push(tier)
+    });
+    for (width, height) in [(1440.0_f32, 2400.0_f32), (700.0, 2400.0)] {
+        win.dispatch_event(WindowEvent::Resized {
+            size: LogicalSize::new(width, height),
+        });
+        picked.borrow_mut().clear();
+        let mut y = 400.0;
+        while y < height {
+            let mut x = 0.0;
+            while x < width {
+                let position = LogicalPosition::new(x, y);
+                win.dispatch_event(WindowEvent::PointerMoved { position });
+                win.dispatch_event(WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                win.dispatch_event(WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                });
+                x += 20.0;
+            }
+            y += 8.0;
+        }
+        for tier in [0, 2, 4, 8] {
+            assert!(
+                picked.borrow().contains(&tier),
+                "tier {tier} is reachable at {width} wide: {:?}",
+                picked.borrow()
+            );
+        }
+    }
+    // An output that cannot be re-clocked offers nothing but the explanation.
+    app.set_dsp_upsample_options(slint::ModelRc::default());
+    app.set_dsp_upsample(0);
+    app.set_dsp_upsample_note("Bluetooth outputs run at a sample rate of their own.".into());
+}

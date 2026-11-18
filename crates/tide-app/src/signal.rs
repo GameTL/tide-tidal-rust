@@ -5,7 +5,7 @@ use tide_audio::{FormatInfo, OutputInfo, OutputKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quality {
-    /// An equaliser (DSP) shapes the sound on purpose.
+    /// TIDE's DSP (an equaliser, the upsampler) changes the sound on purpose.
     Enhanced,
     /// Bit-perfect and the file is high resolution (more than 16-bit / 44.1 kHz).
     HiRes,
@@ -61,7 +61,8 @@ pub fn khz(rate: u32) -> String {
 }
 
 /// `volume` is TIDE's own (software) volume, 0.0..=1.0. `dsp` describes the
-/// equalisers in the path, when any is changing the samples.
+/// equalisers in the path, when any is changing the samples. `upsampling` is
+/// the multiple the listener's upsampler (DSP page) raises this track by.
 pub fn signal_path(
     format: FormatInfo,
     output: &OutputInfo,
@@ -69,9 +70,12 @@ pub fn signal_path(
     rate_matching: bool,
     released: bool,
     dsp: Option<&str>,
+    upsampling: Option<u32>,
 ) -> SignalPath {
     let lossy_source = format.bits_per_sample == 0;
-    let resampled = format.sample_rate != output.sample_rate;
+    let upsampling = upsampling.filter(|_| output.sample_rate > format.sample_rate);
+    // A conversion the device forces, as opposed to one the listener chose.
+    let resampled = format.sample_rate != output.sample_rate && upsampling.is_none();
     let attenuated = volume < 0.999;
     let hires_source =
         !lossy_source && (format.bits_per_sample > 16 || format.sample_rate > 44_100);
@@ -110,6 +114,18 @@ pub fn signal_path(
             quality: Quality::High,
         });
     }
+    if let Some(factor) = upsampling {
+        stages.push(Stage {
+            kind: "process",
+            title: "Upsampling".into(),
+            detail: format!(
+                "{} to {} · {factor}× linear phase",
+                khz(format.sample_rate),
+                khz(output.sample_rate)
+            ),
+            quality: Quality::Enhanced,
+        });
+    }
     if let Some(detail) = dsp {
         stages.push(Stage {
             kind: "process",
@@ -130,7 +146,7 @@ pub fn signal_path(
         OutputKind::Bluetooth => Quality::Low,
         // The link or driver decides what reaches the speaker; it cannot be verified.
         OutputKind::Network | OutputKind::Virtual => Quality::High,
-        _ if hires_source && !resampled => Quality::HiRes,
+        _ if hires_source && !resampled && upsampling.is_none() => Quality::HiRes,
         _ => Quality::Lossless,
     };
     stages.push(Stage {
@@ -158,8 +174,15 @@ pub fn signal_path(
 
     let note = if released {
         "Paused: the device is back at the sample rate it had before TIDE changed it.".to_string()
+    } else if dsp.is_some() && upsampling.is_some() {
+        "Enhanced: TIDE's equaliser and upsampler are changing the samples, so the output is not bit-perfect. Turn both off in DSP for an untouched signal.".to_string()
     } else if dsp.is_some() {
         "Enhanced: TIDE's equaliser is shaping the sound, so the output is not bit-perfect. Turn the EQs off in DSP for an untouched signal.".to_string()
+    } else if upsampling.is_some() {
+        format!(
+            "Enhanced: TIDE upsamples the track to {}, so the output is not bit-perfect. The original samples are kept and the ones in between are computed. Turn upsampling off in DSP for an untouched signal.",
+            khz(output.sample_rate)
+        )
     } else if output.kind == OutputKind::Bluetooth {
         "Bluetooth re-encodes the audio, so bit-perfect output isn't possible. TIDE leaves the device at its own sample rate.".to_string()
     } else if lossy_source {
@@ -212,7 +235,15 @@ mod tests {
 
     #[test]
     fn matched_rate_and_full_volume_is_bit_perfect() {
-        let path = signal_path(HIRES, &out(OutputKind::Usb, 96_000), 1.0, true, false, None);
+        let path = signal_path(
+            HIRES,
+            &out(OutputKind::Usb, 96_000),
+            1.0,
+            true,
+            false,
+            None,
+            None,
+        );
         assert_eq!(path.quality, Quality::HiRes);
         assert_eq!(path.stages.len(), 2);
         assert_eq!(path.stages[1].quality, Quality::HiRes);
@@ -226,7 +257,15 @@ mod tests {
             sample_rate: 44_100,
             bitrate_kbps: 0,
         };
-        let path = signal_path(cd, &out(OutputKind::Usb, 44_100), 1.0, true, false, None);
+        let path = signal_path(
+            cd,
+            &out(OutputKind::Usb, 44_100),
+            1.0,
+            true,
+            false,
+            None,
+            None,
+        );
         assert_eq!(path.quality, Quality::Lossless);
         assert_eq!(path.quality.key(), "lossless");
     }
@@ -240,11 +279,20 @@ mod tests {
             true,
             false,
             None,
+            None,
         );
         assert_eq!(resampled.quality, Quality::High);
         assert_eq!(resampled.stages[1].detail, "96 kHz to 48 kHz");
 
-        let quiet = signal_path(HIRES, &out(OutputKind::Usb, 96_000), 0.5, true, false, None);
+        let quiet = signal_path(
+            HIRES,
+            &out(OutputKind::Usb, 96_000),
+            0.5,
+            true,
+            false,
+            None,
+            None,
+        );
         assert_eq!(quiet.quality, Quality::High);
         assert_eq!(quiet.stages[1].detail, "Software volume 50%");
     }
@@ -258,6 +306,7 @@ mod tests {
             true,
             false,
             Some("SPK EQ"),
+            None,
         );
         assert_eq!(path.quality, Quality::Enhanced);
         assert_eq!(path.quality.key(), "enhanced");
@@ -271,8 +320,44 @@ mod tests {
             true,
             false,
             Some("SPK EQ"),
+            None,
         );
         assert_eq!(bluetooth.quality, Quality::Enhanced);
+    }
+
+    #[test]
+    fn upsampling_is_its_own_stage_and_never_bit_perfect() {
+        let cd = FormatInfo {
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            bitrate_kbps: 0,
+        };
+        let dac = OutputInfo {
+            supported_rates: vec![44_100, 48_000, 88_200, 96_000, 176_400, 192_000],
+            ..out(OutputKind::Usb, 176_400)
+        };
+        let path = signal_path(cd, &dac, 1.0, true, false, None, Some(4));
+        assert_eq!(path.quality, Quality::Enhanced);
+        assert_eq!(path.stages.len(), 3);
+        assert_eq!(path.stages[1].title, "Upsampling");
+        assert_eq!(
+            path.stages[1].detail,
+            "44.1 kHz to 176.4 kHz · 4× linear phase"
+        );
+        // The device no longer gets the file's samples, hi-res or not.
+        assert_eq!(path.stages[2].quality, Quality::Lossless);
+        assert!(path.note.contains("upsamples the track to 176.4 kHz"));
+
+        // With an EQ as well: upsampling first, as the audio meets them.
+        let both = signal_path(cd, &dac, 1.0, true, false, Some("USR EQ"), Some(4));
+        assert_eq!(both.stages[1].title, "Upsampling");
+        assert_eq!(both.stages[2].title, "DSP");
+        assert!(both.note.contains("equaliser and upsampler"));
+
+        // A higher device rate the listener did not ask for is a plain conversion.
+        let forced = signal_path(cd, &dac, 1.0, false, false, None, None);
+        assert_eq!(forced.quality, Quality::High);
+        assert_eq!(forced.stages[1].title, "Sample rate conversion");
     }
 
     #[test]
@@ -284,6 +369,7 @@ mod tests {
             true,
             false,
             None,
+            None,
         );
         assert_eq!(bluetooth.quality, Quality::Low);
         assert!(bluetooth.note.contains("Bluetooth"));
@@ -294,7 +380,16 @@ mod tests {
             bitrate_kbps: 0,
         };
         assert_eq!(
-            signal_path(aac, &out(OutputKind::Usb, 44_100), 1.0, true, false, None).quality,
+            signal_path(
+                aac,
+                &out(OutputKind::Usb, 44_100),
+                1.0,
+                true,
+                false,
+                None,
+                None
+            )
+            .quality,
             Quality::Low
         );
     }
