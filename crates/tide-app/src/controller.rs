@@ -6429,6 +6429,7 @@ impl Ui {
         let player = &self.ctx.player;
         // Each sound output has its own EQs: follow playback to a new one.
         self.dsp_sync_device();
+        self.dsp_present_upsample();
         let output = player.output_info();
         app.set_output_info(
             format!(
@@ -6461,6 +6462,7 @@ impl Ui {
             player.rate_matching(),
             player.is_released(),
             self.dsp_signal_detail().as_deref(),
+            player.upsampling(),
         );
         let mut stages = path.stages;
         let mut note = path.note;
