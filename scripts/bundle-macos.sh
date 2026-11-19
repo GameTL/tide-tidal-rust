@@ -110,7 +110,8 @@ if [ -n "$install_dir" ]; then
     mkdir -p "$install_dir"
     installed_app="$install_dir/$app_name.app"
     if [ "$remove_previous" = 1 ]; then
-        for old_app in "$install_dir"/TIDE\ \(dev-*.app "$install_dir"/TIDE\(dev-*.app "$install_dir"/TIDE.app; do
+        # Only earlier dev builds: the official TIDE.app is never touched.
+        for old_app in "$install_dir"/TIDE\ \(dev-*.app "$install_dir"/TIDE\(dev-*.app; do
             if [ -e "$old_app" ] && [ "$old_app" != "$installed_app" ]; then
                 printf 'Removing previous version: %s\n' "$old_app"
                 rm -rf "$old_app"
