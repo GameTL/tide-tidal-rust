@@ -220,6 +220,11 @@ export global App {
     in-out property <int> edit-revision;
     // How many text fields have focus. ⌘Z / ⌘⇧Z / ⌘Y undo the EQ when this is 0.
     in-out property <int> edit-focus: 0;
+    // A primary click outside a focused text field takes focus away from it,
+    // as on macOS (set by platform::configure_input, window coordinates).
+    in property <int> click-seq: 0;
+    in property <length> click-x;
+    in property <length> click-y;
     // Return belongs to the focused More button before the Now Playing shortcut.
     in-out property <bool> menu-trigger-focused: false;
 
@@ -583,6 +588,14 @@ export global App {
 
 export component EditableInput inherits TextInput {
     property <int> edit-revision: App.edit-revision;
+    property <int> click-seq: App.click-seq;
+    changed click-seq => {
+        if self.has-focus
+            && !(App.click-x >= self.absolute-position.x && App.click-x < self.absolute-position.x + self.width
+                && App.click-y >= self.absolute-position.y && App.click-y < self.absolute-position.y + self.height) {
+            self.clear-focus();
+        }
+    }
     callback focused(bool);
     changed has-focus => {
         App.edit-focus += self.has-focus ? 1 : -1;

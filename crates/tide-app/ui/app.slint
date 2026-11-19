@@ -21,6 +21,9 @@ export component MainWindow inherits Window {
     background: Theme.bg;
     default-font-size: 15px;
     default-font-family: Typography.family;
+    // True while a text field holds keyboard focus. Read by the Space
+    // shortcut, which runs before Slint routes the key.
+    out property <bool> typing: TextInputInterface.text-input-focused;
 
     init => {
         Palette.color-scheme = ColorScheme.dark;
@@ -132,7 +135,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "Now Playing";
                 shortcut: @keys(Return);
-                enabled: App.has-track && !App.video-open && !App.show-now-playing && !App.menu-open && !App.menu-trigger-focused && App.create-kind == "" && App.edit-focus <= 0;
+                enabled: App.has-track && !App.video-open && !App.show-now-playing && !App.menu-open && !App.menu-trigger-focused && App.create-kind == "" && !TextInputInterface.text-input-focused;
                 activated => { App.open-now-playing(); }
             }
             MenuItem {
@@ -215,8 +218,11 @@ export component MainWindow inherits Window {
         // playback shortcuts a target before the first click after launch/login.
         init => { self.focus(); }
 
+        // The app takes Space in platform::configure_input, before Slint
+        // routes it, so it works when nothing has focus. This binding covers
+        // windows without that hook.
         KeyBinding {
-            enabled: !App.menu-open && App.create-kind == "" && App.edit-focus <= 0;
+            enabled: !App.menu-open && App.create-kind == "" && !TextInputInterface.text-input-focused;
             keys: @keys(" ");
             activated => {
                 App.toggle-play();

@@ -1320,6 +1320,40 @@ fn show_chunks(generation: u64, status: String, stats: String, blocks: Vec<i32>,
     });
 }
 
+/// Space toggles playback unless a text field, a menu or the create dialog
+/// takes the key. Answers whether it was a playback shortcut, so the caller
+/// can keep Slint from seeing it.
+pub fn space_toggles_play(pressed: bool, repeat: bool) -> bool {
+    let Some(ui) = UI.with(|u| u.borrow().clone()) else {
+        return false;
+    };
+    let app = ui.app();
+    if !app.get_logged_in()
+        || app.get_menu_open()
+        || !app.get_create_kind().is_empty()
+        || ui.win.get_typing()
+    {
+        return false;
+    }
+    if pressed && !repeat {
+        ui.toggle_play();
+    }
+    true
+}
+
+/// Note a primary click in window coordinates, so a focused text field it
+/// missed lets go of the keyboard.
+pub fn note_click(x: f32, y: f32) {
+    if let Some(ui) = UI.with(|u| u.borrow().clone())
+        && ui.win.get_typing()
+    {
+        let app = ui.app();
+        app.set_click_x(x);
+        app.set_click_y(y);
+        app.set_click_seq(app.get_click_seq().wrapping_add(1));
+    }
+}
+
 /// Ask for one frame of the main window (nothing while it is closed).
 pub fn request_redraw() {
     UI.with(|u| {

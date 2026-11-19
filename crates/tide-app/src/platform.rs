@@ -1328,10 +1328,11 @@ fn is_double_click() -> bool {
 /// and drive window moves started from the chrome.
 pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::controller::Ctx>) {
     use slint::winit_030::winit::{
-        event::ElementState,
-        keyboard::{Key, ModifiersState},
+        event::{ElementState, MouseButton},
+        keyboard::{Key, ModifiersState, NamedKey},
     };
     let mut modifiers = ModifiersState::empty();
+    let mut pointer = None;
     #[cfg(target_os = "macos")]
     let mut scroll = macos_scroll_filter();
     window.on_winit_window_event(move |window, event| {
@@ -1353,6 +1354,32 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
                 crate::controller::on_ui(|ui| ui.change_zoom(1));
             }
             return EventResult::PreventDefault;
+        }
+        // Space works wherever keyboard focus is, even nowhere (a Slint key
+        // binding only fires along the focus path), unless a field is typing.
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && event.logical_key == Key::Named(NamedKey::Space)
+            && !(modifiers.super_key() || modifiers.control_key() || modifiers.alt_key())
+            && crate::controller::space_toggles_play(
+                event.state == ElementState::Pressed,
+                event.repeat,
+            )
+        {
+            return EventResult::PreventDefault;
+        }
+        match *event {
+            WindowEvent::CursorMoved { position, .. } => pointer = Some(position),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(at) = pointer {
+                    let scale = window.scale_factor() as f64;
+                    crate::controller::note_click((at.x / scale) as f32, (at.y / scale) as f32);
+                }
+            }
+            _ => {}
         }
         let percent = ctx.settings.read().unwrap().zoom_percent;
         if crate::zoom::window_event(window, event, percent) == EventResult::PreventDefault {
