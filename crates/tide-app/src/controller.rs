@@ -6363,8 +6363,7 @@ impl Ui {
         let cover = track.cover_url.as_deref().map(|u| sized_cover(u, 640));
         let cached_cover = cover
             .as_deref()
-            .map(|u| self.ctx.images.file_path(&url_key(u, 0)))
-            .filter(|p| p.exists());
+            .and_then(|u| self.ctx.images.cached(&url_key(u, 0), u));
 
         if let Some(cover_url) = cover.clone() {
             let id = track.id.clone();
@@ -6375,8 +6374,9 @@ impl Ui {
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_tint(tint);
-                    let path = ui.ctx.images.file_path(&url_key(&cover_url_for_cache, 0));
-                    if path.exists() {
+                    if let Some(path) =
+                        ui.ctx.images.cached(&url_key(&cover_url_for_cache, 0), &cover_url_for_cache)
+                    {
                         ui.ctx.with_media(|m| {
                             let _ = m.set_artwork_file(&path);
                         });

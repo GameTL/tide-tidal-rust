@@ -23,7 +23,7 @@ use tide_api::{Card, VideoStream};
 use tide_audio::TrackQueueItem;
 use tide_macos::{VideoDownloadStats, VideoMediaInfo, VideoPlayer, VideoStatus};
 
-use super::{Ui, card_row, fmt_time, on_ui};
+use super::{Ui, card_row, fmt_time, on_ui, url_key};
 
 /// Player bar, Now Playing and end-of-video checks, about four times a second.
 const STATUS_PERIOD: Duration = Duration::from_millis(250);
@@ -299,11 +299,17 @@ impl Ui {
         self.present_video_time(0.0, card.duration as f64);
         if let Some(url) = card.image_url.clone() {
             let (id, weak) = (card.id.clone(), Rc::downgrade(self));
+            let art_url = url.clone();
             self.load_image(&url, 640, move |img, tint| {
                 let Some(ui) = weak.upgrade() else { return };
                 if ui.video_active() && ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_tint(tint);
+                    if let Some(path) = ui.ctx.images.cached(&url_key(&art_url, 0), &art_url) {
+                        ui.ctx.with_media(|m| {
+                            let _ = m.set_artwork_file(&path);
+                        });
+                    }
                 }
             });
         }
