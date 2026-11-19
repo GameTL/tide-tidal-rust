@@ -235,19 +235,30 @@ component ParamRow inherits Rectangle {
 }
 
 export component DspView inherits Rectangle {
-    property <length> column-w: min(892px, self.width - 64px);
+    // The table of contents sits to the right of the column when it fits.
+    property <length> toc-w: 150px;
+    property <bool> toc-shown: self.width >= 860px;
+    property <length> toc-space: self.toc-shown ? self.toc-w + 28px : 0px;
+    property <length> column-w: min(892px, self.width - 64px - self.toc-space);
+    property <length> column-x: (self.width - self.column-w - self.toc-space) / 2;
+    // Reading the second section: its heading is near the top, or the page is at its end.
+    property <bool> at-upscale: -App.scroll-y + 120px >= up-head.y || (sv.content-height > sv.visible-height && App.scroll-y <= sv.visible-height - sv.content-height + 1px);
+    function jump(y: length) {
+        App.scroll-y = min(0px, max(12px - y, sv.visible-height - sv.content-height));
+    }
     property <color> usr-tone: #38bdf8;
     property <color> spk-tone: #fb923c;
     property <string> device-lead: "Sound output: " + App.dsp-device + ". Both EQs are remembered for this output and come back whenever it is the one playing";
     property <string> usr-blurb: "User / preference EQ. Shape the sound to taste: more bass, less treble, whatever you like on top of the baseline.";
     property <string> spk-blurb: "Speaker / baseline EQ. Corrects this output towards a target, such as a neutral curve or another headphone. Set it once, then leave taste to the USR EQ.";
+    property <string> upsample-blurb: "Raises each track to a higher sample rate in its own family (44.1 or 48 kHz) before the EQs. Max takes each track to the highest whole multiple of its own rate this output supports. The filter is linear phase: the original samples are kept and the ones in between are computed, so playback reads Enhanced rather than bit-perfect.";
     property <string> band-none: "No bands yet. Add one, or double-click the graph.";
     property <string> band-pick: "Pick a dot to edit it. Drag it to change frequency and gain; double-click the graph to add a band.";
-    ScrollView {
+    sv := ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
-            padding-left: (root.width - root.column-w) / 2;
-            padding-right: (root.width - root.column-w) / 2;
+            padding-left: root.column-x;
+            padding-right: root.width - root.column-x - root.column-w;
             padding-top: 12px;
             padding-bottom: 60px;
             spacing: 14px;
@@ -290,6 +301,15 @@ export component DspView inherits Rectangle {
                 text: root.device-lead + (App.dsp-outputs > 1 ? " (" + App.dsp-outputs + " outputs remembered)." : ".");
                 reserve: root.device-lead + " (99 outputs remembered).";
                 ink: Theme.text-secondary;
+            }
+
+            eq-head := Text {
+                text: "Parametric EQ";
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                height: 36px;
+                vertical-alignment: center;
             }
 
             Card {
@@ -788,6 +808,109 @@ export component DspView inherits Rectangle {
                         App.dsp-edit("q", t);
                     }
                 }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #19191c;
+            }
+
+            up-head := Text {
+                text: "Upscale";
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                height: 36px;
+                vertical-alignment: center;
+            }
+
+            Card {
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Upsampling";
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle { }
+
+                    Pill {
+                        text: "Off";
+                        selected: App.dsp-upsample == 0;
+                        clicked => { App.dsp-set-upsample(0); }
+                    }
+
+                    for option in App.dsp-upsample-options: Pill {
+                        text: option.label;
+                        selected: App.dsp-upsample == option.tier;
+                        clicked => { App.dsp-set-upsample(option.tier); }
+                    }
+                }
+
+                Text {
+                    text: root.upsample-blurb;
+                    color: Theme.text-secondary;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                HoldText {
+                    text: App.dsp-upsample-note;
+                    reserve: "Now playing: 44.1 kHz untouched. It is already at the chosen rate or above, or this output has no higher rate for it.";
+                    ink: App.dsp-upsample == 0 ? Theme.text-secondary : Theme.enhanced;
+                }
+            }
+        }
+    }
+
+    // Table of contents, beside the column while the window has room for it.
+    if root.toc-shown: VerticalLayout {
+        x: root.column-x + root.column-w + 28px;
+        y: 68px;
+        width: root.toc-w;
+        alignment: start;
+        spacing: 2px;
+        Text {
+            text: "ON THIS PAGE";
+            color: Theme.text-secondary;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            height: 26px;
+        }
+
+        for entry[i] in ["Parametric EQ", "Upscale"]: Rectangle {
+            property <bool> current: (i == 1) == root.at-upscale;
+            height: 30px;
+            border-radius: 6px;
+            background: toc-ta.has-hover ? #17171a : transparent;
+            toc-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.jump(i == 0 ? eq-head.y : up-head.y);
+                }
+            }
+
+            Rectangle {
+                x: 0px;
+                y: 7px;
+                width: 2px;
+                height: parent.height - 14px;
+                background: parent.current ? Theme.text : #2a2a2e;
+            }
+
+            Text {
+                x: 12px;
+                width: parent.width - 12px;
+                text: entry;
+                color: parent.current ? Theme.text : Theme.text-secondary;
+                font-size: 13px;
+                font-weight: parent.current ? 600 : 400;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

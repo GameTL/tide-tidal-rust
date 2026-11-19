@@ -14,7 +14,8 @@ use tide_audio::eq::{self, Band, BandKind, EqProfile, MAX_BANDS};
 
 use super::{Ui, on_ui};
 use crate::alerts::notice;
-use crate::{EqBand, EqHit};
+use crate::signal::khz;
+use crate::{EqBand, EqHit, UpsampleOption};
 
 /// The graphs span ±this many dB.
 const GRAPH_DB: f32 = 15.0;
@@ -36,6 +37,12 @@ const BACKUP_VERSION: u32 = 1;
 /// A backup is a few kilobytes; anything far larger is not one.
 const BACKUP_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Dot colours, by band number.
+/// Upsampling targets, as multiples of a family's base rate (44.1 or 48 kHz).
+const UPSAMPLE_TIERS: [u32; 3] = [2, 4, 8];
+/// "Max": every standard rate is within ×8 of its base, so this tier reaches
+/// the highest whole multiple of a track's rate the output supports.
+const UPSAMPLE_MAX: u32 = 8;
+
 const BAND_COLORS: [(u8, u8, u8); 8] = [
     (0x14, 0xb8, 0xa6),
     (0xf9, 0xa8, 0xd4),
@@ -47,7 +54,7 @@ const BAND_COLORS: [(u8, u8, u8); 8] = [
     (0x86, 0xef, 0xac),
 ];
 
-/// The two equalisers of one sound output.
+/// The two equalisers of one sound output, and its upsampler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct DeviceDsp {
@@ -57,6 +64,9 @@ struct DeviceDsp {
     #[serde(default)]
     preamp: Option<f32>,
     auto_preamp: bool,
+    /// Upsample tracks towards this multiple of their family's base rate
+    /// (44.1 or 48 kHz): 2, 4 or 8, and 0 for off.
+    upsample: u32,
 }
 
 impl Default for DeviceDsp {
@@ -72,6 +82,7 @@ impl Default for DeviceDsp {
             spk: flat(),
             preamp: Some(0.0),
             auto_preamp: false,
+            upsample: 0,
         }
     }
 }
@@ -97,6 +108,15 @@ impl DeviceDsp {
 
     fn gain(&self) -> f32 {
         self.preamp.unwrap_or(0.0)
+    }
+
+    /// Upsampling target to play with: none while DSP is bypassed.
+    fn playback_upsample(&self) -> u32 {
+        if self.enabled && UPSAMPLE_TIERS.contains(&self.upsample) {
+            self.upsample
+        } else {
+            0
+        }
     }
 
     fn playback_profiles(&self) -> Vec<EqProfile> {
@@ -195,6 +215,9 @@ impl DspStore {
             tidy_profile(&mut device.usr);
             tidy_profile(&mut device.spk);
             device.update_auto_preamp();
+            if !UPSAMPLE_TIERS.contains(&device.upsample) {
+                device.upsample = 0;
+            }
             self.devices.insert(name, device);
         }
         for mut preset in backup.presets {
@@ -444,6 +467,16 @@ fn autoeq_matches(entries: &[AutoEqEntry], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// "88.2 / 96 kHz": the rates one upsampling tier reaches on this output.
+fn upsample_label(tier: u32, supported: &[u32]) -> Option<String> {
+    let rates: Vec<String> = [44_100 * tier, 48_000 * tier]
+        .into_iter()
+        .filter(|rate| supported.contains(rate))
+        .map(|rate| (rate as f32 / 1000.0).to_string())
+        .collect();
+    (!rates.is_empty()).then(|| format!("{} kHz", rates.join(" / ")))
+}
+
 /// "3 outputs and 1 preset".
 fn backup_summary(outputs: usize, presets: usize) -> String {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -512,6 +545,95 @@ impl Ui {
     fn dsp_apply(&self) {
         let device = self.dsp.borrow_mut().device_mut().clone();
         self.ctx.player.set_eq(device.playback_profiles());
+        let tier = device.playback_upsample();
+        if self.ctx.player.upsample() != tier {
+            // Re-opening the device can take a moment: keep it off the UI thread.
+            self.spawn(|ctx| async move {
+                let _ = tokio::task::spawn_blocking(move || ctx.player.set_upsample(tier)).await;
+                on_ui(|ui| ui.present_signal());
+            });
+        }
+    }
+
+    /// The upsampler card: the rates this output offers, and what it is doing.
+    pub(super) fn dsp_present_upsample(&self) {
+        let app = self.app();
+        let player = &self.ctx.player;
+        let output = player.output_info();
+        let device = self.dsp.borrow_mut().device_mut().clone();
+        // A rate above the base ones (44.1 and 48 kHz) to upsample to.
+        let has_rates = UPSAMPLE_TIERS
+            .into_iter()
+            .any(|tier| upsample_label(tier, &output.supported_rates).is_some());
+        // The fixed rates this output has, then Max: the highest whole
+        // multiple of each track's own rate, which is what ×8 reaches.
+        let options: Vec<UpsampleOption> = [2, 4]
+            .into_iter()
+            .filter_map(|tier| {
+                Some(UpsampleOption {
+                    tier: tier as i32,
+                    label: upsample_label(tier, &output.supported_rates)?.into(),
+                })
+            })
+            .chain([UpsampleOption {
+                tier: UPSAMPLE_MAX as i32,
+                label: "Max".into(),
+            }])
+            .filter(|_| output.kind.allows_rate_matching())
+            .collect();
+        let offered = options.iter().any(|o| o.tier as u32 == device.upsample);
+        let source = player.format_info().map(|f| f.sample_rate);
+        let note = if !output.kind.allows_rate_matching() {
+            format!(
+                "{} outputs run at a sample rate of their own, so upsampling is not available here.",
+                output.kind.label()
+            )
+        } else if !has_rates && device.upsample == 0 {
+            "This output has no higher sample rate to upsample to.".to_string()
+        } else if !has_rates {
+            "This output has no higher sample rate to upsample to, so tracks play at their own."
+                .to_string()
+        } else if device.upsample == 0 {
+            "Off: every track plays at its own sample rate.".to_string()
+        } else if !device.enabled {
+            "DSP is off for this output, so tracks play at their own sample rate.".to_string()
+        } else if !player.rate_matching() {
+            "Sample-rate matching is off in Settings, so upsampling is paused.".to_string()
+        } else if !offered {
+            "This output no longer offers the chosen rate. Pick another.".to_string()
+        } else if let (Some(factor), Some(source)) = (player.upsampling(), source) {
+            format!(
+                "Now playing: {} upsampled to {} ({factor}×).",
+                khz(source),
+                khz(output.sample_rate)
+            )
+        } else if let Some(source) = source.filter(|_| !player.is_released()) {
+            format!(
+                "Now playing: {} untouched. It is already at the chosen rate or above, or this output has no higher rate for it.",
+                khz(source)
+            )
+        } else {
+            "Tracks below the chosen rate are raised to it. The rest play untouched.".to_string()
+        };
+        app.set_dsp_upsample(device.upsample as i32);
+        app.set_dsp_upsample_note(note.into());
+        // Rebuilt only on a change, so a pill is not replaced under the pointer.
+        let shown = app.get_dsp_upsample_options();
+        if shown.iter().ne(options.iter().cloned()) {
+            app.set_dsp_upsample_options(ModelRc::new(VecModel::from(options)));
+        }
+        let upsampling = device.enabled
+            && device.upsample != 0
+            && offered
+            && has_rates
+            && player.rate_matching();
+        app.set_dsp_active(
+            upsampling
+                || device.enabled
+                    && (device.usr.alters_audio()
+                        || device.spk.alters_audio()
+                        || device.gain().abs() > 0.005),
+        );
     }
 
     /// Write changes to disk. Called from the tick, so dragging a dot does not
@@ -622,6 +744,7 @@ impl Ui {
     }
 
     pub(super) fn dsp_present(&self) {
+        self.dsp_present_upsample();
         let app = self.app();
         let mut dsp = self.dsp.borrow_mut();
         let tab = dsp.tab;
@@ -642,12 +765,6 @@ impl Ui {
         app.set_dsp_auto_preamp(device.auto_preamp);
         app.set_dsp_usr_on(device.usr.alters_audio());
         app.set_dsp_spk_on(device.spk.alters_audio());
-        app.set_dsp_active(
-            device.enabled
-                && (device.usr.alters_audio()
-                    || device.spk.alters_audio()
-                    || device.gain().abs() > 0.005),
-        );
 
         // What reaches the device: both EQs and their pre-amps.
         let with_preamp = |eq: &EqProfile, freq: f32| -> f32 {
@@ -858,6 +975,21 @@ impl Ui {
                 dsp.record_undo(false);
                 let device = dsp.device_mut();
                 device.enabled = on;
+                dsp.dirty = true;
+            }
+            ui.dsp_apply();
+            ui.dsp_present();
+            ui.present_signal();
+        });
+        bind!(on_dsp_set_upsample, |ui, tier| {
+            {
+                let mut dsp = ui.dsp.borrow_mut();
+                dsp.record_undo(false);
+                let device = dsp.device_mut();
+                device.upsample = u32::try_from(tier)
+                    .ok()
+                    .filter(|tier| UPSAMPLE_TIERS.contains(tier))
+                    .unwrap_or(0);
                 dsp.dirty = true;
             }
             ui.dsp_apply();
@@ -1498,6 +1630,33 @@ mod tests {
         let device = DeviceDsp::default();
         assert!(device.usr.enabled && device.spk.enabled);
         assert!(!device.usr.alters_audio() && !device.spk.alters_audio());
+        assert_eq!(device.playback_upsample(), 0);
+    }
+
+    #[test]
+    fn upsampling_is_saved_per_output_and_bypassed_with_dsp() {
+        // Saved before the upsampler existed: off.
+        assert_eq!(serde_json::from_str::<DeviceDsp>("{}").unwrap().upsample, 0);
+        let mut device = DeviceDsp {
+            upsample: 4,
+            ..DeviceDsp::default()
+        };
+        assert_eq!(device.playback_upsample(), 4);
+        let saved = serde_json::to_string(&device).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DeviceDsp>(&saved).unwrap().upsample,
+            4
+        );
+        device.enabled = false;
+        assert_eq!(device.playback_upsample(), 0);
+        device.enabled = true;
+        device.upsample = 3;
+        assert_eq!(device.playback_upsample(), 0);
+
+        let dac = [44_100, 48_000, 88_200, 96_000, 192_000];
+        assert_eq!(upsample_label(2, &dac).as_deref(), Some("88.2 / 96 kHz"));
+        assert_eq!(upsample_label(4, &dac).as_deref(), Some("192 kHz"));
+        assert_eq!(upsample_label(8, &dac), None);
     }
 
     #[test]

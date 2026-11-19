@@ -29,7 +29,9 @@ use rt_lock::RtMutex;
 
 pub mod eq;
 mod rt_lock;
+mod upsample;
 pub use eq::{Band, BandKind, EqChain, EqProfile};
+use upsample::Upsampler;
 
 /// Open cache file while DASH segments are still being appended.
 /// Reports `is_seekable() == false` and `byte_len() == None` so Symphonia's ISO-MP4
@@ -320,6 +322,8 @@ struct AudioSource {
     /// Leftover source frames for integer HCF downsample across packets.
     hold: [[f32; 2]; MAX_HCF_DECIM],
     hold_len: u8,
+    /// Interpolator for an integer upsample (44.1→88.2, 48→192, …).
+    upsampler: Option<Upsampler>,
     /// Cache file still growing while segments download in the background.
     growing: bool,
     eof_wait: Option<Instant>,
@@ -390,6 +394,7 @@ impl AudioSource {
             last_frame: [0.0; 2],
             hold: [[0.0; 2]; MAX_HCF_DECIM],
             hold_len: 0,
+            upsampler: None,
             growing,
             eof_wait: None,
             frames_decoded: (offset.as_secs_f64() * sample_rate.max(1) as f64).round() as u64,
@@ -421,6 +426,8 @@ impl AudioSource {
         if fresh.seek_within(pos).is_err() {
             return Ok(false);
         }
+        // Same audio, another file: the interpolator carries on mid-stream.
+        fresh.upsampler = self.upsampler.take();
         tracing::info!(?pos, title = %fresh.item.title, "Followed rebuilt progressive head");
         *self = fresh;
         Ok(true)
@@ -450,6 +457,8 @@ impl AudioSource {
             fresh.seek_within(pos)?;
         }
         fresh.frames_decoded = decoded;
+        // Same audio, another file: the interpolator carries on mid-stream.
+        fresh.upsampler = self.upsampler.take();
         tracing::info!(?pos, title = %fresh.item.title, "Reopened finalized audio after progressive head");
         *self = fresh;
         Ok(true)
@@ -479,6 +488,15 @@ impl AudioSource {
 
     /// Decode one packet into interleaved stereo at `out_rate`. Returns false at end of stream.
     fn read_stereo(&mut self, out_rate: u32, out: &mut Vec<f32>) -> Result<bool, AudioError> {
+        let more = self.read_packet(out_rate, out)?;
+        if !more && let Some(upsampler) = self.upsampler.as_mut() {
+            // The last frames of the track are still inside the filter.
+            upsampler.flush(out);
+        }
+        Ok(more)
+    }
+
+    fn read_packet(&mut self, out_rate: u32, out: &mut Vec<f32>) -> Result<bool, AudioError> {
         const GROWING_EOF_GRACE: Duration = Duration::from_secs(120);
         let packet = loop {
             match self.reader.next_packet() {
@@ -571,6 +589,17 @@ impl AudioSource {
             out.reserve(frames * 2);
             for i in 0..frames {
                 out.extend_from_slice(&frame(i));
+            }
+        } else if let Some(factor) = upsample::factor(self.sample_rate, out_rate) {
+            // Integer upsample (44.1→88.2, 48→192, …): windowed-sinc interpolation
+            // that keeps every original sample.
+            let upsampler = match &mut self.upsampler {
+                Some(upsampler) if upsampler.factor() == factor => upsampler,
+                slot => slot.insert(Upsampler::new(factor)),
+            };
+            out.reserve(frames * 2 * factor as usize);
+            for i in 0..frames {
+                upsampler.push(frame(i), out);
             }
         } else if let Some(factor) = downsample_factor(self.sample_rate, out_rate) {
             // Integer HCF downsample (88.2→44.1, 96→48, 192→48, …): box-average
@@ -676,6 +705,9 @@ impl AudioSource {
         self.last_frame = [0.0; 2];
         self.hold = [[0.0; 2]; MAX_HCF_DECIM];
         self.hold_len = 0;
+        if let Some(upsampler) = self.upsampler.as_mut() {
+            upsampler.reset();
+        }
         self.frames_decoded = (to.as_secs_f64() * self.sample_rate.max(1) as f64).round() as u64;
         self.eof_wait = None;
         self.starved = false;
@@ -735,6 +767,9 @@ struct Shared {
     rate_matching: AtomicBool,
     /// Put the device back at the rate it had before TIDE changed it, on pause and quit.
     restore_sample_rate: AtomicBool,
+    /// Upsampling target as a multiple of the family's base rate (44.1 or
+    /// 48 kHz): 2, 4 or 8, and 0 for off.
+    upsample: AtomicU32,
     output: Mutex<OutputInfo>,
     /// (device id, rate) the output had before TIDE first touched it, so it
     /// can be handed back the way it was found.
@@ -1261,6 +1296,7 @@ impl AudioPlayer {
             device_rate: AtomicU32::new(48_000),
             rate_matching: AtomicBool::new(true),
             restore_sample_rate: AtomicBool::new(true),
+            upsample: AtomicU32::new(0),
             output: Mutex::new(OutputInfo::default()),
             original: Mutex::new(None),
             released: AtomicBool::new(false),
@@ -1326,15 +1362,70 @@ impl AudioPlayer {
             && output.supported_rates.contains(&rate)
     }
 
-    /// Rate to run the device at for this source: native, else the highest
-    /// integer HCF downsample the device supports, else whatever it is at now.
+    /// Rate to run the device at for this source: the upsampling target when
+    /// the listener set one, else native, else the highest integer HCF
+    /// downsample the device supports, else whatever it is at now.
     fn preferred_output_rate(&self, source: u32) -> u32 {
         let output = self.shared.output.lock().unwrap();
         if !self.shared.rate_matching.load(Ordering::Relaxed) || !output.kind.allows_rate_matching()
         {
             return output.sample_rate;
         }
-        pick_output_rate(source, &output.supported_rates, output.sample_rate)
+        let rate = pick_output_rate(source, &output.supported_rates, output.sample_rate);
+        if rate != source {
+            // The device cannot even run at the track's rate: nothing to raise.
+            return rate;
+        }
+        let tier = self.shared.upsample.load(Ordering::Relaxed);
+        upsample::target_rate(source, tier, &output.supported_rates).unwrap_or(rate)
+    }
+
+    /// Upsample every track towards `tier` × its family's base rate (44.1 or
+    /// 48 kHz): 2, 4 or 8, and 0 for off. Tracks already at or above that
+    /// rate are left alone. Needs sample-rate matching and an output that can
+    /// be re-clocked. Takes effect for the current track straight away.
+    pub fn set_upsample(&self, tier: u32) {
+        let tier = if upsample::FACTORS.contains(&tier) {
+            tier
+        } else {
+            0
+        };
+        if self.shared.upsample.swap(tier, Ordering::Relaxed) == tier || self.is_released() {
+            // Released: the device is re-clocked on resume anyway.
+            return;
+        }
+        let Some(source) = self.current_rate() else {
+            return;
+        };
+        if self.preferred_output_rate(source) != self.shared.device_rate.load(Ordering::Relaxed) {
+            self.rematch_current();
+        }
+    }
+
+    pub fn upsample(&self) -> u32 {
+        self.shared.upsample.load(Ordering::Relaxed)
+    }
+
+    /// Multiple the current track is being upsampled by because the listener
+    /// asked for it, as opposed to a conversion the device forces.
+    pub fn upsampling(&self) -> Option<u32> {
+        let source = self.current_rate()?;
+        let tier = self.upsample();
+        let output = self.shared.output.lock().unwrap();
+        let wanted = self.shared.rate_matching.load(Ordering::Relaxed)
+            && output.kind.allows_rate_matching()
+            && output.supported_rates.contains(&source)
+            && upsample::target_rate(source, tier, &output.supported_rates)
+                == Some(output.sample_rate);
+        wanted
+            .then(|| upsample::factor(source, output.sample_rate))
+            .flatten()
+    }
+
+    /// Sample rate of the track that is audible.
+    fn current_rate(&self) -> Option<u32> {
+        let buf = self.shared.buffer.lock();
+        buf.current.as_ref().map(|c| c.format.sample_rate)
     }
 
     /// Run the output at the preferred rate for this source.
@@ -1820,6 +1911,8 @@ mod tests {
             (44_100u32, 44_100f64),
             (48_000, 48_000.0),
             (22_050, 22_050.0),
+            (88_200, 88_200.0),
+            (176_400, 176_400.0),
         ] {
             let mut src = AudioSource::open(item(&path, 1.0)).unwrap();
             assert_eq!(
