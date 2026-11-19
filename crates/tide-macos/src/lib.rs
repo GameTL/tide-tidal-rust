@@ -298,13 +298,14 @@ mod macos {
                 }
             }
 
-            if let Some(url) = cover_url {
-                if let Some(path) = url.strip_prefix("file://").map(Path::new) {
-                    if path.exists() {
-                        let _ = self.set_artwork_file(path);
-                    }
-                } else if Path::new(url).exists() {
-                    let _ = self.set_artwork_file(Path::new(url));
+            // A new item starts without the previous one's artwork: until its
+            // own cover is on disk the system shows a placeholder, not a stale one.
+            let local = cover_url
+                .map(|url| Path::new(url.strip_prefix("file://").unwrap_or(url)))
+                .filter(|path| path.exists());
+            if local.is_none_or(|path| self.set_artwork_file(path).is_err()) {
+                unsafe {
+                    let _: () = msg_send![&self.dict, removeObjectForKey: MPMediaItemPropertyArtwork];
                 }
             }
 
@@ -342,9 +343,10 @@ mod macos {
                 width: size.width,
                 height: size.height,
             };
-            let image_ptr = Retained::into_raw(image);
+            // The block owns the image, so it is released with the artwork
+            // instead of leaking one decoded cover per track.
             let handler = RcBlock::new(move |_req_size: CGSize| -> NonNull<NSImage> {
-                NonNull::new(image_ptr).expect("non-null NSImage for artwork")
+                NonNull::from(&*image)
             });
             let artwork = unsafe {
                 MPMediaItemArtwork::initWithBoundsSize_requestHandler(
@@ -677,6 +679,15 @@ mod tests {
         let artwork: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
             unsafe { objc2::msg_send![&*info, objectForKey: MPMediaItemPropertyArtwork] };
         assert!(artwork.is_some(), "artwork should be present in dictionary");
+
+        // The next item, cover not on disk yet: no stale artwork from the last one.
+        controls
+            .set_metadata("Next", "Artist", "Album", None, Some("/nonexistent/cover.jpg"))
+            .expect("metadata set");
+        let info = unsafe { center.nowPlayingInfo() }.expect("now playing info present");
+        let artwork: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+            unsafe { objc2::msg_send![&*info, objectForKey: MPMediaItemPropertyArtwork] };
+        assert!(artwork.is_none(), "previous artwork should be cleared");
 
         // Stop
         controls.stop().expect("stop set");
