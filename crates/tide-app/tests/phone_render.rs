@@ -109,7 +109,7 @@ fn card(i: usize, kind: &str, title: &str, subtitle: &str) -> CardData {
         subtitle: subtitle.into(),
         image: cover(i),
         by: if kind == "playlist" { "Someone".into() } else { "".into() },
-        quality: if kind == "album" && i % 2 == 0 { "MAX".into() } else { "".into() },
+        quality: if kind == "album" && i.is_multiple_of(2) { "MAX".into() } else { "".into() },
         ..Default::default()
     }
 }
@@ -425,10 +425,10 @@ fn pages_render_at_every_width() {
                 let shot = shoot(&ui, &format!("{w}-{page}-{g}"));
                 // The album, artist and DSP pages are drawn edge to edge
                 // (hero art, full-width wash): only the others are checked.
-                if !matches!(page, "album" | "artist") {
-                    if let Some(y) = right_edge_clear(&shot, w, h, app.get_dock_height()) {
-                        cut.push(format!("{page} at {w}: something at the right edge, y {y}"));
-                    }
+                if !matches!(page, "album" | "artist")
+                    && let Some(y) = right_edge_clear(&shot, w, h, app.get_dock_height())
+                {
+                    cut.push(format!("{page} at {w}: something at the right edge, y {y}"));
                 }
             }
         }

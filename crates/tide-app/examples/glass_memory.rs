@@ -27,10 +27,20 @@ mod mem;
 slint::include_modules!();
 
 const MB: f64 = 1024. * 1024.;
-/// Ticks of 16 ms: scroll for 5 s, then sit idle for 6 s (past the 3 s idle purge).
-const SCROLL_TICKS: u32 = 312;
-const PHASE_TICKS: u32 = 687;
+/// Each phase scrolls for 5 s, then sits idle for 6 s (past the 3 s idle purge).
+const SCROLL_SECS: f64 = 5.;
+const IDLE_SECS: f64 = 6.;
 const PHASES: u32 = 8;
+
+/// The main screen's refresh rate (60 Hz when it can't be read), so the
+/// scroll moves one step per frame of the panel, as the app's own motion does.
+fn screen_fps() -> f64 {
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    objc2_app_kit::NSScreen::mainScreen(mtm)
+        .map(|screen| screen.maximumFramesPerSecond() as f64)
+        .filter(|fps| *fps >= 60.)
+        .unwrap_or(60.)
+}
 
 fn cover(index: usize) -> Image {
     let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(320, 320);
@@ -131,9 +141,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let fps = screen_fps();
+    let scroll_ticks = (SCROLL_SECS * fps) as u32;
+    let phase_ticks = ((SCROLL_SECS + IDLE_SECS) * fps) as u32;
     let tick = Rc::new(Cell::new(0u32));
     let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, Duration::from_millis(16), {
+    timer.start(slint::TimerMode::Repeated, Duration::from_secs_f64(1. / fps), {
         let weak = ui.as_weak();
         move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -143,8 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let t = tick.get();
             tick.set(t + 1);
-            let phase = t / PHASE_TICKS;
-            let within = t % PHASE_TICKS;
+            let phase = t / phase_ticks;
+            let within = t % phase_ticks;
             // Phase 0 is a warm-up (opaque); then glass and opaque alternate.
             let glass = phase % 2 == 1;
             if within == 0 {
@@ -154,17 +167,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 app.set_glass(glass);
             }
-            if within < SCROLL_TICKS {
+            if within < scroll_ticks {
                 // Back and forth over 1500 px of covers.
-                let s = (within as f32 / SCROLL_TICKS as f32 * std::f32::consts::TAU).sin();
+                let s = (within as f32 / scroll_ticks as f32 * std::f32::consts::TAU).sin();
                 app.set_scroll_y(-(750. + 750. * s));
             }
-            if within == SCROLL_TICKS - 1 || within == PHASE_TICKS - 1 {
+            if within == scroll_ticks - 1 || within == phase_ticks - 1 {
                 let size = ui.window().size();
                 println!(
                     "phase={phase} glass={} state={} size={}x{} footprint_mb={:.2} gpu_cache_mb={:.2}",
                     glass as u8,
-                    if within == SCROLL_TICKS - 1 { "scrolling" } else { "idle" },
+                    if within == scroll_ticks - 1 { "scrolling" } else { "idle" },
                     size.width,
                     size.height,
                     mem::footprint() as f64 / MB,

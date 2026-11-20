@@ -7687,7 +7687,7 @@ impl Ui {
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_tint(tint);
-                    ui.app().set_np_backdrop(backdrop_of(&img));
+                    ui.app().set_np_backdrop(backdrop_of(img));
                     if let Some(path) =
                         ui.ctx.images.cached(&url_key(&cover_url_for_cache, 0), &cover_url_for_cache)
                     {
