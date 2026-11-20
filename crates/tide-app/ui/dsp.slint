@@ -168,13 +168,15 @@ component ParamRow inherits Rectangle {
     in property <string> unit;
     in property <float> pos;
     in-out property <string> text;
+    // Phone width: a shorter label and value box.
+    in property <bool> narrow: false;
     callback slid(float);
     callback typed(string);
     height: 40px;
     HorizontalLayout {
-        spacing: 16px;
+        spacing: root.narrow ? 10px : 16px;
         Text {
-            width: 84px;
+            width: root.narrow ? 70px : 84px;
             text: root.label;
             color: Theme.text;
             font-size: 14px;
@@ -195,7 +197,7 @@ component ParamRow inherits Rectangle {
         VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 84px;
+                width: root.narrow ? 68px : 84px;
                 height: 34px;
                 border-radius: 8px;
                 border-width: 1px;
@@ -234,12 +236,50 @@ component ParamRow inherits Rectangle {
     }
 }
 
+// The name of the EQ being edited.
+component EqName inherits Rectangle {
+    height: 34px;
+    min-width: 160px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: name-input.has-focus ? #4a4a4a : #26262a;
+    background: #0a0a0a;
+    if name-input.text == "": Text {
+        x: 12px;
+        text: "Name this EQ";
+        color: Theme.text-secondary;
+        font-size: 14px;
+        vertical-alignment: center;
+    }
+    name-input := EditableInput {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 20px;
+        text <=> App.dsp-name;
+        color: Theme.text;
+        font-size: 14px;
+        single-line: true;
+        vertical-alignment: center;
+        selection-background-color: #4a4a4a;
+        accepted => {
+            self.clear-focus();
+        }
+        focused(on) => {
+            if !on {
+                App.dsp-edit("name", self.text);
+            }
+        }
+    }
+}
+
 export component DspView inherits Rectangle {
     // The table of contents sits to the right of the column when it fits.
     property <length> toc-w: 150px;
     property <bool> toc-shown: self.width >= 860px;
     property <length> toc-space: self.toc-shown ? self.toc-w + 28px : 0px;
-    property <length> column-w: min(892px, self.width - 64px - self.toc-space);
+    // Phone width: rows that hold several controls split over two lines.
+    property <bool> narrow: self.width < 640px;
+    property <length> column-w: min(892px, self.width - (self.narrow ? 32px : 64px) - self.toc-space);
     property <length> column-x: (self.width - self.column-w - self.toc-space) / 2;
     // Reading the second section: its heading is near the top, or the page is at its end.
     property <bool> at-upscale: -App.scroll-y + 120px >= up-head.y || (sv.content-height > sv.visible-height && App.scroll-y <= sv.visible-height - sv.content-height + 1px);
@@ -260,7 +300,7 @@ export component DspView inherits Rectangle {
             padding-left: root.column-x;
             padding-right: root.width - root.column-x - root.column-w;
             padding-top: 12px;
-            padding-bottom: 60px;
+            padding-bottom: 60px + App.bar-inset;
             spacing: 14px;
             alignment: start;
             HorizontalLayout {
@@ -313,7 +353,7 @@ export component DspView inherits Rectangle {
             }
 
             Card {
-                HorizontalLayout {
+                if !root.narrow: HorizontalLayout {
                     spacing: 16px;
                     Text {
                         text: "Resultant response";
@@ -340,6 +380,37 @@ export component DspView inherits Rectangle {
                     LegendDot {
                         tone: white;
                         text: "Both, with preamp";
+                    }
+                }
+                // Narrow: the legend under the heading, one curve a line.
+                if root.narrow: VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Resultant response";
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 600;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        LegendDot {
+                            tone: root.usr-tone;
+                            text: App.dsp-usr-on ? "USR EQ" : "USR EQ (flat)";
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        LegendDot {
+                            tone: root.spk-tone;
+                            text: App.dsp-spk-on ? "SPK EQ" : "SPK EQ (flat)";
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        LegendDot {
+                            tone: white;
+                            text: "Both, with preamp";
+                        }
                     }
                 }
 
@@ -405,6 +476,7 @@ export component DspView inherits Rectangle {
                     spacing: 12px;
                     ParamRow {
                         horizontal-stretch: 1;
+                        narrow: root.narrow;
                         label: "Preamp";
                         unit: "dB";
                         pos: App.dsp-preamp-pos;
@@ -443,7 +515,7 @@ export component DspView inherits Rectangle {
                             clicked => { App.dsp-select-tab(i); }
                         }
                         HorizontalLayout {
-                            padding-right: i == 0 ? 24px : 0px;
+                            padding-right: i == 0 ? (root.narrow ? 12px : 24px) : 0px;
                             Rectangle {
                                 width: label.preferred-width;
                                 label := Text {
@@ -482,44 +554,14 @@ export component DspView inherits Rectangle {
             }
 
             Card {
+                // Narrow: the name on a line of its own, the buttons under it.
+                if root.narrow: EqName { }
                 HorizontalLayout {
                     spacing: 10px;
-                    VerticalLayout {
+                    alignment: root.narrow ? start : stretch;
+                    if !root.narrow: VerticalLayout {
                         alignment: center;
-                        Rectangle {
-                            height: 34px;
-                            min-width: 160px;
-                            border-radius: 8px;
-                            border-width: 1px;
-                            border-color: name-input.has-focus ? #4a4a4a : #26262a;
-                            background: #0a0a0a;
-                            if name-input.text == "": Text {
-                                x: 12px;
-                                text: "Name this EQ";
-                                color: Theme.text-secondary;
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
-                            name-input := EditableInput {
-                                x: 12px;
-                                width: parent.width - 24px;
-                                height: 20px;
-                                text <=> App.dsp-name;
-                                color: Theme.text;
-                                font-size: 14px;
-                                single-line: true;
-                                vertical-alignment: center;
-                                selection-background-color: #4a4a4a;
-                                accepted => {
-                                    self.clear-focus();
-                                }
-                                focused(on) => {
-                                    if !on {
-                                        App.dsp-edit("name", self.text);
-                                    }
-                                }
-                            }
-                        }
+                        EqName { }
                     }
 
                     VerticalLayout {
@@ -715,7 +757,62 @@ export component DspView inherits Rectangle {
                     background: #19191c;
                 }
 
-                HorizontalLayout {
+                // Narrow: the band's kind and its switches on lines of their own.
+                if root.narrow: VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: App.dsp-selected >= 0 ? "Band " + (App.dsp-selected + 1) : App.dsp-bands.length == 0 ? root.band-none : root.band-pick;
+                            color: App.dsp-selected >= 0 ? Theme.text : Theme.text-secondary;
+                            font-size: App.dsp-selected >= 0 ? 15px : 13px;
+                            font-weight: App.dsp-selected >= 0 ? 600 : 400;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Pill {
+                                text: "Add band";
+                                clicked => {
+                                    App.dsp-add-band(-1, -1);
+                                }
+                            }
+                        }
+                    }
+                    if App.dsp-selected >= 0: HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        for kind[k] in ["Peak", "Low shelf", "High shelf"]: Pill {
+                            text: kind;
+                            selected: App.dsp-band-kind == k;
+                            clicked => {
+                                App.dsp-set-kind(k);
+                            }
+                        }
+                    }
+                    if App.dsp-selected >= 0: HorizontalLayout {
+                        alignment: start;
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Toggle {
+                                on: App.dsp-band-enabled;
+                                toggled(v) => {
+                                    App.dsp-set-band-enabled(v);
+                                }
+                            }
+                        }
+                        Pill {
+                            text: "Remove";
+                            clicked => {
+                                App.dsp-remove-band();
+                            }
+                        }
+                    }
+                }
+                if !root.narrow: HorizontalLayout {
                     height: 34px;
                     spacing: 10px;
                     Text {
@@ -773,6 +870,7 @@ export component DspView inherits Rectangle {
                 }
 
                 if App.dsp-selected >= 0: ParamRow {
+                    narrow: root.narrow;
                     label: "Frequency";
                     unit: "Hz";
                     pos: App.dsp-freq-pos;
@@ -785,6 +883,7 @@ export component DspView inherits Rectangle {
                     }
                 }
                 if App.dsp-selected >= 0: ParamRow {
+                    narrow: root.narrow;
                     label: "Gain";
                     unit: "dB";
                     pos: App.dsp-gain-pos;
@@ -797,6 +896,7 @@ export component DspView inherits Rectangle {
                     }
                 }
                 if App.dsp-selected >= 0: ParamRow {
+                    narrow: root.narrow;
                     label: "Q";
                     unit: "";
                     pos: App.dsp-q-pos;
@@ -825,9 +925,16 @@ export component DspView inherits Rectangle {
             }
 
             Card {
+                if root.narrow: Text {
+                    text: "Upsampling";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 600;
+                }
                 HorizontalLayout {
-                    spacing: 10px;
-                    Text {
+                    spacing: root.narrow ? 6px : 10px;
+                    alignment: root.narrow ? start : stretch;
+                    if !root.narrow: Text {
                         text: "Upsampling";
                         color: Theme.text;
                         font-size: 15px;
@@ -835,7 +942,7 @@ export component DspView inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    Rectangle { }
+                    if !root.narrow: Rectangle { }
 
                     Pill {
                         text: "Off";

@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit, UpsampleOption } from "common.slint";
-import { Sidebar, TopBar, PlayerBar, DebugPanel, ErrorAlert, UpdateToast, CreateDialog } from "chrome.slint";
-import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView, ModulesPage } from "views.slint";
+import { Sidebar, TopBar, PlayerBar, PhoneDock, DebugPanel, ErrorAlert, UpdateToast, CreateDialog, EditPlaylistDialog, PlaylistDrop, DragChip } from "chrome.slint";
+import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView, ModulesPage, CollectionView } from "views.slint";
 import { FeedView } from "feed.slint";
 import { VideoView } from "video.slint";
 import { SettingsView } from "settings.slint";
@@ -13,8 +13,11 @@ export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, E
 
 export component MainWindow inherits Window {
     title: "TIDE";
-    // Preserve the native minimum window size at every zoom level.
-    min-width: 960px / App.zoom-factor;
+    // As narrow as a phone (the official client goes this thin too), and
+    // never below 320 logical pixels: zoomed in, the window grows instead of
+    // the layout getting narrower than the phone layout is drawn for. The
+    // minimum height is the native 620 points at every zoom level.
+    min-width: max(320px, 320px / App.zoom-factor);
     min-height: 620px / App.zoom-factor;
     preferred-width: 1440px;
     preferred-height: 900px;
@@ -24,12 +27,21 @@ export component MainWindow inherits Window {
     // True while a text field holds keyboard focus. Read by the Space
     // shortcut, which runs before Slint routes the key.
     out property <bool> typing: TextInputInterface.text-input-focused;
+    // The single-key page shortcuts (Navigation menu, and
+    // platform::configure_input off the native menu) stay out of text fields,
+    // menus, dialogs and the video player.
+    property <bool> page-keys: App.logged-in && !App.menu-open && App.create-kind == "" && !App.video-open && !TextInputInterface.text-input-focused;
 
+    // The arrangement follows the width (see App.compact-layout).
     init => {
         Palette.color-scheme = ColorScheme.dark;
         App.compact-layout = self.width < 960px;
+        App.phone-layout = self.width < 720px;
     }
-    changed width => { App.compact-layout = self.width < 960px; }
+    changed width => {
+        App.compact-layout = self.width < 960px;
+        App.phone-layout = self.width < 720px;
+    }
 
     // Native macOS menu bar. Hide (⌘H), Hide Others and Quit (⌘Q) come from
     // the standard application menu that Slint adds automatically.
@@ -165,30 +177,80 @@ export component MainWindow inherits Window {
                 shortcut: @keys(Control + F);
                 activated => { App.navigate("focus-search"); }
             }
+            MenuItem {
+                title: "Filter";
+                shortcut: @keys("/");
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:/"); }
+            }
             MenuSeparator { }
             // Esc returns to the home page, as a new history entry, scrolled to
-            // where home was left; on home, Esc scrolls back to the top.
+            // where home was left; on home, Esc scrolls back to the top. A
+            // focused text field (⌘F search, a filter) lets go of it first.
+            // The letter keys of the other pages are handled in
+            // platform::configure_input, so they never reach a text field.
             MenuItem {
                 title: "Music";
                 shortcut: @keys(Escape);
                 activated => {
-                    if (App.create-kind != "") { App.create-kind = ""; }
+                    if (App.drag-active) { App.drag-cancel(); }
+                    else if (App.create-kind != "") { App.create-kind = ""; }
                     else if (App.menu-open) { App.escape-menu(); }
+                    else if (TextInputInterface.text-input-focused) { App.edit("blur"); }
                     else if (App.video-open) { App.close-video(); }
                     else if (App.show-now-playing) { App.show-now-playing = false; }
                     else { App.navigate("escape-home"); }
                 }
             }
-            MenuItem { title: "Explore"; activated => { App.navigate("explore"); } }
-            MenuItem { title: "Feed"; activated => { App.navigate("feed"); } }
+            MenuItem {
+                title: "Explore";
+                shortcut: @keys(E);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:explore"); }
+            }
+            MenuItem {
+                title: "Feed";
+                shortcut: @keys(F);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:feed"); }
+            }
             MenuSeparator { }
-            // Native menus reserve '&' for mnemonics; '&&' displays a literal '&'.
-            MenuItem { title: "Media && Radio"; activated => { App.navigate("mixes"); } }
-            MenuItem { title: "Playlists"; activated => { App.navigate("playlists"); } }
-            MenuItem { title: "Albums"; activated => { App.navigate("albums"); } }
-            MenuItem { title: "Tracks"; activated => { App.navigate("tracks"); } }
-            MenuItem { title: "Videos"; activated => { App.navigate("videos"); } }
-            MenuItem { title: "Profiles"; activated => { App.navigate("profiles"); } }
+            MenuItem {
+                title: "Mixes";
+                shortcut: @keys(M);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:mixes"); }
+            }
+            MenuItem {
+                title: "Playlists";
+                shortcut: @keys(P);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:playlists"); }
+            }
+            MenuItem {
+                title: "Albums";
+                shortcut: @keys(A);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:albums"); }
+            }
+            MenuItem {
+                title: "Tracks";
+                shortcut: @keys(T);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:tracks"); }
+            }
+            MenuItem {
+                title: "Videos";
+                shortcut: @keys(V);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:videos"); }
+            }
+            MenuItem {
+                title: "Profiles";
+                shortcut: @keys(O);
+                enabled: root.page-keys;
+                activated => { App.navigate("page-key:profiles"); }
+            }
             MenuItem { title: "Save for Later"; activated => { App.navigate("later"); } }
         }
 
@@ -239,7 +301,8 @@ export component MainWindow inherits Window {
 
         VerticalLayout {
         HorizontalLayout {
-            Sidebar { }
+            // Phone layout: the tab bar (PhoneDock) stands in for it.
+            if !App.phone-layout: Sidebar { }
 
             Rectangle {
                 background: Theme.bg;
@@ -262,6 +325,9 @@ export component MainWindow inherits Window {
                 changed pane-w => { App.pane-width = self.pane-w; }
                 changed pane-h => { App.pane-height = self.pane-h; }
 
+                // With a glass player bar the pane (and so each page) runs
+                // under the bar by App.bar-inset; the pages pad their
+                // scrolling content by the same amount.
                 Rectangle {
                     y: App.view == "album" || App.view == "artist" ? 0px : 64px;
                     height: parent.height - self.y;
@@ -271,6 +337,7 @@ export component MainWindow inherits Window {
                     if App.view == "modules": ModulesPage { }
                     if App.view == "feed": FeedView { }
                     if App.view == "stub": StubView { }
+                    if App.view == "collection": CollectionView { }
                     if App.view == "settings": SettingsView { }
                     if App.view == "dsp": DspView { }
                 }
@@ -331,7 +398,20 @@ export component MainWindow inherits Window {
             }
         }
 
-        PlayerBar { }
+        // The player bar's place when pages do not run beneath it.
+        Rectangle { height: App.dock-height - App.bar-inset; }
+        }
+
+        if !App.phone-layout: PlayerBar {
+            y: parent.height - self.height;
+            width: parent.width;
+            // Glass: a page snapshot holds what is under the bar, not the bar.
+            visible: !(App.capturing && App.glass);
+        }
+        if App.phone-layout: PhoneDock {
+            y: parent.height - self.height;
+            width: parent.width;
+            visible: !(App.capturing && App.glass);
         }
 
         // Keep the artwork mounted so expansion and collapse use one surface.
@@ -352,23 +432,53 @@ export component MainWindow inherits Window {
         if App.video-active: VideoView {
             visible: !App.capturing;
             x: 16px * (1 - self.expansion);
-            y: (parent.height - App.player-height + 20px) * (1 - self.expansion);
-            width: 100px + (parent.width - 100px) * self.expansion;
-            height: 56px + (parent.height - 56px) * self.expansion;
+            y: (parent.height - App.dock-height + App.video-slot-top) * (1 - self.expansion);
+            width: App.video-slot-w + (parent.width - App.video-slot-w) * self.expansion;
+            height: App.video-slot-h + (parent.height - App.video-slot-h) * self.expansion;
         }
         // One shared panel above both the page and the video surface.
         if App.debug-open && !App.capturing: DebugPanel {
             x: parent.width - 13px - self.width;
             y: 58px;
             limit: parent.height - 58px - 12px;
+            room: parent.width - 26px;
         }
         if App.menu-open && !App.capturing: ContextMenu {
             width: parent.width;
             height: parent.height;
         }
+        // A track being dragged to a playlist: the playlists stand in for the
+        // sidebar until the button is let go.
+        if App.drag-active && !App.capturing: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            // The area the drag started on holds the pointer until release.
+            // Events arriving here mean it is gone (its row was replaced):
+            // the drag is over.
+            TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.move || e.kind == PointerEventKind.down) {
+                        App.drag-cancel();
+                    }
+                }
+            }
+            PlaylistDrop {
+                x: 0px;
+                y: 0px;
+                height: parent.height - App.dock-height;
+            }
+            DragChip {
+                x: clamp(App.drag-x + 14px, 8px, max(8px, parent.width - self.width - 8px));
+                y: clamp(App.drag-y + 12px, 8px, max(8px, parent.height - self.height - 8px));
+            }
+        }
     }
 
-    if App.create-kind != "" && !App.capturing: CreateDialog {
+    if App.create-kind != "" && App.create-kind != "edit-playlist" && !App.capturing: CreateDialog {
+        width: parent.width;
+        height: parent.height;
+    }
+    if App.create-kind == "edit-playlist" && !App.capturing: EditPlaylistDialog {
         width: parent.width;
         height: parent.height;
     }
@@ -377,13 +487,13 @@ export component MainWindow inherits Window {
     if App.update-state != "" && !App.capturing: UpdateToast {
         width: min(520px, parent.width - 32px);
         x: (parent.width - self.width) / 2;
-        y: parent.height - App.player-height - 16px - self.height;
+        y: parent.height - App.dock-height - 16px - self.height;
     }
 
     // One error alert at a time, above the player bar.
     if App.alert-text != "" && !App.capturing: ErrorAlert {
         width: min(520px, parent.width - 32px);
         x: (parent.width - self.width) / 2;
-        y: parent.height - App.player-height - 16px - self.height - (App.update-state != "" && !App.capturing ? 60px + 8px : 0px);
+        y: parent.height - App.dock-height - 16px - self.height - (App.update-state != "" && !App.capturing ? 60px + 8px : 0px);
     }
 }

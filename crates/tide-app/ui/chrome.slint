@@ -2,17 +2,26 @@
 import { TrackMenuButton } from "context-menu.slint";
 import { HoverTip } from "common.slint";
 import { ScrollView } from "std-widgets.slint";
-import { CreateButton, App, Theme, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle, TideLoader } from "common.slint";
+import { CreateButton, App, Theme, Kbd, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle, TideLoader } from "common.slint";
 
-component NavItem inherits Rectangle {
+export component NavItem inherits Rectangle {
+    // Icon only (the narrow sidebar).
+    in property <bool> compact: App.sidebar-compact;
     in property <string> label;
     in property <image> icon;
     in property <string> key;
+    // The key that opens this page (platform::configure_input), drawn at the
+    // right of the row while ⌘ is held.
+    in property <string> hint;
+    // The label is lead + mark + tail; mark is the page key, drawn white.
+    in property <string> lead;
+    in property <string> mark;
+    in property <string> tail;
     property <bool> selected: App.nav-key == key;
     // Official item: 8px pad, 24px icon box, 8px gap, 12px radius, 14px type.
     height: 40px;
     Rectangle {
-        x: App.sidebar-compact ? 9px : 16px;
+        x: root.compact ? 9px : 16px;
         width: parent.width - 2 * self.x;
         border-radius: 12px;
         background: selected ? Theme.selected : ta.has-hover ? #141414 : transparent;
@@ -24,14 +33,14 @@ component NavItem inherits Rectangle {
         }
 
         Icon {
-            x: App.sidebar-compact ? (parent.width - self.width) / 2 : 8px + (24px - self.width) / 2;
+            x: root.compact ? (parent.width - self.width) / 2 : 8px + (24px - self.width) / 2;
             y: (parent.height - self.height) / 2;
             source: root.icon;
             size: 16px;
             tint: selected || ta.has-hover ? Theme.text : Theme.text-secondary;
         }
 
-        if !App.sidebar-compact: Text {
+        if !root.compact && root.mark == "": Text {
             x: 40px;
             height: 100%;
             text: root.label;
@@ -40,11 +49,49 @@ component NavItem inherits Rectangle {
             font-weight: Theme.demibold;
             vertical-alignment: center;
         }
+
+        if !root.compact && root.mark != "": label-row := HorizontalLayout {
+            x: 40px;
+            height: 100%;
+            alignment: start;
+            property <color> ink: selected || ta.has-hover ? Theme.text : Theme.text-secondary;
+            if root.lead != "": Text {
+                text: root.lead;
+                color: label-row.ink;
+                font-size: 14px;
+                font-weight: Theme.demibold;
+                vertical-alignment: center;
+            }
+            // The page key reads white, the rest of the label grey (Settings,
+            // or while ⌘ is held).
+            Text {
+                text: root.mark;
+                color: App.show-key-letters || App.command-held ? Theme.text : label-row.ink;
+                font-size: 14px;
+                font-weight: Theme.demibold;
+                vertical-alignment: center;
+            }
+            if root.tail != "": Text {
+                text: root.tail;
+                color: label-row.ink;
+                font-size: 14px;
+                font-weight: Theme.demibold;
+                vertical-alignment: center;
+            }
+        }
+
+        if !root.compact && App.command-held && root.hint != "": Kbd {
+            x: parent.width - self.width - 10px;
+            y: (parent.height - self.height) / 2;
+            glyph: root.hint;
+        }
     }
 }
 
-component SidebarPlaylist inherits Rectangle {
+export component SidebarPlaylist inherits Rectangle {
     in property <CardData> card;
+    // Artwork only (the narrow sidebar).
+    in property <bool> compact: App.sidebar-compact;
     height: 57px;
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -73,7 +120,7 @@ component SidebarPlaylist inherits Rectangle {
         radius: 3px;
     }
 
-    if !App.sidebar-compact: VerticalLayout {
+    if !root.compact: VerticalLayout {
         x: 68px;
         width: parent.width - 72px - 16px;
         alignment: center;
@@ -87,9 +134,13 @@ component SidebarPlaylist inherits Rectangle {
         }
 
         Text {
+            // An own playlist's "98 TRACKS" and a folder's count are small caps.
+            property <bool> counted: card.kind == "folder" || (card.kind == "playlist" && card.by == "Me");
             text: card.subtitle;
             color: Theme.text-secondary;
-            font-size: 13px;
+            font-size: self.counted ? 10.5px : 13px;
+            font-weight: self.counted ? Theme.medium : 400;
+            letter-spacing: self.counted ? 0.7px : 0px;
             overflow: elide;
         }
     }
@@ -121,21 +172,30 @@ export component Sidebar inherits Rectangle {
         height: parent.height - root.header-height;
         VerticalLayout {
             alignment: start;
-            padding-bottom: 12px;
+            padding-bottom: 12px + App.bar-inset;
             NavItem {
                 label: "Music";
+                hint: "esc";
                 key: "home";
                 icon: @image-url("icons/music.svg");
             }
 
             NavItem {
                 label: "Explore";
+                lead: "";
+                mark: "E";
+                tail: "xplore";
+                hint: "E";
                 key: "explore";
                 icon: @image-url("icons/globe.svg");
             }
 
             NavItem {
                 label: "Feed";
+                lead: "";
+                mark: "F";
+                tail: "eed";
+                hint: "F";
                 key: "feed";
                 icon: @image-url("icons/bell.svg");
             }
@@ -154,37 +214,61 @@ export component Sidebar inherits Rectangle {
                 }
 
                 NavItem {
-                    label: "Media & Radio";
+                    label: "Mixes";
+                    lead: "";
+                    mark: "M";
+                    tail: "ixes";
+                    hint: "M";
                     key: "mixes";
                     icon: @image-url("icons/radio.svg");
                 }
 
                 NavItem {
                     label: "Playlists";
+                    lead: "";
+                    mark: "P";
+                    tail: "laylists";
+                    hint: "P";
                     key: "playlists";
                     icon: @image-url("icons/playlist.svg");
                 }
 
                 NavItem {
                     label: "Albums";
+                    lead: "";
+                    mark: "A";
+                    tail: "lbums";
+                    hint: "A";
                     key: "albums";
                     icon: @image-url("icons/disc.svg");
                 }
 
                 NavItem {
                     label: "Tracks";
+                    lead: "";
+                    mark: "T";
+                    tail: "racks";
+                    hint: "T";
                     key: "tracks";
                     icon: @image-url("icons/music.svg");
                 }
 
                 NavItem {
                     label: "Videos";
+                    lead: "";
+                    mark: "V";
+                    tail: "ideos";
+                    hint: "V";
                     key: "videos";
                     icon: @image-url("icons/video.svg");
                 }
 
                 NavItem {
                     label: "Profiles";
+                    lead: "Pr";
+                    mark: "o";
+                    tail: "files";
+                    hint: "O";
                     key: "profiles";
                     icon: @image-url("icons/key.svg");
                 }
@@ -236,12 +320,191 @@ export component Sidebar inherits Rectangle {
     }
 }
 
+// The user's own playlists in the sidebar's place while a track is dragged
+// (App.drag-active): letting go over one adds the track to it. The area the
+// drag started on keeps the pointer, so nothing here is hovered or clicked:
+// the row under the pointer is worked out from where the pointer is.
+export component PlaylistDrop inherits Rectangle {
+    width: App.drop-panel-width;
+    background: Theme.bg;
+    property <length> row-h: 57px;
+    property <int> rows: App.own-playlists.length;
+    // The recently used playlists lead the list, set off by a hairline.
+    property <int> recent: App.recent-playlists;
+    property <length> gap: recent > 0 ? 17px : 0px;
+    pure function row-y(index: int) -> length {
+        return index * row-h + (index >= recent ? gap : 0px);
+    }
+    // The pointer: over the list, and how far down its content.
+    property <length> px: App.drag-x - root.absolute-position.x;
+    property <length> py: App.drag-y - list.absolute-position.y;
+    property <bool> over: px >= 0 && px < root.width && py >= 0 && py < list.height;
+    property <length> cy: py - list.content-y;
+    property <int> hovered: !over ? -1
+        : cy < recent * row-h ? floor(cy / row-h)
+        : cy < recent * row-h + gap ? -1
+        : recent + floor((cy - recent * row-h - gap) / row-h);
+    property <int> target: hovered < rows ? hovered : -1;
+    function publish() {
+        if (target >= 0) {
+            App.drop-target = App.own-playlists[target].id;
+            App.drop-title = App.own-playlists[target].title;
+            App.drop-source = "panel";
+        } else if (App.drop-source == "panel") {
+            App.drop-target = "";
+            App.drop-title = "";
+            App.drop-source = "";
+        }
+    }
+    // A quick drag can already be over a row when the panel appears.
+    init => { root.publish(); }
+    changed target => { root.publish(); }
+
+    // Near the top or bottom edge the list scrolls, faster the closer.
+    property <length> edge: 64px;
+    property <length> max-scroll: max(0px, list.content-height - list.height);
+    property <float> pull: !over ? 0 : py < edge ? (edge - py) / edge : py > list.height - edge ? (list.height - edge - py) / edge : 0;
+    Timer {
+        interval: 16ms;
+        running: root.pull != 0 && root.max-scroll > 0;
+        triggered => {
+            list.content-y = clamp(list.content-y + root.pull * 16px, -root.max-scroll, 0px);
+        }
+    }
+
+    // The same place as the sidebar's "All playlists" heading, below the
+    // traffic lights.
+    Text {
+        x: 24px;
+        y: 64px + 24px;
+        text: "Add to playlist";
+        color: Theme.text-dim;
+        font-size: 14px;
+        font-weight: Theme.bold;
+    }
+
+    if rows == 0: Text {
+        x: 24px;
+        y: 64px + 54px + 12px;
+        width: parent.width - 48px;
+        text: "No playlists of your own yet";
+        color: Theme.text-secondary;
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+
+    list := Flickable {
+        y: 64px + 54px;
+        height: parent.height - self.y;
+        content-height: root.row-y(root.rows) + 12px;
+        interactive: false;
+        if root.recent > 0: Rectangle {
+            x: 24px;
+            y: root.recent * root.row-h + 8px;
+            width: parent.width - 48px;
+            height: 1px;
+            background: #ffffff1f;
+        }
+        for card[index] in App.own-playlists: row := Rectangle {
+            property <bool> on: root.target == index;
+            y: root.row-y(index);
+            height: root.row-h;
+            Rectangle {
+                x: 10px;
+                width: parent.width - 20px;
+                border-radius: 8px;
+                background: row.on ? #1c1c1c : transparent;
+                border-width: row.on ? 1px : 0px;
+                border-color: App.accent;
+            }
+
+            CardArt {
+                x: 16px;
+                width: 40px;
+                height: 40px;
+                card: card;
+                radius: 3px;
+            }
+
+            VerticalLayout {
+                x: 68px;
+                width: parent.width - 72px - 16px;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: card.title;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: row.on ? "Release to add" : card.subtitle;
+                    color: row.on ? App.accent : Theme.text-secondary;
+                    font-size: 13px;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: #141414;
+    }
+}
+
+// The dragged track, beside the pointer. Under PlaylistDrop's playlists it
+// says where the track would go.
+export component DragChip inherits Rectangle {
+    property <bool> aimed: App.drop-title != "";
+    property <length> text-w: max(title.preferred-width, where.preferred-width);
+    width: min(300px, 54px + self.text-w + 14px);
+    height: 48px;
+    border-radius: 10px;
+    background: #2d2d2d;
+    border-width: 1px;
+    border-color: self.aimed ? App.accent : #ffffff1f;
+    Cover {
+        x: 6px;
+        width: 36px;
+        height: 36px;
+        radius: 3px;
+        source: App.drag-cover;
+    }
+
+    title := Text {
+        x: 54px;
+        y: 7px;
+        width: parent.width - self.x - 14px;
+        text: App.drag-title;
+        color: Theme.text;
+        font-size: 14px;
+        font-weight: Theme.demibold;
+        overflow: elide;
+    }
+
+    where := Text {
+        x: 54px;
+        y: 26px;
+        width: parent.width - self.x - 14px;
+        text: root.aimed ? "Add to " + App.drop-title : App.drag-artist;
+        color: root.aimed ? App.accent : Theme.text-secondary;
+        font-size: 12px;
+        overflow: elide;
+    }
+}
+
 // Dev panel under the computer button: chunk download grid, recent errors and
 // the verbose log. A plain overlay, not a popup, so the rest of the window
 // stays clickable. Scrolls when it is taller than the space below the top bar.
 export component DebugPanel inherits Rectangle {
     in property <length> limit: 600px;
-    width: 420px;
+    // The window's width less the margins: narrower windows get a narrower panel.
+    in property <length> room: 420px;
+    width: min(420px, root.room);
     height: min(root.limit, panel-layout.preferred-height);
     clip: true;
     background: #141414;
@@ -523,10 +786,16 @@ export component DebugPanel inherits Rectangle {
     }
 }
 
-// Asks for the name of a new playlist or folder, or confirms a folder delete.
+// Asks for the name of a new playlist or folder, or confirms deleting one or
+// making a playlist public.
 export component CreateDialog inherits Rectangle {
-    property <bool> removing: App.create-kind == "delete-folder";
+    property <bool> removing-playlist: App.create-kind == "delete-playlist";
+    property <bool> publishing: App.create-kind == "publish-playlist";
+    // Nothing to type: a question with Cancel and one way forward.
+    property <bool> removing: App.create-kind == "delete-folder" || removing-playlist || publishing;
     property <bool> renaming: App.create-kind == "rename-folder";
+    // Phone width: the public notice takes three lines.
+    property <length> extra: root.publishing && root.width < 480px ? 22px : 0px;
     background: #000000b0;
     // Clicking outside the card cancels.
     TouchArea {
@@ -537,7 +806,7 @@ export component CreateDialog inherits Rectangle {
 
     function submit() {
         if (root.removing) {
-            App.create-in-collection("delete-folder", App.create-name);
+            App.create-in-collection(App.create-kind, App.create-name);
             App.create-kind = "";
             return;
         }
@@ -548,8 +817,8 @@ export component CreateDialog inherits Rectangle {
     }
 
     Rectangle {
-        width: 420px;
-        height: root.removing ? 180px : 214px;
+        width: min(420px, root.width - 32px);
+        height: (root.publishing ? 200px : root.removing ? 180px : 214px) + root.extra;
         border-radius: 14px;
         background: #1c1c1c;
         border-width: 1px;
@@ -559,7 +828,7 @@ export component CreateDialog inherits Rectangle {
         Text {
             x: 24px;
             y: 22px;
-            text: root.removing ? "Delete folder" : root.renaming ? "Rename folder" : App.create-kind == "folder" ? "Create folder" : "Create playlist";
+            text: root.publishing ? "Make it public" : root.removing-playlist ? "Delete playlist" : root.removing ? "Delete folder" : root.renaming ? "Rename folder" : App.create-kind == "folder" ? "Create folder" : "Create playlist";
             color: Theme.text;
             font-size: 20px;
             font-weight: Theme.bold;
@@ -569,9 +838,10 @@ export component CreateDialog inherits Rectangle {
             x: 24px;
             y: 70px;
             width: parent.width - 48px;
-            text: "“" + App.create-name + "”";
+            text: root.publishing ? "Your playlist will be visible on your Profile and accessible by anyone." : "“" + App.create-name + "”";
             color: Theme.text-secondary;
             font-size: 15px;
+            wrap: root.publishing ? word-wrap : no-wrap;
             overflow: elide;
         }
 
@@ -608,7 +878,7 @@ export component CreateDialog inherits Rectangle {
 
         Rectangle {
             x: parent.width - 24px - 110px - 12px - 110px;
-            y: root.removing ? 112px : 146px;
+            y: (root.publishing ? 132px : root.removing ? 112px : 146px) + root.extra;
             width: 110px;
             height: 44px;
             border-radius: 22px;
@@ -630,7 +900,7 @@ export component CreateDialog inherits Rectangle {
 
         Rectangle {
             x: parent.width - 24px - 110px;
-            y: root.removing ? 112px : 146px;
+            y: (root.publishing ? 132px : root.removing ? 112px : 146px) + root.extra;
             width: 110px;
             height: 44px;
             border-radius: 22px;
@@ -643,7 +913,7 @@ export component CreateDialog inherits Rectangle {
             }
 
             Text {
-                text: root.removing ? "Delete" : root.renaming ? "Rename" : "Create";
+                text: root.publishing ? "Confirm" : root.removing ? "Delete" : root.renaming ? "Rename" : "Create";
                 color: black;
                 font-size: 15px;
                 font-weight: Theme.demibold;
@@ -662,6 +932,209 @@ export component CreateDialog inherits Rectangle {
     }
 }
 
+
+// Title, description and sharing of one of the user's own playlists.
+export component EditPlaylistDialog inherits Rectangle {
+    property <bool> public: App.edit-public;
+    property <int> typed: description.text.character-count;
+    property <bool> valid: name.text != "" && typed <= 500;
+    // Phone width: a small cover beside the title, the description under both.
+    property <bool> narrow: root.width < 560px;
+    property <length> cover: root.narrow ? 72px : 150px;
+    property <length> field-x: 28px + root.cover + (root.narrow ? 16px : 24px);
+    property <length> notes-x: root.narrow ? 28px : root.field-x;
+    background: #000000b0;
+    // Clicking outside the card cancels.
+    TouchArea {
+        clicked => {
+            App.create-kind = "";
+        }
+    }
+
+    function submit() {
+        if (root.valid) {
+            App.save-playlist(name.text, description.text, root.public);
+            App.create-kind = "";
+        }
+    }
+
+    Rectangle {
+        width: min(640px, root.width - 32px);
+        height: 552px;
+        border-radius: 14px;
+        background: #1c1c1c;
+        border-width: 1px;
+        border-color: #2a2a2a;
+        TouchArea { }
+
+        Text {
+            x: 28px;
+            y: 24px;
+            text: "Edit playlist";
+            color: Theme.text;
+            font-size: 20px;
+            font-weight: Theme.bold;
+        }
+
+        IconButton {
+            x: parent.width - self.width - 16px;
+            y: 18px;
+            icon: @image-url("icons/x.svg");
+            clicked => {
+                App.create-kind = "";
+            }
+        }
+
+        Cover {
+            x: 28px;
+            y: 76px;
+            width: root.cover;
+            height: root.cover;
+            source: App.edit-cover;
+            radius: 3px;
+        }
+
+        Rectangle {
+            x: root.field-x;
+            y: 76px;
+            width: parent.width - self.x - 28px;
+            height: 70px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: name.has-focus ? #4a4a4a : Theme.border;
+            Text {
+                x: 16px;
+                y: 12px;
+                text: "Title";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: Theme.bold;
+            }
+
+            name := EditableInput {
+                x: 16px;
+                y: 38px;
+                width: parent.width - 32px;
+                height: 20px;
+                color: Theme.text-secondary;
+                font-size: 15px;
+                single-line: true;
+                vertical-alignment: center;
+                selection-background-color: #4a4a4a;
+                accepted => {
+                    root.submit();
+                }
+            }
+        }
+
+        Rectangle {
+            x: root.notes-x;
+            y: root.narrow ? 164px : 158px;
+            width: parent.width - self.x - 28px;
+            height: root.narrow ? 180px : 200px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: description.has-focus ? #4a4a4a : Theme.border;
+            clip: true;
+            if description.text == "": Text {
+                x: 16px;
+                y: 14px;
+                text: "Write a description";
+                color: #aeafb2;
+                font-size: 15px;
+                font-weight: Theme.demibold;
+            }
+            description := EditableInput {
+                x: 16px;
+                y: 14px;
+                width: parent.width - 32px;
+                height: parent.height - 28px;
+                color: Theme.text;
+                font-size: 14px;
+                single-line: false;
+                wrap: word-wrap;
+                selection-background-color: #4a4a4a;
+            }
+        }
+
+        Text {
+            x: root.notes-x + 6px;
+            y: root.narrow ? 352px : 366px;
+            text: root.typed + "/500 characters";
+            color: root.typed > 500 ? #ff6b6b : Theme.text-secondary;
+            font-size: 12px;
+            font-weight: Theme.medium;
+        }
+
+        Rectangle {
+            x: 28px;
+            y: 396px;
+            width: parent.width - 56px;
+            height: 76px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+            Text {
+                x: 18px;
+                y: 16px;
+                text: "Make it public";
+                color: Theme.text;
+                font-size: 16px;
+                font-weight: Theme.bold;
+            }
+
+            Text {
+                x: 18px;
+                y: root.narrow ? 38px : 42px;
+                width: parent.width - 36px - 62px;
+                height: root.narrow ? 34px : self.preferred-height;
+                text: "Your playlist will be visible on your Profile and accessible by anyone.";
+                color: Theme.text-secondary;
+                font-size: root.narrow ? 12px : 13px;
+                wrap: root.narrow ? word-wrap : no-wrap;
+                overflow: elide;
+            }
+
+            Toggle {
+                x: parent.width - self.width - 18px;
+                on: root.public;
+                toggled(on) => {
+                    root.public = on;
+                }
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 28px - 110px;
+            y: 488px;
+            width: 110px;
+            height: 44px;
+            border-radius: 22px;
+            background: !root.valid ? #5a5a5a : save.has-hover ? #e6e6e6 : white;
+            save := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.submit();
+                }
+            }
+
+            Text {
+                text: "Save";
+                color: black;
+                font-size: 15px;
+                font-weight: Theme.demibold;
+            }
+        }
+    }
+
+    init => {
+        name.text = App.create-name;
+        description.text = App.edit-description;
+        // The cursor goes after the title (the offsets are clamped to its end).
+        name.set-selection-offsets(100000, 100000);
+        name.focus();
+    }
+}
 
 // The single error alert. Shows `App.alert-text`; a new error replaces it.
 export component ErrorAlert inherits Rectangle {
@@ -793,7 +1266,8 @@ export component UpdateToast inherits Rectangle {
         if state == "available": VerticalLayout {
             alignment: center;
             ToastButton {
-                text: "Skip this version";
+                // Phone width: the title keeps room beside the buttons.
+                text: root.width < 440px ? "Skip" : "Skip this version";
                 clicked => { App.update-skip(); }
             }
         }
@@ -840,125 +1314,127 @@ export component UpdateToast inherits Rectangle {
     }
 }
 
-// One key of a shortcut hint (⌘F in the search field).
-component Kbd inherits Rectangle {
-    in property <string> glyph;
-    width: max(20px, label.preferred-width + 10px);
-    height: 20px;
-    border-radius: 5px;
-    background: #2a2a2a;
-    border-width: 1px;
-    border-color: #3a3a3a;
-    label := Text {
-        text: root.glyph;
+// The search pill: the top bar's, and in phone layout a full-width row on
+// Explore and the search results. ⌘F (App.focus-search) focuses whichever
+// one is active, also one that appears after the shortcut.
+export component SearchField inherits Rectangle {
+    in property <bool> active: true;
+    out property <bool> focused: input.has-focus;
+    out property <bool> hovered: search-ta.has-hover;
+    callback activity();
+    height: 39px;
+    border-radius: 19.5px;
+    background: Theme.pill;
+    border-width: input.has-focus ? 1px : 0px;
+    border-color: #5a5a5a;
+
+    // Focus ring sits just outside the pill.
+    if input.has-focus: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 22.5px;
+        border-width: 1.5px;
+        border-color: #ffffff;
+    }
+    search-ta := TouchArea {
+        enabled: root.active;
+        clicked => { input.focus(); root.activity(); }
+        changed mouse-x => { root.activity(); }
+        changed mouse-y => { root.activity(); }
+    }
+    Icon {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/search.svg");
+        size: 15px;
+        tint: Theme.text-secondary;
+    }
+
+    if input.text == "": Text {
+        x: 48px;
+        y: 0px;
+        height: parent.height;
+        text: "Search";
         color: Theme.text-secondary;
-        font-size: 11px;
-        font-weight: Theme.medium;
-        horizontal-alignment: center;
+        font-size: 15px;
         vertical-alignment: center;
+    }
+    input := EditableInput {
+        enabled: root.active;
+        x: 48px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 48px - (self.text == "" ? 58px : 40px);
+        height: 20px;
+        text <=> App.search-text;
+        color: Theme.text;
+        font-size: 15px;
+        single-line: true;
+        vertical-alignment: center;
+        // On macOS the caret is the selection colour, not the text colour.
+        selection-background-color: #ffffff;
+        selection-foreground-color: #111111;
+        accepted => {
+            App.search(self.text);
+        }
+    }
+
+    property <bool> input-focused: input.has-focus;
+    changed input-focused => { App.search-focused = self.input-focused; }
+    property <int> focus-request: App.focus-search;
+    changed focus-request => { root.take-focus(); }
+    init => { root.take-focus(); }
+    function take-focus() {
+        if (root.active && App.focus-search != App.focus-search-seen) {
+            App.focus-search-seen = App.focus-search;
+            input.focus();
+            input.select-all();
+            root.activity();
+        }
+    }
+
+    if input.text == "": HorizontalLayout {
+        x: parent.width - self.preferred-width - 10px;
+        y: (parent.height - 20px) / 2;
+        height: 20px;
+        spacing: 4px;
+        Kbd { glyph: "⌘"; }
+        Kbd { glyph: "F"; }
+    }
+
+    if input.text != "": IconButton {
+        x: parent.width - 40px;
+        y: (parent.height - self.height) / 2;
+        icon: @image-url("icons/x.svg");
+        size: 15px;
+        tint: Theme.text;
+        clicked => {
+            App.search-text = "";
+            input.focus();
+        }
     }
 }
 
 // Shared by the page header and full-window video player.
 export component HeaderTools inherits Rectangle {
     in property <bool> active: true;
-    out property <bool> engaged: input.has-focus || menu.is-open || search-ta.has-hover || debug-btn.hovered || pta.has-hover;
+    // Off where there is no room for the search field (narrow Now Playing,
+    // whose width is then just the debug and profile buttons: 101px).
+    in property <bool> search: true;
+    out property <bool> engaged: field.focused || menu.is-open || field.hovered || debug-btn.hovered || pta.has-hover;
     callback activity();
     width: 407px;
     height: 64px;
 
     // Search. Right edge sits left of the debug circle.
-    Rectangle {
+    field := SearchField {
+        visible: root.search;
+        active: root.active && root.search;
         x: parent.width - 101px - self.width;
         y: (parent.height - self.height) / 2;
         width: parent.width - 101px;
-        height: 39px;
-        border-radius: 19.5px;
-        background: Theme.pill;
-        border-width: input.has-focus ? 1px : 0px;
-        border-color: #5a5a5a;
-
-        // Focus ring sits just outside the pill.
-        if input.has-focus: Rectangle {
-            x: -3px;
-            y: -3px;
-            width: parent.width + 6px;
-            height: parent.height + 6px;
-            border-radius: 22.5px;
-            border-width: 1.5px;
-            border-color: #ffffff;
-        }
-        search-ta := TouchArea {
-            enabled: root.active;
-            clicked => { input.focus(); root.activity(); }
-            changed mouse-x => { root.activity(); }
-            changed mouse-y => { root.activity(); }
-        }
-        Icon {
-            x: 14px;
-            y: (parent.height - self.height) / 2;
-            source: @image-url("icons/search.svg");
-            size: 15px;
-            tint: Theme.text-secondary;
-        }
-
-        if input.text == "": Text {
-            x: 48px;
-            y: 0px;
-            height: parent.height;
-            text: "Search";
-            color: Theme.text-secondary;
-            font-size: 15px;
-            vertical-alignment: center;
-        }
-        input := EditableInput {
-            enabled: root.active;
-            x: 48px;
-            y: (parent.height - self.height) / 2;
-            width: parent.width - 48px - (self.text == "" ? 58px : 40px);
-            height: 20px;
-            text <=> App.search-text;
-            color: Theme.text;
-            font-size: 15px;
-            single-line: true;
-            vertical-alignment: center;
-            // On macOS the caret is the selection colour, not the text colour.
-            selection-background-color: #ffffff;
-            selection-foreground-color: #111111;
-            accepted => {
-                App.search(self.text);
-            }
-        }
-
-        property <int> focus-request: App.focus-search;
-        changed focus-request => {
-            if (root.active) {
-                input.focus();
-                input.select-all();
-                root.activity();
-            }
-        }
-
-        if input.text == "": HorizontalLayout {
-            x: parent.width - self.preferred-width - 10px;
-            y: (parent.height - 20px) / 2;
-            height: 20px;
-            spacing: 4px;
-            Kbd { glyph: "⌘"; }
-            Kbd { glyph: "F"; }
-        }
-
-        if input.text != "": IconButton {
-            x: parent.width - 40px;
-            y: (parent.height - self.height) / 2;
-            icon: @image-url("icons/x.svg");
-            size: 15px;
-            tint: Theme.text;
-            clicked => {
-                App.search-text = "";
-                input.focus();
-            }
-        }
+        activity => { root.activity(); }
     }
 
     // Dev chunk monitor
@@ -1072,11 +1548,14 @@ export component HeaderTools inherits Rectangle {
 
 export component TopBar inherits Rectangle {
     height: 64px;
+    // Phone layout has no sidebar: the bar starts right of the traffic lights
+    // and the search moves into the pages (Explore and the results).
+    property <length> shift: App.phone-layout ? 60px : 0px;
     DragArea { }
 
     // Back / forward
     Rectangle {
-        x: 18px;
+        x: 18px + root.shift;
         y: 13px;
         width: 76px;
         height: 39px;
@@ -1116,7 +1595,7 @@ export component TopBar inherits Rectangle {
     // Divider, then the tide mark: still while the page is current, filling
     // with water while a page shown from cache is checked against the server.
     Rectangle {
-        x: 106px;
+        x: 106px + root.shift;
         y: 23px;
         width: 1px;
         height: 19px;
@@ -1124,7 +1603,7 @@ export component TopBar inherits Rectangle {
     }
 
     Rectangle {
-        x: 117px;
+        x: 117px + root.shift;
         y: 13px;
         width: 36px;
         height: 39px;
@@ -1147,8 +1626,9 @@ export component TopBar inherits Rectangle {
     }
 
     HeaderTools {
-        width: min(407px, parent.width - 165px);
+        width: App.phone-layout ? 101px : min(407px, parent.width - 165px);
         x: parent.width - self.width;
+        search: !App.phone-layout;
         active: !App.video-open && !App.show-now-playing;
     }
 }
@@ -1470,6 +1950,8 @@ component PlayerLink inherits Rectangle {
     in property <int> font-weight: 400;
     in property <length> max-w: 200px;
     in property <bool> clickable: false;
+    // The label is the playing track's name: it can be dragged to a playlist.
+    in property <bool> drags-track: false;
     callback clicked();
     callback context-requested(length, length);
     out property <bool> hovered: ta.has-hover;
@@ -1506,14 +1988,28 @@ component PlayerLink inherits Rectangle {
     }
 
     ta := TouchArea {
-        mouse-cursor: root.clickable ? pointer : default;
+        mouse-cursor: App.drag-active ? grabbing : root.clickable ? pointer : default;
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                 root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                App.drag-release(true);
+            }
+            if (e.kind == PointerEventKind.cancel) {
+                App.drag-release(false);
+            }
+        }
+        moved => {
+            if (root.drags-track && self.pressed) {
+                App.drag-move(App.current-id, App.np-title, App.np-artist, App.np-cover, self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
         }
         clicked => {
-            root.clicked();
+            // The release that ends a drag is not a click.
+            if (!App.drag-gesture) {
+                root.clicked();
+            }
         }
         changed has-hover => {
             if !self.has-hover {
@@ -1522,7 +2018,7 @@ component PlayerLink inherits Rectangle {
         }
     }
 
-    if root.armed && ta.has-hover: HoverTip {
+    if root.armed && ta.has-hover && !App.drag-active: HoverTip {
         x: (parent.width - self.width) / 2;
         y: -(self.height + 8px);
         text: root.tip;
@@ -1699,6 +2195,18 @@ component Scrubber inherits Rectangle {
                 background: #ffffff24;
             }
 
+            // Downloaded / buffered range: a dimmer white that glides forward
+            // as chunks land, behind the played fill.
+            if App.has-track: Rectangle {
+                x: 0px;
+                width: parent.width * clamp(App.loaded, 0.0, 1.0);
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: root.active ? #ffffff40 : #ffffff2e;
+                animate width { duration: 450ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                animate background { duration: 120ms; }
+            }
+
             // Played / scrubbed progress fill
             Rectangle {
                 x: 0px;
@@ -1753,11 +2261,30 @@ export component PlayerBar inherits Rectangle {
     in property <bool> overlay: false;
     property <bool> compact: root.width < 960px;
     height: App.player-height;
-    background: overlay ? transparent : Theme.player-bg;
+    // Glass: the marker brush the Skia renderer draws as a backdrop blur
+    // (vendor/i-slint-renderer-skia/glass.rs). Its second stop is the tint.
+    // Not while Now Playing or the video hides the bar anyway.
+    property <bool> glass: !overlay && App.glass && !(App.bar-covered && (App.show-now-playing || App.video-open));
+    background: overlay ? transparent
+        : root.glass ? @conic-gradient(#474c5301 0deg, #34343680 360deg)
+        : Theme.player-bg;
 
-    // A video's thumbnail is 16:9; the titles move right to make room.
-    property <length> art-w: App.video-active ? 100px : 62px;
-    property <length> text-x: overlay ? 32px : 16px + art-w + 15px;
+    // Pages run beneath the bar: nothing aimed at the bar reaches them.
+    if !overlay: TouchArea {
+        scroll-event(e) => { return accept; }
+    }
+
+    // A video's thumbnail is 16:9; the titles move right to make room. In the
+    // page's compact bar (720 - 960 wide) the artwork and titles share the
+    // first row with the transport, left of it; Now Playing's own compact
+    // bar shows no titles (Now Playing does).
+    property <bool> titles: !root.compact || !root.overlay;
+    property <length> art-w: App.video-active ? App.video-slot-w : App.art-slot-size;
+    property <length> text-x: overlay ? 32px : 16px + art-w + (root.compact ? 12px : 15px);
+    // The left edge of the transport row (centred).
+    property <length> transport-x: (root.width - 232px) / 2;
+    // Compact: how wide the titles may be, up to the transport.
+    property <length> compact-text-w: max(40px, root.transport-x - 16px - root.text-x);
 
     function open-track-menu(x: length, y: length) {
         if (App.video-active) {
@@ -1769,8 +2296,10 @@ export component PlayerBar inherits Rectangle {
 
     // Left: artwork + titles
     TouchArea {
-        visible: !root.compact;
-        width: root.width * 0.32;
+        visible: root.titles;
+        width: root.compact ? root.transport-x - 8px : root.width * 0.32;
+        height: root.compact ? 72px : root.height;
+        y: 0px;
         enabled: App.has-track;
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
@@ -1779,20 +2308,35 @@ export component PlayerBar inherits Rectangle {
         }
     }
 
-    if !overlay && !App.video-active && !root.compact: Rectangle {
+    if !overlay && !App.video-active: Rectangle {
         x: 16px;
-        y: 17px;
+        y: App.art-slot-top;
         width: root.art-w;
-        height: 62px;
+        height: App.art-slot-size;
         if !App.has-track: Cover { source: App.np-cover; }
+        // Click opens Now Playing; dragged, the track goes to a playlist.
         TouchArea {
-            mouse-cursor: pointer;
+            mouse-cursor: App.drag-active ? grabbing : pointer;
             pointer-event(e) => {
                 if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                     root.open-track-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                 }
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                    App.drag-release(true);
+                }
+                if (e.kind == PointerEventKind.cancel) {
+                    App.drag-release(false);
+                }
+            }
+            moved => {
+                if (App.has-track && self.pressed) {
+                    App.drag-move(App.current-id, App.np-title, App.np-artist, App.np-cover, self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
             }
             clicked => {
+                if (App.drag-gesture) {
+                    return;
+                }
                 if (App.video-active) {
                     App.open-video();
                 } else {
@@ -1802,10 +2346,11 @@ export component PlayerBar inherits Rectangle {
         }
     }
     HorizontalLayout {
-        visible: !root.compact;
+        visible: root.titles;
         x: root.text-x;
         y: 0;
-        width: max(120px, root.width * 0.32 - self.x);
+        height: root.compact ? 72px : root.height;
+        width: root.compact ? root.compact-text-w : max(120px, root.width * 0.32 - self.x);
         alignment: start;
         spacing: 14px;
         VerticalLayout {
@@ -1819,6 +2364,7 @@ export component PlayerBar inherits Rectangle {
                     context-requested(x, y) => { root.open-track-menu(x, y); }
                     text: App.has-track ? App.np-title : "Nothing playing";
                     clickable: App.video-active || App.np-album-id != "";
+                    drags-track: App.has-track && !App.video-active;
                     clicked => {
                         if (App.video-active) { App.open-video(); }
                         else { App.open-now-playing-album(); }
@@ -1827,7 +2373,7 @@ export component PlayerBar inherits Rectangle {
                     text-color: Theme.text;
                     font-size: 15px;
                     font-weight: 500;
-                    max-w: max(80px, root.width * 0.32 - 220px);
+                    max-w: root.compact ? root.compact-text-w - (App.np-explicit ? 24px : 0px) : max(80px, root.width * 0.32 - 220px);
                 }
 
                 if App.np-explicit: VerticalLayout {
@@ -1837,7 +2383,7 @@ export component PlayerBar inherits Rectangle {
             }
 
             artist-link := ArtistLinks {
-                width: min(self.preferred-width, max(80px, root.width * 0.32 - 200px));
+                width: min(self.preferred-width, root.compact ? root.compact-text-w : max(80px, root.width * 0.32 - 200px));
                 artists: App.has-track ? App.np-artists : [];
                 text: App.has-track ? App.np-artist : "Pick something to play";
                 text-color: Theme.text-secondary;
@@ -1862,7 +2408,8 @@ export component PlayerBar inherits Rectangle {
                 }
             }
 
-            if App.np-context != "": HorizontalLayout {
+            // Compact, two lines: the context is Now Playing's.
+            if App.np-context != "" && !root.compact: HorizontalLayout {
                 alignment: start;
                 spacing: 5px;
                 VerticalLayout {
@@ -1885,8 +2432,9 @@ export component PlayerBar inherits Rectangle {
             }
         }
 
+        // Compact: the heart and More are in Now Playing (and the right-click).
         VerticalLayout {
-            visible: App.has-track;
+            visible: App.has-track && !root.compact;
             alignment: center;
             HorizontalLayout {
                 spacing: 0px;
@@ -1961,6 +2509,8 @@ export component PlayerBar inherits Rectangle {
         alignment: center;
         spacing: 8px;
         CircleButton {
+            accessible-role: button;
+            accessible-label: "Shuffle";
             icon: @image-url("icons/shuffle.svg");
             size: 19px;
             tint: App.shuffle ? App.accent : Theme.text-secondary;
@@ -1999,6 +2549,8 @@ export component PlayerBar inherits Rectangle {
         }
 
         CircleButton {
+            accessible-role: button;
+            accessible-label: "Repeat";
             icon: App.repeat-mode == 2 ? @image-url("icons/repeat-one.svg") : @image-url("icons/repeat.svg");
             size: 19px;
             tint: App.repeat-mode != 0 ? App.accent : Theme.text-secondary;
@@ -2014,26 +2566,33 @@ export component PlayerBar inherits Rectangle {
         x: 0px;
         y: 64px;
         width: root.width;
-        bar-w: root.compact ? root.width - 100px : min(728px, root.width * 0.354);
+        // In Now Playing the times stay inside the rounded glass pane.
+        bar-w: root.compact ? root.width - (root.overlay ? 140px : 100px) : min(728px, root.width * 0.354);
         seek(v) => {
             App.seek(v);
         }
     }
 
-    // Right: queue, output, volume, DSP, now playing, quality
+    // Right: queue, output, volume, DSP, now playing, quality. Compact, a
+    // row below the scrubber; in Now Playing (overlay) that row spreads to
+    // the corners, the buttons left and the quality right.
+    property <bool> corners: root.overlay && root.compact;
     HorizontalLayout {
-        y: root.compact ? 96px : 0px;
+        y: root.corners ? 88px : root.compact ? 96px : 0px;
         height: root.compact ? 48px : root.height;
-        x: root.compact ? (root.width - self.width) / 2 : root.width - self.width - 20px;
-        width: self.preferred-width;
-        alignment: end;
+        x: root.corners ? 14px : root.compact ? (root.width - self.width) / 2 : root.width - self.width - 20px;
+        width: root.corners ? root.width - 28px : self.preferred-width;
+        alignment: root.corners ? space-between : end;
         spacing: 8px;
         VerticalLayout {
             alignment: center;
             HorizontalLayout {
-                spacing: 8px;
+                // Tighter in the corners, down to a 320px window.
+                spacing: root.corners ? 2px : 8px;
                 // While a video is on screen this opens "Similar videos" instead.
                 IconButton {
+                    accessible-role: button;
+                    accessible-label: "Play queue";
                     icon: @image-url("icons/queue.svg");
                     size: 18px;
                     tint: (App.video-open ? App.video-similar-open : App.nav-key == "queue") ? Theme.text : Theme.text-secondary;
@@ -2073,7 +2632,11 @@ export component PlayerBar inherits Rectangle {
                     }
                 }
 
-                IconButton {
+                // Opens Now Playing: not needed in it once space is short
+                // (Minimize closes it). Below 1060px the one-row bar has no
+                // room for it beside the centred transport; the artwork
+                // opens Now Playing there.
+                if !root.corners && (root.compact || root.width >= 1060px): IconButton {
                     icon: @image-url("icons/pip.svg");
                     size: 18px;
                     tint: App.show-now-playing || App.video-open ? Theme.text : Theme.text-secondary;
@@ -2086,7 +2649,7 @@ export component PlayerBar inherits Rectangle {
         }
 
         Rectangle {
-            width: 12px;
+            width: root.corners ? 0px : 12px;
         }
 
         VerticalLayout {
@@ -2107,9 +2670,9 @@ export component PlayerBar inherits Rectangle {
         property <bool> with-signal: App.signal-quality != "";
         property <length> quality-width: App.video-active ? (self.with-signal ? 201px : 200px) : 0px;
         close-policy: close-on-click-outside;
-        x: root.width - 20px - self.width;
+        x: max(8px, root.width - 20px - self.width);
         y: -(self.height + 10px);
-        width: self.quality-width + (self.with-signal ? 360px : 0px);
+        width: min(root.width - 16px, self.quality-width + (self.with-signal ? 360px : 0px));
         height: max(self.with-signal ? 262px + App.signal-stages.length * 58px : 0px, App.video-active ? 68px + max(1, App.video-qualities.length) * 40px : 0px);
         SignalPathPanel {
             show-quality: App.video-active;
@@ -2186,6 +2749,204 @@ export component PlayerBar inherits Rectangle {
                     font-size: 14px;
                     overflow: elide;
                 }
+            }
+        }
+    }
+}
+
+// One tab of the phone layout's tab bar: an icon, on a rounded plate when it
+// is the page on screen.
+component DockTab inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> key;
+    in property <bool> selected;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { App.navigate(root.key); }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { App.navigate(root.key); }
+    }
+    Rectangle {
+        width: min(parent.width - 8px, 80px);
+        height: 40px;
+        border-radius: 20px;
+        background: root.selected ? #ffffff1f : ta.has-hover ? #ffffff0d : transparent;
+        animate background { duration: 150ms; }
+    }
+    Icon {
+        source: root.icon;
+        size: 22px;
+        tint: root.selected || ta.has-hover ? Theme.text : Theme.text-secondary;
+    }
+}
+
+// Phone layout (App.phone-layout): what the sidebar and the player bar do on
+// a wide window, at the bottom edge. A mini player (artwork, title, artist,
+// play / pause and next; the rest opens Now Playing) over a tab bar of the
+// four main places. Glass like the player bar, under the same rules: the
+// pages run beneath it by App.bar-inset.
+export component PhoneDock inherits Rectangle {
+    height: App.dock-height;
+    property <bool> glass: App.glass && !(App.bar-covered && (App.show-now-playing || App.video-open));
+    background: root.glass ? @conic-gradient(#474c5301 0deg, #34343680 360deg) : Theme.player-bg;
+
+    // Pages run beneath the dock: nothing aimed at it reaches them.
+    TouchArea {
+        scroll-event(e) => { return accept; }
+    }
+
+    if App.has-track: mini := Rectangle {
+        y: 0px;
+        height: App.mini-height;
+        property <length> art-w: App.video-active ? App.video-slot-w : App.art-slot-size;
+        accessible-role: button;
+        accessible-label: "Now Playing";
+        accessible-action-default => { if (App.video-active) { App.open-video(); } else { App.open-now-playing(); } }
+
+        // How far the track has played: a hairline along the top edge.
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 2px;
+            background: #ffffff14;
+            Rectangle {
+                x: 0px;
+                width: parent.width * clamp(App.progress, 0, 1);
+                background: App.playing ? App.accent : #b3b3b3;
+            }
+        }
+
+        // The artwork is Now Playing's (it grows from here); the video is the
+        // video view's. Clicking the row opens either; dragged, the track
+        // goes to a playlist, as from the player bar.
+        TouchArea {
+            mouse-cursor: App.drag-active ? grabbing : pointer;
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                    if (App.video-active) {
+                        App.request-card-menu(App.video-card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    } else {
+                        App.request-track-menu(App.current-id, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    }
+                }
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                    App.drag-release(true);
+                }
+                if (e.kind == PointerEventKind.cancel) {
+                    App.drag-release(false);
+                }
+            }
+            moved => {
+                if (self.pressed && !App.video-active) {
+                    App.drag-move(App.current-id, App.np-title, App.np-artist, App.np-cover, self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
+            clicked => {
+                if (App.drag-gesture) {
+                    return;
+                }
+                if (App.video-active) {
+                    App.open-video();
+                } else {
+                    App.open-now-playing();
+                }
+            }
+        }
+
+        VerticalLayout {
+            x: 16px + mini.art-w + 12px;
+            width: parent.width - self.x - 112px;
+            alignment: center;
+            spacing: 2px;
+            HorizontalLayout {
+                alignment: start;
+                spacing: 6px;
+                Text {
+                    text: App.np-title;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: Theme.demibold;
+                    overflow: elide;
+                }
+                if App.np-explicit: VerticalLayout {
+                    alignment: center;
+                    ExplicitBadge { }
+                }
+            }
+            Text {
+                text: App.np-artist;
+                color: Theme.text-secondary;
+                font-size: 13px;
+                overflow: elide;
+            }
+        }
+
+        CircleButton {
+            x: parent.width - 16px - 40px - 44px;
+            y: (parent.height - self.height) / 2;
+            icon: App.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+            size: 26px;
+            busy: App.buffering;
+            tint: Theme.text;
+            accessible-role: button;
+            accessible-label: App.playing ? "Pause" : "Play";
+            accessible-action-default => { App.toggle-play(); }
+            clicked => { App.toggle-play(); }
+        }
+        CircleButton {
+            x: parent.width - 12px - 40px;
+            y: (parent.height - self.height) / 2;
+            icon: @image-url("icons/skip-forward.svg");
+            size: 22px;
+            tint: Theme.text;
+            accessible-role: button;
+            accessible-label: "Next";
+            accessible-action-default => { App.next(); }
+            clicked => { App.next(); }
+        }
+    }
+
+    // The tab bar: Home, Feed, Explore (with search), and the collection.
+    tabs := Rectangle {
+        y: parent.height - self.height;
+        height: App.tabs-height;
+        HorizontalLayout {
+            x: (parent.width - self.width) / 2;
+            width: min(parent.width - 16px, 520px);
+            padding-bottom: 6px;
+            DockTab {
+                horizontal-stretch: 1;
+                icon: @image-url("icons/music.svg");
+                label: "Home";
+                key: "home";
+                selected: App.nav-key == "home";
+            }
+            DockTab {
+                horizontal-stretch: 1;
+                icon: @image-url("icons/bell.svg");
+                label: "Feed";
+                key: "feed";
+                selected: App.nav-key == "feed";
+            }
+            DockTab {
+                horizontal-stretch: 1;
+                icon: @image-url("icons/search.svg");
+                label: "Explore";
+                key: "explore";
+                selected: App.nav-key == "explore" || App.view == "search";
+            }
+            DockTab {
+                horizontal-stretch: 1;
+                icon: @image-url("icons/library.svg");
+                label: "Collection";
+                key: "collection";
+                selected: App.nav-key == "collection" || App.nav-key == "mixes" || App.nav-key == "playlists"
+                    || App.nav-key == "albums" || App.nav-key == "tracks" || App.nav-key == "videos"
+                    || App.nav-key == "profiles" || App.nav-key == "later";
             }
         }
     }

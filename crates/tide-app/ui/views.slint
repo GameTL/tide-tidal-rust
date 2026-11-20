@@ -1,10 +1,10 @@
 // Main content views.
 import { ScrollView } from "std-widgets.slint";
 import { TrackMenuButton } from "context-menu.slint";
-import { HeaderTools } from "chrome.slint";
+import { HeaderTools, SearchField, NavItem, SidebarPlaylist } from "chrome.slint";
 import { MinimizeButton } from "common.slint";
 import { MaxLogin } from "settings.slint";
-import { App, Theme, EditableInput, Icon, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
+import { App, Theme, EditableInput, Icon, Kbd, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, QualityBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
 
 // ---------------------------------------------------------------- items
 //
@@ -211,7 +211,96 @@ component ArtPlay inherits Rectangle {
 
 component GridItem inherits FreshItem {
     in property <CardData> card;
+    // Shown as hovered: the card Enter in the grid filter plays.
+    in property <bool> spotlight: false;
+    // A grey panel behind the whole card on hover, as on track rows (grid pages).
+    in property <bool> hover-panel: false;
+    property <bool> lit: body.has-hover || spotlight;
+    // ↑ ↓ moved the pick here: scroll it into the pane.
+    changed spotlight => {
+        if (spotlight) {
+            if (self.absolute-position.y - 12px < App.pane-y) {
+                App.scroll-y = min(0px, App.scroll-y + (App.pane-y - self.absolute-position.y) + 24px);
+            } else if (self.absolute-position.y + self.height + 12px > App.pane-y + App.pane-height - App.bar-inset) {
+                App.scroll-y = App.scroll-y - (self.absolute-position.y + self.height - App.pane-y - App.pane-height + App.bar-inset) - 24px;
+            }
+        }
+    }
+    // On a grid page, one of the user's own playlists takes a dragged track
+    // (App.drag-active). The area the drag started on keeps the pointer, so
+    // the card finds it by position rather than by hover.
+    in property <bool> drop-zone: false;
+    property <bool> drop-on: drop-zone && App.drag-over-page && card.kind == "playlist" && card.by == "Me"
+        && App.drag-x >= self.absolute-position.x && App.drag-x < self.absolute-position.x + self.width
+        && App.drag-y >= self.absolute-position.y && App.drag-y < self.absolute-position.y + self.height;
+    changed drop-on => {
+        if (drop-on) {
+            App.drop-target = card.id;
+            App.drop-title = card.title;
+            App.drop-source = "grid";
+        } else if (App.drop-source == "grid" && App.drop-target == card.id) {
+            App.drop-target = "";
+            App.drop-title = "";
+            App.drop-source = "";
+        }
+    }
     fresh: card.fresh;
+
+    // Rearranged grids (pinning) glide: a card that moves is first drawn where
+    // it was and slides to its new slot. Grid pages place cards with
+    // slot-x / slot-y inside their group (group-y down the page); other users
+    // of the item set x / y themselves and never move this way.
+    in property <length> slot-x;
+    in property <length> slot-y;
+    in property <length> group-y;
+    x: root.slot-x + root.fly-ox;
+    y: root.slot-y + root.fly-oy;
+    property <{x: length, y: length}> home: { x: root.slot-x, y: root.group-y + root.slot-y };
+    property <{x: length, y: length}> last-home;
+    property <string> key: card.kind + ":" + card.id;
+    property <length> fly-dx;
+    property <length> fly-dy;
+    property <duration> fly-t0;
+    property <bool> flying;
+    property <float> fly-p: root.flying ? clamp((animation-tick() - root.fly-t0) / 250ms, 0, 1) : 1;
+    // Ease in-out (cubic).
+    property <float> fly-e: root.fly-p < 0.5 ? 4 * root.fly-p * root.fly-p * root.fly-p : 1 - pow(-2 * root.fly-p + 2, 3) / 2;
+    property <length> fly-ox: root.flying ? root.fly-dx * (1 - root.fly-e) : 0px;
+    property <length> fly-oy: root.flying ? root.fly-dy * (1 - root.fly-e) : 0px;
+    z: root.flying ? 1 : 0;
+    function fly-from(fx: length, fy: length) {
+        root.fly-dx = fx - root.home.x;
+        root.fly-dy = fy - root.home.y;
+        root.fly-t0 = animation-tick();
+        root.flying = true;
+    }
+    Timer {
+        interval: 260ms;
+        running: root.flying;
+        triggered => { root.flying = false; }
+    }
+    init => {
+        root.last-home = root.home;
+        // The card just pinned or unpinned: from where its menu was opened.
+        if (App.grid-reflow && App.fly-from-key == root.key) {
+            root.fly-from(App.fly-from-x, App.fly-from-y);
+        }
+    }
+    changed home => {
+        if (App.grid-reflow && (abs(root.home.x - root.last-home.x) > 0.5px || abs(root.home.y - root.last-home.y) > 0.5px)) {
+            root.fly-from(root.last-home.x + root.fly-ox, root.last-home.y + root.fly-oy);
+        }
+        root.last-home = root.home;
+    }
+    // Where the card sits while its menu is open, for Pin to fly it from.
+    property <bool> menu-here: App.menu-open && App.menu-card.id == card.id && App.menu-card.kind == card.kind;
+    changed menu-here => {
+        if (root.menu-here) {
+            App.fly-from-key = root.key;
+            App.fly-from-x = root.home.x;
+            App.fly-from-y = root.home.y;
+        }
+    }
     // Videos are 16:9 stills with a length line ("2 MIN") under the artists.
     property <bool> wide: card.kind == "video";
     property <length> art-h: wide ? self.width * 9 / 16 : self.width;
@@ -219,6 +308,30 @@ component GridItem inherits FreshItem {
     body := ItemTouch {
         card: root.card;
         clicked => { App.open-card(root.card); }
+    }
+
+    if root.hover-panel: Rectangle {
+        x: -10px;
+        y: -10px;
+        width: root.width + 20px;
+        height: root.height + 10px;
+        border-radius: 8px;
+        background: root.lit ? #121212 : transparent;
+        animate background {
+            duration: 160ms;
+            easing: ease-out;
+        }
+    }
+
+    if root.drop-on: Rectangle {
+        x: -6px;
+        y: -6px;
+        width: root.width + 12px;
+        height: root.height + 6px;
+        border-radius: 8px;
+        background: #1c1c1c;
+        border-width: 1px;
+        border-color: App.accent;
     }
 
     CardArt {
@@ -235,7 +348,7 @@ component GridItem inherits FreshItem {
         width: root.width;
         height: root.art-h;
         card: root.card;
-        show: body.has-hover;
+        show: root.lit;
         play-d: root.wide ? min(56px, root.art-h * 0.36) : min(44px, root.width * 0.28);
         inset: max(8px, root.width * 0.05);
     }
@@ -269,9 +382,13 @@ component GridItem inherits FreshItem {
         y: root.art-h + 35px;
         width: root.width;
         height: root.wide ? min(42px, self.preferred-height) : 42px;
+        // An own playlist's "98 TRACKS" and a folder's count are small caps.
+        property <bool> counted: card.kind == "folder" || (card.kind == "playlist" && card.by == "Me");
         text: card.subtitle;
         color: Theme.text-secondary;
-        font-size: 15px;
+        font-size: self.counted ? 11.5px : 15px;
+        font-weight: self.counted ? Theme.medium : 400;
+        letter-spacing: self.counted ? 0.8px : 0px;
         wrap: word-wrap;
         overflow: elide;
         vertical-alignment: top;
@@ -294,9 +411,12 @@ component SlimItem inherits FreshItem {
     in property <CardData> card;
     // Grey tile (Home shortcuts, search) rather than a bare list row.
     in property <bool> filled: false;
-    in property <length> art: filled ? 48px : 62px;
+    // A narrow tile (two to a phone-width row) takes smaller artwork and
+    // gives its text the room More would keep (More shows on hover, over it).
+    property <bool> slim: root.width < 220px;
+    in property <length> art: filled ? (root.slim ? 40px : 48px) : 62px;
     fresh: card.fresh;
-    property <length> inset: filled ? 9px : 0px;
+    property <length> inset: filled ? (root.slim ? 8px : 9px) : 0px;
     property <length> art-radius: card.kind == "artist" ? root.art / 2 : 3px;
     // Child targets steal the row's hover; any of them keeps the row hot.
     property <bool> hot: body.has-hover || art-play.hovered || more.hovered;
@@ -334,8 +454,8 @@ component SlimItem inherits FreshItem {
     }
 
     VerticalLayout {
-        x: root.inset + root.art + 13px;
-        width: root.width - self.x - 48px;
+        x: root.inset + root.art + (root.slim ? 10px : 13px);
+        width: root.width - self.x - (root.slim ? 8px : 48px);
         alignment: center;
         spacing: 3px;
         TitleWithQuality {
@@ -349,9 +469,12 @@ component SlimItem inherits FreshItem {
         }
 
         if card.subtitle != "": Text {
+            property <bool> counted: card.kind == "folder" || (card.kind == "playlist" && card.by == "Me");
             text: card.subtitle;
             color: Theme.text-secondary;
-            font-size: root.filled ? 13px : 15px;
+            font-size: self.counted ? 11px : root.filled ? 13px : 15px;
+            font-weight: self.counted ? Theme.medium : 400;
+            letter-spacing: self.counted ? 0.8px : 0px;
             overflow: elide;
         }
     }
@@ -382,14 +505,16 @@ component SectionHeader inherits Rectangle {
     height: 34px;
     Text {
         x: 0;
+        width: max(0px, root.width - (controls.width > 0 ? controls.width + 22px : 0px));
         text: root.title;
         color: Theme.text;
         font-size: 20px;
         font-weight: 700;
+        overflow: elide;
         vertical-alignment: center;
     }
 
-    HorizontalLayout {
+    controls := HorizontalLayout {
         x: root.width - self.width - 10px;
         width: self.preferred-width;
         spacing: 10px;
@@ -502,11 +627,14 @@ component Carousel inherits Rectangle {
         request(from, upto) => { root.request-art(from, upto); }
     }
 
+    // Narrow, the title needs the room: "View all" reaches every card, so
+    // the arrows go when it is there.
+    property <bool> all-link: root.view-all && section.cards.length > per-page;
     SectionHeader {
         y: 0;
         title: section.title;
-        arrows: true;
-        view-all: root.view-all && section.cards.length > per-page;
+        arrows: !(root.all-link && root.width < 420px);
+        view-all: root.all-link;
         can-prev: root.offset > 0;
         can-next: root.offset < root.max-offset;
         prev => {
@@ -545,7 +673,7 @@ component RowGrid inherits Rectangle {
     in property <SectionData> section;
     in property <int> section-index;
     in property <bool> tiles: false;
-    property <int> cols: self.width > 760px ? 3 : 2;
+    property <int> cols: self.width > 760px ? 3 : self.width > 480px || tiles ? 2 : 1;
     property <length> gap-x: tiles ? 9px : 30px;
     property <length> row-h: tiles ? 75px : 79px;
     property <length> col-w: (self.width - (cols - 1) * gap-x) / cols;
@@ -633,7 +761,7 @@ component TileGrid inherits Rectangle {
     in property <SectionData> section;
     in property <int> section-index;
     property <length> gap: 12px;
-    property <int> cols: max(3, floor((self.width + gap) / (176px + gap)));
+    property <int> cols: max(self.width < 480px ? 2 : 3, floor((self.width + gap) / (176px + gap)));
     property <length> tile-w: (self.width - (cols - 1) * gap) / cols;
     property <length> tile-h: tile-w * 0.62;
     property <int> count: section.cards.length;
@@ -730,16 +858,25 @@ export component ModulesView inherits Rectangle {
 }
 
 export component HomeView inherits Rectangle {
-    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    property <length> pad: clamp((self.width - 900px) * 0.11, App.page-gutter, 83px);
     ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
             padding-top: 4px;
-            padding-bottom: 48px;
+            padding-bottom: 48px + App.bar-inset;
             spacing: 0px;
             alignment: start;
+            // Phone layout: no sidebar says where this is.
+            if App.phone-layout: Text {
+                height: 48px;
+                text: "Home";
+                color: Theme.text;
+                font-size: 28px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
             Rectangle {
                 height: 44px;
                 HorizontalLayout {
@@ -784,14 +921,14 @@ export component HomeView inherits Rectangle {
 }
 
 export component ModulesPage inherits Rectangle {
-    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    property <length> pad: clamp((self.width - 900px) * 0.11, App.page-gutter, 83px);
     ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
             padding-top: 8px;
-            padding-bottom: 48px;
+            padding-bottom: 48px + App.bar-inset;
             alignment: start;
             Rectangle {
                 height: 48px;
@@ -804,6 +941,15 @@ export component ModulesPage inherits Rectangle {
                     font-weight: 700;
                     horizontal-alignment: left;
                     vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            // Phone layout: the search lives here, not in the top bar.
+            if App.phone-layout && App.nav-key == "explore": VerticalLayout {
+                padding-top: 8px;
+                padding-bottom: 22px;
+                SearchField {
+                    active: !App.video-open && !App.show-now-playing;
                 }
             }
             ModulesView { }
@@ -871,23 +1017,56 @@ component TrackRow inherits Rectangle {
     in property <length> x-date;
     in property <length> x-time;
     in property <length> x-bpm;
+    // Columns a narrower table leaves out.
+    in property <bool> show-album: true;
+    in property <bool> show-time: true;
+    in property <bool> show-heart: true;
+    // Phone width: the title over the artist in one cell, as in the official
+    // client; an album numbers its rows, other lists show the artwork (which
+    // takes the play button on hover).
+    in property <bool> stacked: false;
+    // Search's first hit while the search field has focus: shown as if
+    // hovered, because Enter plays it.
+    in property <bool> spotlight: false;
     property <bool> active: track.id == App.current-id;
+    property <length> more-x: root.width - (root.show-heart ? 76px : 36px);
+    property <length> text-x: root.stacked ? (album-page ? 40px : 58px) : album-page ? 46px : artist-page ? 60px : 105px;
+    property <length> text-end: root.stacked ? (root.show-time ? x-time : root.more-x) - 12px : x-artist - 24px;
+    property <bool> lit: ta.has-hover || spotlight;
     height: 53px;
     border-radius: 6px;
-    background: ta.has-hover ? #121212 : transparent;
+    background: lit ? #121212 : transparent;
+    animate background {
+        duration: 160ms;
+        easing: ease-out;
+    }
+    // Dragged by its name or artwork, the track goes to a playlist.
     ta := TouchArea {
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                 more.open-at(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                App.drag-release(true);
+            }
+            if (e.kind == PointerEventKind.cancel) {
+                App.drag-release(false);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                App.drag-move(track.id, track.title, track.artist, track.cover, self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
         }
         double-clicked => {
-            App.play-track(track.id);
+            if (!App.drag-gesture) {
+                App.play-track(track.id);
+            }
         }
     }
 
     if !album-page: Cover {
-        x: artist-page ? 0px : 46px;
+        x: artist-page || root.stacked ? 0px : 46px;
         width: 46px;
         height: 46px;
         source: track.cover;
@@ -895,22 +1074,24 @@ component TrackRow inherits Rectangle {
         radius: 0px;
     }
 
-    // Index / play affordance
+    // Index / play affordance. Stacked without numbers, it is on the artwork.
     Rectangle {
         x: 0;
-        width: 44px;
-        if active && !ta.has-hover: Icon {
+        width: root.stacked ? (album-page ? 32px : 46px) : 44px;
+        height: root.stacked && !album-page ? 46px : root.height;
+        background: root.stacked && !album-page && lit ? #00000099 : transparent;
+        if active && !lit && !(root.stacked && !album-page): Icon {
             source: @image-url("icons/volume.svg");
             size: 17px;
             tint: App.accent;
         }
-        if !artist-page && !active && !ta.has-hover: Text {
+        if !artist-page && !active && !lit && !(root.stacked && !album-page): Text {
             text: index + 1;
             color: #7c7c7c;
             font-size: 14px;
             font-weight: 500;
         }
-        if ta.has-hover: IconButton {
+        if lit: IconButton {
             icon: active && App.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
             size: 15px;
             tint: Theme.text;
@@ -926,8 +1107,10 @@ component TrackRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        x: album-page ? 46px : artist-page ? 60px : 105px;
-        width: x-artist - self.x - 24px;
+        x: root.text-x;
+        y: root.stacked ? 6px : 0px;
+        width: max(0px, root.text-end - self.x);
+        height: root.stacked ? 22px : root.height;
         alignment: start;
         spacing: 8px;
         Cell {
@@ -942,17 +1125,21 @@ component TrackRow inherits Rectangle {
     }
 
     ArtistLinks {
-        x: x-artist;
-        width: min(self.preferred-width, (album-page ? x-time : x-album) - x-artist - 24px);
-        height: root.height;
+        x: root.stacked ? root.text-x : x-artist;
+        y: root.stacked ? 28px : 0px;
+        width: max(0px, min(self.preferred-width, root.stacked ? root.text-end - root.text-x
+            : (album-page || !root.show-album ? x-time : x-album) - x-artist - 24px));
+        height: root.stacked ? 19px : root.height;
         artists: track.artists;
         text: track.artist;
-        font-weight: Theme.demibold;
+        text-color: root.stacked ? Theme.text-secondary : Theme.text;
+        font-size: root.stacked ? 14px : 15px;
+        font-weight: root.stacked ? Theme.medium : Theme.demibold;
         context-requested(x, y) => { more.open-at(x, y); }
         open(a) => { App.open-artist(a); }
     }
 
-    if !album-page: LinkedCell {
+    if !album-page && root.show-album && !root.stacked: LinkedCell {
         x: x-album;
         width: (show-date ? x-date : x-time) - x-album - 20px;
         text: track.album;
@@ -961,26 +1148,28 @@ component TrackRow inherits Rectangle {
         activated => { App.open-track-album(track); }
     }
 
-    if show-date: Cell {
+    if show-date && !root.stacked: Cell {
         x: x-date;
         width: x-time - x-date - 12px;
         text: track.date-added;
     }
-    Cell {
+    if root.show-time: Cell {
         x: x-time;
         text: track.duration;
+        color: root.stacked ? Theme.text-secondary : Theme.text;
     }
 
-    if show-bpm: Cell {
+    if show-bpm && !root.stacked: Cell {
         x: x-bpm;
+        width: 44px;
         text: track.bpm;
     }
     more := TrackMenuButton {
-        x: root.width - 76px;
+        x: root.more-x;
         track-id: track.id;
     }
 
-    IconButton {
+    if root.show-heart: IconButton {
         x: root.width - 42px;
         icon: track.favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
         size: 17px;
@@ -1061,6 +1250,8 @@ component TrackPlaceholder inherits Rectangle {
 component ActionButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
+    // A state that is on: Public.
+    in property <color> tint: Theme.text;
     callback clicked();
     width: 64px;
     height: 58px;
@@ -1075,7 +1266,7 @@ component ActionButton inherits Rectangle {
         y: 4px;
         source: root.icon;
         size: 22px;
-        tint: Theme.text;
+        tint: root.tint;
         opacity: ta.has-hover ? 1.0 : 0.85;
     }
 
@@ -1083,7 +1274,7 @@ component ActionButton inherits Rectangle {
         y: 38px;
         width: root.width;
         text: root.label;
-        color: Theme.text;
+        color: root.tint;
         font-size: 12px;
         font-weight: Theme.demibold;
         horizontal-alignment: center;
@@ -1129,15 +1320,104 @@ component CatalogTabs inherits Rectangle {
     }
 }
 
-component VideoGrid inherits Rectangle {
+component ChoiceButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> heading;
+    in property <[string]> options;
+    in property <string> current;
+    in property <bool> highlighted: false;
+    in property <string> toggle-label: "";
+    in property <bool> toggle-on: false;
+    // Open the menu leftwards, for a button at the right edge.
+    in property <bool> align-right: false;
+    callback chosen(string);
+    callback toggled(bool);
+    width: 34px;
+    height: 34px;
+    border-radius: 17px;
+    background: ta.has-hover ? #1e1e1e : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            pop.show();
+        }
+    }
+
+    Icon {
+        source: root.icon;
+        size: 18px;
+        tint: root.highlighted ? Theme.lossless : ta.has-hover ? Theme.text : Theme.text-secondary;
+    }
+
+    pop := PopupWindow {
+        x: root.align-right ? root.width - 260px : 0px;
+        y: root.height + 6px;
+        width: 260px;
+        MenuPanel {
+            Text {
+                height: 30px;
+                text: "   " + root.heading;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                font-weight: Theme.demibold;
+                letter-spacing: 0.8px;
+                vertical-alignment: center;
+            }
+
+            for option in root.options: MenuRow {
+                label: option;
+                checked: option == root.current;
+                activated => {
+                    root.chosen(option);
+                }
+            }
+
+            if root.toggle-label != "": Rectangle {
+                height: 8px;
+                Rectangle {
+                    y: 4px;
+                    height: 1px;
+                    background: #3a3a3a;
+                }
+            }
+            if root.toggle-label != "": Rectangle {
+                height: 44px;
+                Text {
+                    x: 14px;
+                    width: parent.width - 76px;
+                    text: root.toggle-label;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: Theme.demibold;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Toggle {
+                    x: parent.width - 54px;
+                    y: 8px;
+                    on: root.toggle-on;
+                    toggled(v) => {
+                        root.toggled(v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Grid of video stills (16:9) or square covers under a section title.
+component CardGrid inherits Rectangle {
+    in property <string> title;
+    in property <bool> wide: true;
     in property <[CardData]> cards;
     in property <string> status;
     in property <string> empty-text;
+    in property <string> error-text;
     callback request-art(int, int);
     property <length> gap: 18px;
-    property <int> cols: max(1, floor((self.width + gap) / (240px + gap)));
+    property <int> cols: max(1, floor((self.width + gap) / ((wide ? 240px : 180px) + gap)));
     property <length> card-w: (self.width - (cols - 1) * gap) / cols;
-    property <length> row-h: card-w * 9 / 16 + 100px + gap;
+    property <length> row-h: (wide ? card-w * 9 / 16 + 100px : card-w + 76px) + gap;
     property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan - 50px) / row-h));
     property <int> visible-rows: max(1, ceil((art.overscan * 2 + App.pane-height) / row-h) + 1);
     height: cards.length > 0 ? 50px + ceil(cards.length / cols) * row-h - gap : 132px;
@@ -1151,7 +1431,8 @@ component VideoGrid inherits Rectangle {
         request(from, upto) => { root.request-art(from, upto); }
     }
     SectionHeader {
-        title: "Videos";
+        y: 0;
+        title: root.title;
         view-all: false;
     }
     for slot in root.visible-rows * root.cols: Rectangle {
@@ -1162,6 +1443,7 @@ component VideoGrid inherits Rectangle {
         height: root.row-h - root.gap;
         if index < root.cards.length: GridItem {
             width: parent.width;
+            hover-panel: true;
             card: root.cards[parent.index];
         }
     }
@@ -1172,7 +1454,7 @@ component VideoGrid inherits Rectangle {
     if cards.length == 0 && status != "loading": Text {
         y: 62px;
         width: root.width;
-        text: root.status == "error" ? "Couldn’t load videos. Try opening this page again." : root.empty-text;
+        text: root.status == "error" ? root.error-text : root.empty-text;
         color: Theme.text-secondary;
         font-size: 15px;
         wrap: word-wrap;
@@ -1180,51 +1462,109 @@ component VideoGrid inherits Rectangle {
 }
 
 export component TracksView inherits Rectangle {
-    property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 89px);
+    property <length> pad: clamp((self.width - 900px) * 0.12, App.page-gutter, 89px);
     property <length> w: self.width - 2 * pad;
     property <bool> album-page: App.view == "album";
     property <bool> artist-page: App.view == "artist";
     property <bool> search-page: App.view == "search";
+    // Creator, description and a line of facts sit beside a playlist's cover.
+    property <bool> playlist-page: App.view == "detail" && App.page-card.kind == "playlist";
+    property <bool> own-playlist: playlist-page && App.page-card.by == "Me";
     property <bool> about: artist-page && App.artist-tab == 3;
     property <bool> music-tab: artist-page && App.artist-tab == 1;
-    property <bool> video-tab: (artist-page && App.artist-tab == 2) || (search-page && App.search-tab == 1);
-    property <bool> show-tracks: !about && !music-tab && !video-tab;
+    // Search tabs: All | Albums | Playlists | Videos.
+    property <bool> video-tab: (artist-page && App.artist-tab == 2) || (search-page && App.search-tab == 3);
+    property <bool> album-tab: search-page && App.search-tab == 1;
+    property <bool> playlist-tab: search-page && App.search-tab == 2;
+    property <bool> search-all: search-page && App.search-tab == 0;
+    property <bool> show-tracks: !about && !music-tab && !video-tab && !album-tab && !playlist-tab;
     property <bool> track-placeholders: artist-page && show-tracks && App.loading && App.tracks.length < 5;
     property <int> row-count: !show-tracks ? 0 : artist-page ? (track-placeholders ? 5 : min(5, App.tracks.length)) : App.tracks.length;
     property <bool> wide: w > 980px && !album-page;
-    property <bool> show-bpm: wide && App.bpm-available && App.show-audio-metadata;
-    property <bool> show-date: App.tracks-show-date && w > 760px;
+    // Narrower tables drop columns, the album first, then the date, BPM and
+    // time; on a phone-width page each row is the title over the artist.
+    property <bool> stacked-rows: w < 520px;
+    property <bool> show-album: !album-page && w >= 680px;
+    property <bool> show-time: !stacked-rows || w >= 400px;
+    property <bool> show-heart: !stacked-rows || w >= 400px;
+    // The BPM column (Settings → Display → BPM) sits at the end of the table
+    // whenever the table is wide enough for it.
+    property <bool> show-bpm: !stacked-rows && w > (album-page ? 560px : 630px) && App.show-audio-metadata;
+    // In a narrow table the BPM values take the room of the date.
+    property <bool> show-date: App.tracks-show-date && w > 760px && (wide || !show-bpm);
     property <bool> has-cover: App.page-has-cover;
     property <bool> filterable: App.view == "tracks";
     property <length> row-h: 53px;
+    // Phone width: the header is one column, centred like the official
+    // client's: the cover, the title, the artist, the facts, Play and Shuffle
+    // side by side, then the actions as icons over labels.
+    property <bool> stack: root.width < 600px;
+    property <bool> stack-head: stack && has-cover && !artist-page;
+    // The playlist search results' search field (phone layout: not in the top bar).
+    property <length> search-row: search-page && App.phone-layout ? 52px : 0px;
     // Vertical layout of the header block.
     property <length> top-inset: album-page || artist-page ? 64px : 0px;
-    property <length> y-title: top-inset + (has-cover ? 4px : 8px);
-    property <int> search-cols: w >= 900px ? 3 : 2;
-    property <length> search-height: search-page && !video-tab && App.search-cards.length > 0
+    property <length> y-title: top-inset + (has-cover ? 4px : 8px) + search-row;
+    property <int> search-cols: w >= 900px ? 3 : w >= 520px ? 2 : 1;
+    // The stacked header under the cover: title, artist line, facts.
+    property <bool> has-by: App.page-subtitle != "" || (album-page && App.page-artists.length > 0);
+    property <length> stack-meta-h: 32px + (has-by ? 30px : 0px)
+        + (album-page ? 26px : 0px)
+        + (playlist-page && App.page-description != "" ? 46px : 0px)
+        + (playlist-page && App.page-summary != "" ? 24px : 0px);
+    property <length> pill-w: stack ? (w - 12px) / 2 : 176px;
+    property <length> pill-h: stack ? 48px : 53px;
+    // The actions (Add, Share, More…) beside Play and Shuffle, or in a row of
+    // their own under them when they would meet (always when stacked).
+    property <int> action-count: (App.page-can-favorite ? 1 : 0) + (own-playlist ? 2 : 0) + (album-page ? 1 : 0) + 2;
+    property <length> actions-w: action-count * 64px + (action-count - 1) * 12px;
+    property <bool> actions-below: App.page-card.id != "" && (stack || 2 * 176px + 18px + 32px + actions-w > w);
+    property <length> y-actions: y-buttons + pill-h + 14px;
+    property <length> search-height: search-all && App.search-cards.length > 0
         ? 44px + ceil(App.search-cards.length / search-cols) * 66px : 0px;
-    property <length> cover-size: album-page ? clamp(w * 0.25, 180px, 256px) : 218px;
-    property <length> hero-h: artist-page ? clamp(w * 0.28, 218px, 352px) : has-cover ? cover-size : 38px;
+    // The All tab previews the first playlists; the Playlists tab lists them all.
+    property <int> playlist-preview: min(6, App.search-playlists.length);
+    property <length> playlists-height: search-all && playlist-preview > 0
+        ? 44px + ceil(playlist-preview / search-cols) * 66px : 0px;
+    property <length> cover-size: stack ? min(w * 0.64, 240px) : album-page ? clamp(w * 0.25, 180px, 256px) : 218px;
+    property <length> hero-h: artist-page ? clamp(w * 0.28, 218px, 352px) : stack-head ? cover-size + 18px + stack-meta-h : has-cover ? cover-size : 38px;
     property <length> search-tabs-y: y-title + hero-h + 12px;
-    property <length> y-buttons: artist-page ? top-inset + hero-h - 46px : y-title + hero-h + (has-cover ? 28px : 24px) + search-height + (search-page ? 58px : 0px);
+    property <length> y-search-tracks: search-tabs-y + 58px + search-height + playlists-height;
+    property <length> y-buttons: artist-page ? top-inset + hero-h - 46px : y-title + hero-h + (stack-head ? 22px : has-cover ? 28px : 24px);
     property <length> y-filter: y-buttons + 53px + 36px;
     property <length> y-tabs: top-inset + hero-h + 22px;
     property <length> y-top-tracks: y-tabs + 70px;
-    property <length> y-columns: artist-page ? y-top-tracks + 38px : filterable ? y-filter + 44px + 40px : y-buttons + 53px + 30px;
-    property <length> header-h: y-columns + 36px;
+    property <length> y-columns: artist-page ? y-top-tracks + 38px : search-page ? y-search-tracks + 40px : filterable ? y-filter + 44px + 40px
+        : actions-below ? y-actions + 58px + 16px : y-buttons + 53px + 30px;
+    property <length> header-h: y-columns + (stacked-rows ? 0px : 36px);
     // Column positions (fractions measured from the official client).
-    property <length> x-artist: album-page ? w * 0.49 : wide ? w * 0.324 : w * 0.40;
+    property <length> x-artist: album-page ? w * 0.49 : wide ? w * 0.324 : show-album ? w * 0.40 : w * 0.52;
     property <length> x-album: wide ? w * 0.544 : w * 0.64;
     property <length> x-date: w * 0.724;
-    property <length> x-time: show-bpm ? w * 0.839 : w - 150px;
-    property <length> x-bpm: w * 0.891;
+    property <length> x-time: !show-bpm ? w - 150px : wide ? w * 0.839 : w - 190px;
+    // Ends before the row's More and heart buttons.
+    property <length> x-bpm: wide ? w * 0.891 : w - 128px;
     // Hand-rolled virtualisation so the header scrolls with the rows.
     property <int> first: max(0, floor((-sv.content-y - header-h) / row-h));
     property <int> visible-rows: ceil(self.height / row-h) + 2;
+    // The part of the page above the player bar (the page runs under a glass bar).
+    property <length> view-h: self.height - App.bar-inset;
+    // A focused search / filter field picks a row for Enter; ↑ ↓ move it.
+    property <bool> picking: (search-page && App.search-focused && App.search-text == App.search-shown) || (filterable && App.filter-focused);
+    property <int> pick: App.pick-index;
+    changed pick => {
+        if (root.picking && root.show-tracks) {
+            if (root.header-h + root.pick * root.row-h < -App.scroll-y) {
+                App.scroll-y = min(0px, -(root.header-h + root.pick * root.row-h) + 12px);
+            } else if (root.header-h + (root.pick + 1) * root.row-h > -App.scroll-y + root.view-h) {
+                App.scroll-y = -(root.header-h + (root.pick + 1) * root.row-h - root.view-h + 12px);
+            }
+        }
+    }
     property <int> reveal-request: App.reveal-track-revision;
     function reveal-track() {
         if (App.reveal-track-index >= 0 && App.reveal-track-index < App.tracks.length) {
-            App.scroll-y = clamp(root.height / 2 - root.header-h - (App.reveal-track-index + 0.5) * root.row-h,
+            App.scroll-y = clamp(root.view-h / 2 - root.header-h - (App.reveal-track-index + 0.5) * root.row-h,
                 min(0px, root.height - sv.content-height), 0px);
         }
     }
@@ -1242,7 +1582,7 @@ export component TracksView inherits Rectangle {
         content-y <=> App.scroll-y;
         content-width: root.width;
         // Leave enough room to center even the final track after a source jump.
-        property <length> tail: App.reveal-track-index >= 0 ? max(48px, root.height / 2) : 48px;
+        property <length> tail: (App.reveal-track-index >= 0 ? max(48px, root.view-h / 2) : 48px) + App.bar-inset;
         content-height: artist-page || album-page || search-page ? artist-content.y + artist-content.preferred-height + self.tail
             : header-h + row-count * row-h + self.tail;
         if artist-page || album-page: Rectangle {
@@ -1267,17 +1607,17 @@ export component TracksView inherits Rectangle {
             }
         }
         if has-cover && !artist-page: Cover {
-            x: pad;
+            x: stack-head ? (root.width - root.cover-size) / 2 : pad;
             y: y-title;
             width: cover-size;
             height: cover-size;
             source: App.page-cover;
             radius: 4px;
         }
-        Text {
+        if !stack-head: Text {
             x: has-cover && !artist-page ? pad + cover-size + 32px : pad;
-            y: artist-page ? y-buttons - 53px : album-page ? y-title + cover-size * 0.23 : has-cover ? y-title + 74px : y-title;
-            width: root.width - self.x - pad;
+            y: artist-page ? y-buttons - 53px : album-page ? y-title + cover-size * 0.23 : playlist-page ? y-title + 30px : has-cover ? y-title + 74px : y-title;
+            width: root.width - self.x - pad - (stack && (album-tab || playlist-tab) ? 84px : 0px);
             height: has-cover ? 44px : 38px;
             text: App.page-title;
             color: Theme.text;
@@ -1287,7 +1627,7 @@ export component TracksView inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if album-page && App.page-artist.id != "": Cover {
+        if album-page && App.page-artist.id != "" && !stack-head: Cover {
             x: pad + cover-size + 32px;
             y: y-title + cover-size * 0.23 + 46px;
             width: 24px;
@@ -1299,10 +1639,10 @@ export component TracksView inherits Rectangle {
                 clicked => { App.open-card(App.page-artist); }
             }
         }
-        if has-cover && !artist-page: ArtistLinks {
+        if has-cover && !artist-page && !stack-head: ArtistLinks {
             property <bool> linked: album-page && App.page-artists.length > 0;
             x: pad + cover-size + 32px + (album-page && App.page-artist.id != "" ? 34px : 0px);
-            y: album-page ? y-title + cover-size * 0.23 + 48px : y-title + 124px;
+            y: album-page ? y-title + cover-size * 0.23 + 48px : playlist-page ? y-title + 82px : y-title + 124px;
             width: min(self.preferred-width, root.width - self.x - pad);
             height: self.preferred-height;
             artists: linked ? App.page-artists : [];
@@ -1311,7 +1651,111 @@ export component TracksView inherits Rectangle {
             font-weight: Theme.medium;
             open(a) => { App.open-artist(a); }
         }
-        if album-page: VerticalLayout {
+        if playlist-page && App.page-description != "" && !stack-head: Text {
+            x: pad + cover-size + 32px;
+            y: y-title + 116px;
+            width: min(760px, root.width - self.x - pad);
+            height: 40px;
+            text: App.page-description;
+            color: Theme.text-secondary;
+            font-size: 14px;
+            wrap: word-wrap;
+            overflow: elide;
+            vertical-alignment: top;
+        }
+        if playlist-page && App.page-summary != "" && !stack-head: Text {
+            x: pad + cover-size + 32px;
+            y: y-title + (App.page-description != "" ? 176px : 122px);
+            width: root.width - self.x - pad;
+            text: App.page-summary;
+            color: Theme.text-secondary;
+            font-size: 12px;
+            font-weight: Theme.medium;
+            letter-spacing: 1px;
+            overflow: elide;
+        }
+        // Stacked: everything beside the cover moves under it, centred.
+        if stack-head: VerticalLayout {
+            x: pad;
+            y: y-title + cover-size + 18px;
+            width: w;
+            height: root.stack-meta-h;
+            spacing: 6px;
+            Text {
+                height: 32px;
+                text: App.page-title;
+                color: Theme.text;
+                font-size: 24px;
+                font-weight: Theme.bold;
+                overflow: elide;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if root.has-by: HorizontalLayout {
+                height: 24px;
+                alignment: center;
+                spacing: 10px;
+                if album-page && App.page-artist.id != "": VerticalLayout {
+                    alignment: center;
+                    Cover {
+                        width: 24px;
+                        height: 24px;
+                        source: App.page-artist.image;
+                        round: true;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { App.open-card(App.page-artist); }
+                        }
+                    }
+                }
+                ArtistLinks {
+                    property <bool> linked: album-page && App.page-artists.length > 0;
+                    width: min(self.preferred-width, root.w - 34px);
+                    artists: linked ? App.page-artists : [];
+                    text: App.page-subtitle;
+                    text-color: linked ? Theme.text : Theme.text-secondary;
+                    font-weight: Theme.medium;
+                    open(a) => { App.open-artist(a); }
+                }
+            }
+            if album-page: HorizontalLayout {
+                height: 20px;
+                alignment: center;
+                spacing: 12px;
+                Text {
+                    text: App.page-year;
+                    color: Theme.text-secondary;
+                    font-size: 13px;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                }
+                if App.page-quality != "": VerticalLayout {
+                    alignment: center;
+                    QualityBadge { tier: App.page-quality; }
+                }
+            }
+            if playlist-page && App.page-description != "": Text {
+                height: 40px;
+                text: App.page-description;
+                color: Theme.text-secondary;
+                font-size: 14px;
+                wrap: word-wrap;
+                overflow: elide;
+                horizontal-alignment: center;
+                vertical-alignment: top;
+            }
+            if playlist-page && App.page-summary != "": Text {
+                height: 18px;
+                text: App.page-summary;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                font-weight: Theme.medium;
+                letter-spacing: 1px;
+                overflow: elide;
+                horizontal-alignment: center;
+            }
+        }
+        if album-page && !stack-head: VerticalLayout {
             x: pad + cover-size + 32px;
             y: y-title + cover-size * 0.23 + 84px;
             width: max(0px, root.width - self.x - pad);
@@ -1342,12 +1786,58 @@ export component TracksView inherits Rectangle {
                 }
             }
         }
+        // Phone layout: the field to refine the search, above the results.
+        if search-page && App.phone-layout: SearchField {
+            x: pad;
+            y: y-title - search-row + 4px;
+            width: w;
+            active: !App.video-open && !App.show-now-playing;
+        }
         if search-page: CatalogTabs {
             x: pad;
             y: search-tabs-y;
             width: w;
-            tabs: ["All", "Videos"];
+            tabs: ["All", "Albums", "Playlists", "Videos"];
             selected <=> App.search-tab;
+        }
+        // Sort and group the Albums and Playlists tabs, as on library grids.
+        if album-tab || playlist-tab: HorizontalLayout {
+            x: pad + w - self.width;
+            // Narrow, the tabs need the whole row: up beside the title.
+            y: stack ? y-title + 2px : search-tabs-y + 6px;
+            width: self.preferred-width;
+            height: 34px;
+            spacing: 6px;
+            ChoiceButton {
+                icon: @image-url("icons/sort.svg");
+                heading: "SORT BY";
+                align-right: true;
+                options: root.album-tab ? ["Relevance", "A-Z", "Artist", "Release date"] : ["Relevance", "A-Z", "Creator"];
+                current: root.album-tab ? App.search-album-sort : App.search-playlist-sort;
+                highlighted: self.current != "Relevance";
+                chosen(option) => {
+                    if (root.album-tab) {
+                        App.arrange-search("search-albums", option, App.search-album-group);
+                    } else {
+                        App.arrange-search("search-playlists", option, App.search-playlist-group);
+                    }
+                }
+            }
+            ChoiceButton {
+                icon: @image-url("icons/group.svg");
+                heading: "GROUP BY";
+                align-right: true;
+                options: root.album-tab ? ["None", "Artist", "Year", "Title"] : ["None", "Creator", "Title"];
+                current: root.album-tab ? App.search-album-group : App.search-playlist-group;
+                highlighted: self.current != "None";
+                chosen(option) => {
+                    if (root.album-tab) {
+                        App.arrange-search("search-albums", App.search-album-sort, option);
+                    } else {
+                        App.arrange-search("search-playlists", App.search-playlist-sort, option);
+                    }
+                }
+            }
         }
         if search-height > 0px: Rectangle {
             x: pad;
@@ -1357,8 +1847,12 @@ export component TracksView inherits Rectangle {
             property <length> tile-w: (w - (search-cols - 1) * 12px) / search-cols;
             SectionHeader {
                 y: 0;
-                title: "Artists & Albums";
-                view-all: false;
+                title: "Profiles & Albums";
+                view-all: true;
+                show-all => {
+                    App.search-tab = 1;
+                    App.scroll-y = 0px;
+                }
             }
             for card[i] in App.search-cards: SlimItem {
                 x: mod(i, search-cols) * (parent.tile-w + 12px);
@@ -1367,6 +1861,44 @@ export component TracksView inherits Rectangle {
                 card: card;
                 filled: true;
             }
+        }
+        if playlists-height > 0px: Rectangle {
+            x: pad;
+            y: search-tabs-y + 58px + search-height;
+            width: w;
+            height: playlists-height;
+            property <length> tile-w: (w - (search-cols - 1) * 12px) / search-cols;
+            ArtRequest {
+                width: 100%;
+                height: 100%;
+                window-height: App.pane-height;
+                upto: root.playlist-preview;
+                request(from, upto) => { App.catalog-art("search-playlists", -1, from, upto); }
+            }
+            SectionHeader {
+                y: 0;
+                title: "Playlists";
+                view-all: App.search-playlists.length > root.playlist-preview;
+                show-all => {
+                    App.search-tab = 2;
+                    App.scroll-y = 0px;
+                }
+            }
+            for card[i] in App.search-playlists: SlimItem {
+                visible: i < root.playlist-preview;
+                x: mod(i, search-cols) * (parent.tile-w + 12px);
+                y: 38px + floor(i / search-cols) * 66px;
+                width: parent.tile-w;
+                card: card;
+                filled: true;
+            }
+        }
+        if search-all && App.tracks.length > 0: SectionHeader {
+            x: pad;
+            y: y-search-tracks;
+            width: w;
+            title: "Tracks";
+            view-all: false;
         }
         if artist-page: Rectangle {
             x: pad;
@@ -1386,9 +1918,11 @@ export component TracksView inherits Rectangle {
                 clicked => { App.play-all(false); }
             }
         }
-        if !artist-page && !video-tab: PillButton {
+        if !artist-page && !search-page && !video-tab: PillButton {
             x: pad;
             y: y-buttons;
+            width: root.pill-w;
+            height: root.pill-h;
             text: "Play";
             icon: @image-url("icons/play.svg");
             primary: true;
@@ -1397,9 +1931,11 @@ export component TracksView inherits Rectangle {
             }
         }
 
-        if !artist-page && !video-tab: PillButton {
-            x: pad + 176px + 18px;
+        if !artist-page && !search-page && !video-tab: PillButton {
+            x: pad + root.pill-w + (stack ? 12px : 18px);
             y: y-buttons;
+            width: root.pill-w;
+            height: root.pill-h;
             text: "Shuffle";
             icon: @image-url("icons/shuffle.svg");
             clicked => {
@@ -1427,18 +1963,30 @@ export component TracksView inherits Rectangle {
                 clicked => { App.toggle-page-favorite(); }
             }
         }
-        // Add / Credits / Share / More, right of Play and Shuffle on album,
-        // playlist and mix pages.
+        // Add / Edit / Private / Credits / Share / More, right of Play and
+        // Shuffle on album, playlist and mix pages.
         if App.page-card.id != "": HorizontalLayout {
-            x: root.width - pad - self.width;
-            y: y-buttons - 2px;
+            x: !actions-below ? root.width - pad - self.width : stack ? (root.width - self.width) / 2 : pad;
+            y: actions-below ? y-actions : y-buttons - 2px;
             width: self.preferred-width;
             height: 58px;
-            spacing: 12px;
+            spacing: stack ? clamp((w - action-count * 64px) / max(1, action-count - 1), 0px, 24px) : 12px;
             if App.page-can-favorite: ActionButton {
                 icon: App.page-favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                 label: App.page-favorite ? "Added" : "Add";
                 clicked => { App.toggle-page-favorite(); }
+            }
+            // The user's own playlist: edit it, and show or hide it on their profile.
+            if own-playlist: ActionButton {
+                icon: @image-url("icons/edit.svg");
+                label: "Edit";
+                clicked => { App.page-action("edit", ""); }
+            }
+            if own-playlist: ActionButton {
+                icon: App.page-card.is-public ? @image-url("icons/unlock.svg") : @image-url("icons/lock.svg");
+                label: App.page-card.is-public ? "Public" : "Private";
+                tint: App.page-card.is-public ? Theme.lossless : Theme.text;
+                clicked => { App.page-action(App.page-card.is-public ? "make-private" : "make-public", ""); }
             }
             // Wrapped: a popup on the root of a conditional element crashes the Slint 1.18 compiler.
             if album-page: HorizontalLayout {
@@ -1565,9 +2113,15 @@ export component TracksView inherits Rectangle {
                 font-size: 15px;
                 vertical-alignment: center;
             }
+            // "/" focuses this field (platform::configure_input).
+            if filter.text == "": Kbd {
+                x: parent.width - self.width - 12px;
+                y: (parent.height - self.height) / 2;
+                glyph: "/";
+            }
             filter := EditableInput {
                 x: 49px;
-                width: parent.width - 65px;
+                width: parent.width - 65px - (self.text == "" ? 32px : 0px);
                 height: 20px;
                 text <=> App.filter-text;
                 color: Theme.text;
@@ -1578,9 +2132,31 @@ export component TracksView inherits Rectangle {
                 edited => {
                     App.filter(self.text);
                 }
+                // Enter plays the picked track (the first, or where ↑ ↓ moved it).
+                accepted => {
+                    if (App.pick-index >= 0 && App.pick-index < App.tracks.length) {
+                        App.play-track(App.tracks[App.pick-index].id);
+                    }
+                }
+                property <bool> filter-has-focus: self.has-focus;
+                changed filter-has-focus => { App.filter-focused = self.filter-has-focus; }
+                init => {
+                    App.filter-focused = false;
+                    self.take-filter-focus();
+                }
+                property <int> focus-request: App.focus-filter;
+                changed focus-request => { self.take-filter-focus(); }
+                function take-filter-focus() {
+                    if App.focus-filter != App.focus-filter-seen {
+                        App.focus-filter-seen = App.focus-filter;
+                        self.focus();
+                        self.select-all();
+                    }
+                }
             }
         }
-        if show-tracks: Rectangle {
+        // Stacked rows need no column heads.
+        if show-tracks && !stacked-rows: Rectangle {
             x: pad;
             y: y-columns;
             width: w;
@@ -1602,7 +2178,7 @@ export component TracksView inherits Rectangle {
                 text: "ARTIST";
             }
 
-            if !album-page: HeaderLabel {
+            if show-album: HeaderLabel {
                 x: x-album;
                 text: "ALBUM";
             }
@@ -1639,10 +2215,15 @@ export component TracksView inherits Rectangle {
                 width: parent.width;
                 track: App.tracks[first + i];
                 index: first + i;
+                spotlight: first + i == App.pick-index && root.picking;
                 album-page: root.album-page;
                 artist-page: root.artist-page;
                 show-bpm: root.show-bpm;
                 show-date: root.show-date;
+                show-album: root.show-album;
+                show-time: root.show-time;
+                show-heart: root.show-heart;
+                stacked: root.stacked-rows;
                 x-artist: root.x-artist;
                 x-album: root.x-album;
                 x-date: root.x-date;
@@ -1652,7 +2233,7 @@ export component TracksView inherits Rectangle {
             if root.track-placeholders && first + i >= App.tracks.length: TrackPlaceholder {
                 width: parent.width;
                 x-artist: root.x-artist;
-                x-album: root.x-album;
+                x-album: root.show-album ? root.x-album : root.x-time;
                 x-time: root.x-time;
             }
         }
@@ -1669,15 +2250,41 @@ export component TracksView inherits Rectangle {
         }
         artist-content := VerticalLayout {
             x: pad;
-            y: artist-page && !show-tracks ? y-tabs + 62px : search-page && video-tab ? search-tabs-y + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
+            y: artist-page && !show-tracks ? y-tabs + 62px : search-page && !search-all ? search-tabs-y + 62px : header-h + row-count * row-h + (row-count == 0 ? 58px : 20px);
             width: w;
             height: self.preferred-height;
             spacing: 16px;
-            if (artist-page && video-tab) || search-page: VideoGrid {
+            if video-tab: CardGrid {
+                title: "Videos";
                 cards: root.artist-page ? App.artist-videos : App.search-videos;
                 status: root.artist-page ? App.artist-videos-status : App.search-videos-status;
                 empty-text: root.artist-page ? "No videos available for this artist" : "No videos found";
-                request-art(from, upto) => { App.catalog-video-art(root.artist-page, from, upto); }
+                error-text: "Couldn’t load videos. Try opening this page again.";
+                request-art(from, upto) => { App.catalog-art(root.artist-page ? "artist-videos" : "search-videos", -1, from, upto); }
+            }
+            if album-tab: VerticalLayout {
+                spacing: 16px;
+                for group[g] in App.search-album-groups: CardGrid {
+                    title: group.title;
+                    wide: false;
+                    cards: group.cards;
+                    status: App.search-albums-status;
+                    empty-text: "No albums found";
+                    error-text: "Couldn’t load albums. Try opening this page again.";
+                    request-art(from, upto) => { App.catalog-art("search-albums", g, from, upto); }
+                }
+            }
+            if playlist-tab: VerticalLayout {
+                spacing: 16px;
+                for group[g] in App.search-playlist-groups: CardGrid {
+                    title: group.title;
+                    wide: false;
+                    cards: group.cards;
+                    status: App.search-playlists-status;
+                    empty-text: "No playlists found";
+                    error-text: "Couldn’t load playlists. Try opening this page again.";
+                    request-art(from, upto) => { App.catalog-art("search-playlists", g, from, upto); }
+                }
             }
             if album-page && App.page-release-line != "": VerticalLayout {
                 padding-top: 4px;
@@ -1767,89 +2374,6 @@ export component TracksView inherits Rectangle {
 // ---------------------------------------------------------------- card grid
 
 // Round header button that opens a list of choices (sort by / group by).
-component ChoiceButton inherits Rectangle {
-    in property <image> icon;
-    in property <string> heading;
-    in property <[string]> options;
-    in property <string> current;
-    in property <bool> highlighted: false;
-    in property <string> toggle-label: "";
-    in property <bool> toggle-on: false;
-    callback chosen(string);
-    callback toggled(bool);
-    width: 34px;
-    height: 34px;
-    border-radius: 17px;
-    background: ta.has-hover ? #1e1e1e : transparent;
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            pop.show();
-        }
-    }
-
-    Icon {
-        source: root.icon;
-        size: 18px;
-        tint: root.highlighted ? Theme.lossless : ta.has-hover ? Theme.text : Theme.text-secondary;
-    }
-
-    pop := PopupWindow {
-        x: 0px;
-        y: root.height + 6px;
-        width: 260px;
-        MenuPanel {
-            Text {
-                height: 30px;
-                text: "   " + root.heading;
-                color: Theme.text-secondary;
-                font-size: 12px;
-                font-weight: Theme.demibold;
-                letter-spacing: 0.8px;
-                vertical-alignment: center;
-            }
-
-            for option in root.options: MenuRow {
-                label: option;
-                checked: option == root.current;
-                activated => {
-                    root.chosen(option);
-                }
-            }
-
-            if root.toggle-label != "": Rectangle {
-                height: 8px;
-                Rectangle {
-                    y: 4px;
-                    height: 1px;
-                    background: #3a3a3a;
-                }
-            }
-            if root.toggle-label != "": Rectangle {
-                height: 44px;
-                Text {
-                    x: 14px;
-                    width: parent.width - 76px;
-                    text: root.toggle-label;
-                    color: Theme.text;
-                    font-size: 15px;
-                    font-weight: Theme.demibold;
-                    overflow: elide;
-                    vertical-alignment: center;
-                }
-                Toggle {
-                    x: parent.width - 54px;
-                    y: 8px;
-                    on: root.toggle-on;
-                    toggled(v) => {
-                        root.toggled(v);
-                    }
-                }
-            }
-        }
-    }
-}
-
 // Discrete artwork-size control. Left is smaller covers, right is larger.
 component StepSlider inherits Rectangle {
     in property <int> value;
@@ -1919,21 +2443,38 @@ component StepSlider inherits Rectangle {
 }
 
 export component GridView inherits Rectangle {
-    property <length> pad: clamp((self.width - 900px) * 0.12, 24px, 90px);
+    property <length> pad: clamp((self.width - 900px) * 0.12, App.page-gutter, 90px);
     property <length> w: self.width - 2 * pad;
     property <length> gap: App.grid-size <= 1 ? 12px : 18px;
     property <length> min-card: App.grid-size <= 0 ? 120px : App.grid-size == 1 ? 152px : App.grid-size == 2 ? 188px : App.grid-size == 3 ? 236px : 292px;
     property <int> cols: max(2, floor((w + gap) / (min-card + gap)));
+    property <bool> narrow: w < 460px;
     property <length> card-w: (w - (cols - 1) * gap) / cols;
     // Profiles have no subtitle line under the name.
     property <length> cell-h: App.grid-kind == "videos" ? card-w * 9 / 16 + 100px + gap : card-w + (App.grid-kind == "profiles" ? 40px : 76px) + gap;
-    ScrollView {
+    // While a track is dragged over the page, holding it near the top or
+    // bottom scrolls the grid (the wheel goes to the area that holds the
+    // pointer), faster the closer to the edge.
+    property <length> drag-edge: 72px;
+    property <length> drag-top: App.pane-y + 64px;
+    property <length> drag-bottom: App.pane-y + App.pane-height - App.bar-inset;
+    property <float> drag-pull: !App.drag-over-page ? 0
+        : App.drag-y < drag-top + drag-edge ? (drag-top + drag-edge - App.drag-y) / drag-edge
+        : App.drag-y > drag-bottom - drag-edge ? (drag-bottom - drag-edge - App.drag-y) / drag-edge : 0;
+    Timer {
+        interval: 16ms;
+        running: root.drag-pull != 0;
+        triggered => {
+            App.scroll-y = clamp(App.scroll-y + root.drag-pull * 18px, min(0px, sv.visible-height - sv.content-height), 0px);
+        }
+    }
+    sv := ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
             padding-top: 8px;
-            padding-bottom: 24px;
+            padding-bottom: 24px + App.bar-inset;
             spacing: 0px;
             alignment: start;
             Rectangle {
@@ -1942,7 +2483,7 @@ export component GridView inherits Rectangle {
                     width: 100%;
                     spacing: 12px;
                     HorizontalLayout {
-                        horizontal-stretch: 0;
+                        horizontal-stretch: root.narrow ? 1 : 0;
                         spacing: 6px;
                         Text {
                             text: App.page-title;
@@ -1950,6 +2491,10 @@ export component GridView inherits Rectangle {
                             font-size: 28px;
                             font-weight: 700;
                             vertical-alignment: center;
+                            // A long folder name gives way to the buttons.
+                            overflow: elide;
+                            min-width: 60px;
+                            horizontal-stretch: root.narrow ? 1 : 0;
                         }
 
                         Rectangle {
@@ -1987,10 +2532,11 @@ export component GridView inherits Rectangle {
                             }
                         }
                     }
-                    Rectangle {
+                    if !root.narrow: Rectangle {
                         horizontal-stretch: 1;
                     }
-                    VerticalLayout {
+                    // Phone width: no room for the artwork size; the cards fill two columns.
+                    if !root.narrow: VerticalLayout {
                         horizontal-stretch: 0;
                         alignment: center;
                         StepSlider {
@@ -2023,9 +2569,15 @@ export component GridView inherits Rectangle {
                     font-size: 15px;
                     vertical-alignment: center;
                 }
+                // "/" focuses this field (platform::configure_input).
+                if filter.text == "": Kbd {
+                    x: parent.width - self.width - 12px;
+                    y: (parent.height - self.height) / 2;
+                    glyph: "/";
+                }
                 filter := EditableInput {
                     x: 49px;
-                    width: parent.width - 65px;
+                    width: parent.width - 65px - (self.text == "" ? 32px : 0px);
                     height: 20px;
                     text <=> App.filter-text;
                     color: Theme.text;
@@ -2035,6 +2587,23 @@ export component GridView inherits Rectangle {
                     selection-background-color: #4a4a4a;
                     edited => {
                         App.filter(self.text);
+                    }
+                    // Enter plays the picked playlist / album / artist (opens a folder).
+                    accepted => { App.play-grid-pick(); }
+                    property <bool> filter-has-focus: self.has-focus;
+                    changed filter-has-focus => { App.filter-focused = self.filter-has-focus; }
+                    init => {
+                        App.filter-focused = false;
+                        self.take-filter-focus();
+                    }
+                    property <int> focus-request: App.focus-filter;
+                    changed focus-request => { self.take-filter-focus(); }
+                    function take-filter-focus() {
+                        if App.focus-filter != App.focus-filter-seen {
+                            App.focus-filter-seen = App.focus-filter;
+                            self.focus();
+                            self.select-all();
+                        }
                     }
                 }
             }
@@ -2052,7 +2621,9 @@ export component GridView inherits Rectangle {
                 color: Theme.text-secondary;
                 font-size: 15px;
             }
-            for group[g] in App.grid-groups: VerticalLayout {
+            for group[g] in App.grid-groups: grp := VerticalLayout {
+                // A card flying in from another group passes over the groups after it.
+                z: App.grid-fly-group == g ? 1 : 0;
                 // Group header in the style of a library "group by" view:
                 // a rule, the group name and how many items it holds.
                 if group.title != "": Rectangle {
@@ -2086,7 +2657,16 @@ export component GridView inherits Rectangle {
                         horizontal-alignment: right;
                     }
                 }
-                Rectangle {
+                // The ungrouped rest under the Pinned group: just the rule between them.
+                if group.title == "" && g > 0: Rectangle {
+                    height: 28px;
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: #1f1f1f;
+                    }
+                }
+                cells := Rectangle {
                     property <int> n: group.cards.length;
                     property <int> first-row: max(0, floor((-art.absolute-position.y - art.overscan) / root.cell-h));
                     property <int> vis-rows: max(1, ceil((art.overscan + max(App.pane-height, 1px) + art.overscan) / root.cell-h));
@@ -2100,10 +2680,14 @@ export component GridView inherits Rectangle {
                         request(from, upto) => { App.grid-art(g, from, upto); }
                     }
                     for card[i] in group.cards: GridItem {
-                        x: mod(i, root.cols) * (root.card-w + root.gap);
-                        y: floor(i / root.cols) * root.cell-h;
+                        slot-x: mod(i, root.cols) * (root.card-w + root.gap);
+                        slot-y: floor(i / root.cols) * root.cell-h;
+                        group-y: grp.y + cells.y;
                         width: root.card-w;
                         card: card;
+                        hover-panel: true;
+                        spotlight: App.filter-focused && card.id == App.grid-pick-id;
+                        drop-zone: true;
                     }
                 }
             }
@@ -2113,6 +2697,7 @@ export component GridView inherits Rectangle {
 
 export component StubView inherits Rectangle {
     VerticalLayout {
+        padding-bottom: App.bar-inset;
         alignment: center;
         spacing: 10px;
         Text {
@@ -2132,7 +2717,334 @@ export component StubView inherits Rectangle {
     }
 }
 
+// ---------------------------------------------------------------- collection
+
+// A place in My Collection, as a row of the Collection tab.
+component CollectionRow inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <string> key;
+    height: 52px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { App.navigate(root.key); }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { App.navigate(root.key); }
+    }
+    Rectangle {
+        x: -8px;
+        width: parent.width + 16px;
+        border-radius: 10px;
+        background: ta.has-hover ? #141414 : transparent;
+    }
+    Icon {
+        x: 2px;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        size: 20px;
+        tint: Theme.text;
+    }
+    Text {
+        x: 38px;
+        width: parent.width - self.x - 28px;
+        text: root.label;
+        color: Theme.text;
+        font-size: 16px;
+        font-weight: Theme.demibold;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+    Icon {
+        x: parent.width - self.width;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("icons/chevron-right.svg");
+        size: 16px;
+        tint: Theme.text-secondary;
+    }
+}
+
+// The Collection tab of the phone layout: what the sidebar offers on a wider
+// window, My Collection's pages and then every playlist and folder.
+export component CollectionView inherits Rectangle {
+    property <length> pad: App.page-gutter;
+    ScrollView {
+        content-y <=> App.scroll-y;
+        VerticalLayout {
+            padding-top: 8px;
+            padding-bottom: 24px + App.bar-inset;
+            alignment: start;
+            VerticalLayout {
+                padding-left: root.pad;
+                padding-right: root.pad;
+                Text {
+                    height: 48px;
+                    text: "Collection";
+                    color: Theme.text;
+                    font-size: 28px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { height: 10px; }
+                CollectionRow { label: "Mixes"; key: "mixes"; icon: @image-url("icons/radio.svg"); }
+                CollectionRow { label: "Playlists"; key: "playlists"; icon: @image-url("icons/playlist.svg"); }
+                CollectionRow { label: "Albums"; key: "albums"; icon: @image-url("icons/disc.svg"); }
+                CollectionRow { label: "Tracks"; key: "tracks"; icon: @image-url("icons/music.svg"); }
+                CollectionRow { label: "Videos"; key: "videos"; icon: @image-url("icons/video.svg"); }
+                CollectionRow { label: "Profiles"; key: "profiles"; icon: @image-url("icons/key.svg"); }
+                CollectionRow { label: "Save for Later"; key: "later"; icon: @image-url("icons/bookmark.svg"); }
+                Rectangle {
+                    height: 70px;
+                    Text {
+                        x: 0px;
+                        y: 28px;
+                        text: "All playlists";
+                        color: Theme.text;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    CreateButton {
+                        x: parent.width - 66px;
+                        y: 22px;
+                        size: 18px;
+                    }
+                    IconButton {
+                        x: parent.width - 34px;
+                        y: 22px;
+                        icon: @image-url("icons/sort.svg");
+                        size: 18px;
+                        tint: App.sidebar-ascending ? Theme.text-secondary : Theme.text;
+                        clicked => { App.sort-playlists(); }
+                    }
+                }
+            }
+            // The sidebar's own rows: 16px in, as this page's margin.
+            for card in App.sidebar-playlists: SidebarPlaylist {
+                compact: false;
+                card: card;
+            }
+            if App.sidebar-playlists.length == 0: HorizontalLayout {
+                padding-left: root.pad;
+                Text {
+                    text: "No playlists yet";
+                    color: Theme.text-secondary;
+                    font-size: 15px;
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- now playing
+
+// One line of the lyrics column. Reports its place when it becomes the line
+// being sung, so the column can scroll to it.
+component LyricRow inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> synced;
+    in property <length> font-size;
+    // The column's edge fade and reveal, already multiplied.
+    in property <float> fade: 1;
+    callback picked();
+    callback current(length, length);
+
+    init => { if (root.active) { root.current(root.y, root.height); } }
+    changed active => { if (root.active) { root.current(root.y, root.height); } }
+    changed y => { if (root.active) { root.current(root.y, root.height); } }
+    changed height => { if (root.active) { root.current(root.y, root.height); } }
+
+    // How bright the line is, before the fade: animated on its own so the
+    // fade (which follows the scroll every frame) is not.
+    property <float> level: root.active ? 1 : !root.synced ? 0.82 : ta.has-hover ? 0.7 : 0.38;
+    animate level { duration: 320ms; easing: ease-out; }
+
+    // The gap to the next line is part of the line, so a click between two
+    // lines still lands on one.
+    VerticalLayout {
+        padding-top: root.font-size * 0.4;
+        padding-bottom: root.font-size * 0.4;
+        Text {
+            text: root.text;
+            color: #ffffff.with-alpha(root.level * root.fade);
+            font-size: root.font-size;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.synced;
+        mouse-cursor: root.synced ? pointer : default;
+        clicked => { root.picked(); }
+    }
+}
+
+// The lyrics: every line, the one being sung kept a little above the middle,
+// lines fading out at the top and bottom edges. Scrolling by hand stops the
+// following until "Sync lyrics" is clicked.
+component LyricsColumn inherits Rectangle {
+    // Expansion times the lyrics transition: how much of the column shows.
+    in property <float> reveal: 1;
+    in property <length> font-size: 22px;
+    in property <bool> glass: false;
+    clip: true;
+    accessible-role: list;
+    accessible-label: "Lyrics text";
+
+    property <length> band: min(root.height * 0.16, 88px);
+    // Where the middle of the line being sung rests.
+    property <length> anchor: root.height * 0.38;
+    property <bool> following: true;
+    property <length> active-y: 0px;
+    property <length> active-h: 0px;
+    property <length> max-offset: max(0px, lines.preferred-height - root.height);
+    property <length> follow: clamp(root.active-y + root.active-h / 2 - root.anchor, 0px, root.max-offset);
+    animate follow { duration: 650ms; easing: cubic-bezier(0.33, 0, 0.2, 1); }
+    property <length> manual: 0px;
+    // 1 while following; eases back to the song on "Sync lyrics", lets go at
+    // once when scrolled by hand.
+    property <float> mix: root.following ? 1 : 0;
+    animate mix { duration: root.following ? 600ms : 0ms; easing: ease-in-out; }
+    property <length> offset: root.manual + (root.follow - root.manual) * root.mix;
+
+    // A new track starts at the top, following.
+    property <string> track: App.current-id;
+    changed track => { root.resync(); root.active-y = 0px; root.active-h = 0px; }
+    property <bool> open: App.show-now-playing;
+    changed open => { if (root.open) { root.resync(); } }
+    function resync() { root.following = true; }
+
+    // Lines fade out within `band` of the top and bottom edges.
+    pure function edge(middle: length) -> float {
+        let pos = middle - root.offset;
+        let t = clamp(min(pos, root.height - pos) / root.band, 0, 1);
+        return t * t * (3 - 2 * t);
+    }
+
+    scroller := TouchArea {
+        scroll-event(e) => {
+            if (e.delta-y == 0) {
+                return reject;
+            }
+            if (root.following) {
+                root.manual = root.offset;
+                root.following = false;
+            }
+            root.manual = clamp(root.manual - e.delta-y, 0px, root.max-offset);
+            return accept;
+        }
+        lines := VerticalLayout {
+            y: -root.offset;
+            width: root.width;
+            height: self.preferred-height;
+            padding-top: root.band;
+            padding-bottom: root.height - root.anchor;
+            for line[i] in App.lyrics: LyricRow {
+                text: line.text;
+                active: i == App.lyric-index;
+                synced: App.lyrics-synced && line.time >= 0;
+                font-size: root.font-size;
+                fade: root.reveal * root.edge(self.y + self.height / 2);
+                current(y, h) => {
+                    root.active-y = y;
+                    root.active-h = h;
+                }
+                picked => {
+                    root.resync();
+                    App.seek-lyric(i);
+                }
+            }
+        }
+    }
+
+    if !root.following && App.lyrics-synced && root.reveal > 0.99: Rectangle {
+        x: parent.width - self.width - 4px;
+        y: parent.height - self.height - 8px;
+        width: sync-label.preferred-width + 28px;
+        height: 32px;
+        border-radius: 16px;
+        background: root.glass ? (sync-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff3d 360deg) : @conic-gradient(#474c5301 0deg, #ffffff26 360deg))
+            : sync-ta.has-hover ? #ffffff3d : #ffffff26;
+        accessible-role: button;
+        accessible-label: "Sync lyrics";
+        accessible-action-default => { root.resync(); }
+        sync-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.resync(); }
+        }
+        sync-label := Text {
+            text: "Sync lyrics";
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+        }
+    }
+}
+
+// Title, artist and favourite under the artwork, where the player bar has no
+// room for them (App.compact-layout).
+component NowPlayingMeta inherits Rectangle {
+    in property <float> reveal: 1;
+    height: 52px;
+    HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            HorizontalLayout {
+                spacing: 8px;
+                title-ta := TouchArea {
+                    horizontal-stretch: 1;
+                    enabled: App.np-album-id != "";
+                    mouse-cursor: self.enabled ? pointer : default;
+                    clicked => { App.open-now-playing-album(); }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        Text {
+                            text: App.np-title;
+                            color: #ffffff.with-alpha(root.reveal);
+                            font-size: 18px;
+                            font-weight: 600;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        // Shown once the view is mostly open: fading it would
+                        // need a layer for 16 pixels.
+                        if App.np-explicit && root.reveal > 0.5: VerticalLayout {
+                            alignment: center;
+                            ExplicitBadge { }
+                        }
+                    }
+                }
+            }
+            artist-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { App.open-now-playing-artist(); }
+                Text {
+                    width: 100%;
+                    text: App.np-artist;
+                    color: #ffffff.with-alpha(root.reveal * (artist-ta.has-hover ? 0.85 : 0.6));
+                    font-size: 14px;
+                    overflow: elide;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            IconButton {
+                icon: App.np-favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+                size: 20px;
+                tint: #ffffff.with-alpha(root.reveal);
+                hover-tint: #ffffff.with-alpha(root.reveal);
+                accessible-role: button;
+                accessible-label: App.np-favorite ? "Remove from My Collection" : "Add to My Collection";
+                clicked => { App.toggle-favorite(App.current-id); }
+            }
+        }
+    }
+}
 
 export component NowPlayingView inherits Rectangle {
     out property <float> expansion: App.show-now-playing ? 1 : 0;
@@ -2140,6 +3052,9 @@ export component NowPlayingView inherits Rectangle {
     // Re-evaluated when the animation starts and ends, not every frame, so it
     // doesn't invalidate the cached layers below.
     out property <bool> presenting: App.show-now-playing || root.expansion > 0;
+    // Fully open, the view hides the page's player bar: it need not be glass.
+    init => { App.bar-covered = self.expansion >= 1; }
+    changed expansion => { App.bar-covered = self.expansion >= 1; }
     // Fading a group needs an offscreen layer; Skia sizes it to the whole
     // window, several times a frame. While the view animates, each faded group
     // renders once into a texture of its own size, which is blended instead.
@@ -2151,97 +3066,229 @@ export component NowPlayingView inherits Rectangle {
         visible: root.presenting;
         background: @linear-gradient(180deg, App.np-tint.with-alpha(root.expansion) 0%, App.np-tint.darker(0.6).with-alpha(root.expansion) 55%, #1a1716.with-alpha(root.expansion) 100%);
     }
+    // Glass: the cover's colours wash the whole view, so the glass panes have
+    // something to show; darkened towards the bottom for the lyrics and bar.
+    property <bool> glass: App.glass && App.np-backdrop.width > 0;
+    if root.glass && root.presenting: Image {
+        width: 100%;
+        height: 100%;
+        source: App.np-backdrop;
+        image-fit: fill;
+        image-rendering: smooth;
+        opacity: root.expansion;
+    }
+    if root.glass && root.presenting: Rectangle {
+        background: @linear-gradient(180deg, #000000.with-alpha(0.34 * root.expansion) 0%, #000000.with-alpha(0.5 * root.expansion) 60%, #000000.with-alpha(0.62 * root.expansion) 100%);
+    }
     // The collapsed artwork lets the original player-bar hit area handle clicks.
     TouchArea { enabled: root.presenting; }
     DragArea { y: 0px; height: 64px; enabled: App.show-now-playing; }
 
+    // ------------------------------------------------------------ layout
+    // Three arrangements, after TIDAL's own: wide (art centred, or art left
+    // and lyrics right), and narrow, one column: art over the title, the
+    // transport below (the overlay player bar, compact), the lyrics taking
+    // the art's place with the art shrunk beside the title.
+    property <bool> narrow: root.width < 720px;
+    // The overlay bar shows no title when compact: Now Playing does.
+    property <bool> meta: App.compact-layout;
+    property <length> meta-h: root.meta ? 68px : 0px;
+    // The lyrics are shown: wanted, and the track has some (or they load).
+    property <bool> lyrics-on: App.show-lyrics && App.lyrics-status == "";
+    // 0 without lyrics, 1 with; everything that moves between the two
+    // arrangements is a mix of both by this.
+    property <float> lyr: root.lyrics-on ? 1 : 0;
+    animate lyr { duration: 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+    property <length> top: 64px;
+    property <length> bottom: root.height - App.player-height - (root.narrow ? 8px : 24px);
+    property <length> room: max(0px, root.bottom - root.top - root.meta-h);
+    // Wide.
+    property <length> margin: clamp(root.width * 0.05, 32px, 96px);
+    property <length> gap: clamp(root.width * 0.045, 32px, 80px);
+    property <length> centred-size: max(0px, min(root.room * 0.86, root.width - 2 * root.margin));
+    property <length> side-size: max(0px, min(root.room * 0.84, (root.width - 2 * root.margin - root.gap) * 0.46, 640px));
+    property <length> column-w: max(0px, min(root.width - 2 * root.margin - root.gap - root.side-size, 560px));
+    property <length> pair-x: (root.width - root.side-size - root.gap - root.column-w) / 2;
+    // Narrow.
+    property <length> pad: 20px;
+    property <length> thumb: 56px;
+    property <length> narrow-size: max(0px, min(root.width - 2 * root.pad, root.room - 16px));
+    property <length> narrow-y: root.top + max(0px, (root.room - root.narrow-size) / 2);
+    property <length> narrow-meta-off: root.narrow-y + root.narrow-size + 12px;
+    property <length> narrow-meta-on: root.bottom - root.meta-h + (root.meta-h - root.thumb) / 2;
+
+    // The art at rest, without lyrics (off) and with them (on).
+    property <length> off-size: root.narrow ? root.narrow-size : root.centred-size;
+    property <length> off-x: (root.width - root.off-size) / 2;
+    property <length> off-y: root.narrow ? root.narrow-y : root.top + (root.room - root.off-size) / 2;
+    property <length> on-size: root.narrow ? root.thumb : root.side-size;
+    property <length> on-x: root.narrow ? root.pad : root.pair-x;
+    property <length> on-y: root.narrow ? root.narrow-meta-on : root.top + (root.room - root.on-size) / 2;
+
     // Destination-size art, scaled down to the player slot. Animating width/height
-    // or drop-shadow-blur rebuilds a ~1000px Skia blur every frame.
-    property <length> art: max(0px, min(self.height - App.player-height - (App.compact-layout ? 100px : 200px), self.width * 0.40));
-    property <length> slot: 62px;
+    // or drop-shadow-blur rebuilds a ~1000px Skia blur every frame: the art is
+    // laid out once at the larger of its two sizes and only scaled, by the
+    // expansion and by the lyrics transition alike.
+    property <length> base: max(1px, root.off-size, root.on-size);
+    property <length> art: root.off-size + (root.on-size - root.off-size) * root.lyr;
+    property <length> dest-x: root.off-x + (root.on-x - root.off-x) * root.lyr;
+    property <length> dest-y: root.off-y + (root.on-y - root.off-y) * root.lyr;
+    // The artwork's place in the dock at rest: the player bar's, or the phone
+    // layout's mini player.
+    property <length> slot: App.art-slot-size;
     property <length> slot-x: 16px;
-    property <length> slot-y: root.height - App.player-height + 17px;
-    property <length> dest-x: max(48px, root.width * 0.28 - root.art / 2);
-    property <length> dest-y: (root.height - App.player-height - root.art) / 2 + 20px;
-    property <float> grow: root.art > 0px ? slot / root.art + (1 - slot / root.art) * root.expansion : 1;
+    property <length> slot-y: root.height - App.dock-height + App.art-slot-top;
+    property <float> grow: (root.slot + (root.art - root.slot) * root.expansion) / root.base;
+
+    // The art leans away from the pointer, as if pressed where it points,
+    // and rests flat when the pointer leaves. Drawn by the Skia renderer's
+    // tilt marker (vendor/i-slint-renderer-skia/tilt.rs); other renderers
+    // draw it flat. Eased, so a still pointer costs no frames.
+    property <bool> tracking: art-ta.has-hover && App.show-now-playing && root.art > 120px;
+    property <float> pu: root.tracking ? clamp(art-ta.mouse-x / max(1px, art-ta.width) * 2 - 1, -1, 1) : 0;
+    property <float> pv: root.tracking ? clamp(art-ta.mouse-y / max(1px, art-ta.height) * 2 - 1, -1, 1) : 0;
+    animate pu, pv { duration: 420ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    property <float> lift: root.tracking ? 1.02 : 1;
+    animate lift { duration: 420ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    // Degrees as lengths: the marker's centre carries them.
+    property <length> yaw: root.pu * 8px;
+    property <length> pitch: root.pv * 8px;
+
     Rectangle {
         x: root.slot-x + (root.dest-x - root.slot-x) * root.expansion;
         y: root.slot-y + (root.dest-y - root.slot-y) * root.expansion;
-        width: root.art;
-        height: root.art;
+        width: root.base;
+        height: root.base;
         transform-origin: { x: 0px, y: 0px };
         transform-scale: root.grow;
-        border-radius: 4px;
-        drop-shadow-blur: root.presenting ? 60px : 0;
-        drop-shadow-color: #00000080;
-        Cover {
-            width: 100%;
-            height: 100%;
-            source: App.np-cover-large.width > 0 ? App.np-cover-large : App.np-cover;
-            radius: (4px - 2px * root.expansion) / max(root.grow, 0.001);
+        Rectangle {
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
+            transform-scale: root.lift;
+            background: @conic-gradient(at root.yaw root.pitch, #3d711701 0deg, #3d711701 360deg);
+            Rectangle {
+                border-radius: 4px;
+                drop-shadow-blur: root.presenting ? 60px : 0;
+                drop-shadow-color: #00000080;
+                Cover {
+                    width: 100%;
+                    height: 100%;
+                    source: App.np-cover-large.width > 0 ? App.np-cover-large : App.np-cover;
+                    radius: (4px - 2px * root.expansion) / max(root.grow, 0.001);
+                }
+            }
         }
     }
-    VerticalLayout {
-        x: root.width * 0.51;
-        y: 96px;
-        width: root.width * 0.37;
-        height: root.height - 96px - 110px;
-        visible: root.presenting;
-        alignment: center;
-        spacing: 30px;
-        if App.lyrics.length == 0: Text {
-            text: App.lyrics-status;
-            opacity: root.expansion;
-            color: #ffffff80;
-            font-size: 28px;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
-        for line in App.lyrics: Text {
-            text: line.text;
-            opacity: root.expansion;
-            color: line.active ? white : #ffffff66;
-            font-size: line.active ? 42px : 38px;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
+    // Where the pointer is over the art, at rest (flat, unscaled).
+    art-ta := TouchArea {
+        x: root.dest-x;
+        y: root.dest-y;
+        width: root.art;
+        height: root.art;
+        enabled: App.show-now-playing;
+        accessible-role: image;
+        accessible-label: "Artwork";
     }
+
+    if root.meta && root.presenting: NowPlayingMeta {
+        // Under the art; in the narrow arrangement with lyrics, beside the
+        // thumbnail at the bottom.
+        x: root.narrow ? root.pad + (root.thumb + 14px) * root.lyr : root.dest-x;
+        y: root.narrow ? root.narrow-meta-off + (root.narrow-meta-on - root.narrow-meta-off) * root.lyr
+            : root.dest-y + root.art + 14px;
+        width: root.narrow ? root.width - root.pad - self.x : max(200px, root.art);
+        reveal: root.expansion;
+    }
+
+    if root.presenting && root.lyr > 0: LyricsColumn {
+        x: root.narrow ? root.pad : root.pair-x + root.side-size + root.gap + 48px * (1 - root.lyr);
+        y: root.top;
+        width: root.narrow ? root.width - 2 * root.pad : root.column-w;
+        height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
+        font-size: clamp(self.width * 0.045, 18px, 30px);
+        reveal: root.expansion * root.lyr;
+        glass: root.glass;
+    }
+
     // Lyrics | Search, Debug, Profile, using the same tools as the other views.
-    Rectangle {
-        x: header.x - 101px;
+    // Narrow: the search gives way; Minimize moves up beside Lyrics. At the
+    // narrowest windows the row tightens so Minimize stays clear of the
+    // traffic lights (the window's left 80px of the top row).
+    property <bool> tight: root.narrow && root.width < 360px;
+    lyrics-group := Rectangle {
+        x: header.x - self.width;
         y: 0px;
-        width: 101px;
+        width: root.tight ? 92px : 101px;
         height: 64px;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
         visible: root.presenting;
+        // Lit when the lyrics show; dim when the track has none.
+        property <bool> none: App.lyrics-status != "";
         Rectangle {
             x: 0px;
             y: 15px;
             width: 68px;
             height: 34px;
             border-radius: 17px;
-            background: white;
-            Text { text: "Lyrics"; color: black; font-size: 14px; font-weight: 600; }
+            background: App.show-lyrics && !lyrics-group.none ? (pill-ta.has-hover ? #e6e6e6 : white)
+                : pill-ta.has-hover ? #ffffff2e : #ffffff14;
+            animate background { duration: 150ms; }
+            accessible-role: button;
+            accessible-label: "Lyrics";
+            accessible-checked: App.show-lyrics;
+            accessible-action-default => { root.toggle-lyrics(); }
+            pill-ta := TouchArea {
+                enabled: App.show-now-playing;
+                mouse-cursor: pointer;
+                clicked => { root.toggle-lyrics(); }
+            }
+            Text {
+                text: "Lyrics";
+                color: App.show-lyrics && !lyrics-group.none ? black : lyrics-group.none ? #ffffff59 : white;
+                font-size: 14px;
+                font-weight: 600;
+            }
         }
-        Rectangle { x: 84px; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
+        Rectangle { x: root.tight ? 77px : 84px; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
+    }
+    function toggle-lyrics() {
+        App.show-lyrics = !App.show-lyrics;
+        App.set-show-lyrics(App.show-lyrics);
     }
     header := HeaderTools {
         x: parent.width - self.width;
         y: 0px;
+        width: root.narrow ? (root.tight ? 92px : 101px) : 407px;
+        search: !root.narrow;
         active: App.show-now-playing;
         visible: root.presenting;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
     }
     MinimizeButton {
-        x: root.width - self.width - 32px;
-        y: root.height - App.player-height - 52px;
+        x: root.narrow ? max(80px, lyrics-group.x - (root.tight ? 6px : 8px) - self.width) : root.width - self.width - 32px;
+        y: root.narrow ? 14px : root.height - App.player-height - 52px;
+        width: root.narrow ? (root.tight ? 40px : 44px) : 96px;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
         visible: root.presenting;
         enabled: App.show-now-playing;
+        // Glass reads what is behind it: not while it fades in a layer of its own.
+        glass: root.glass && root.expansion >= 1;
         clicked => { App.show-now-playing = false; }
+    }
+    // The transport controls (the overlay PlayerBar, mounted after this) sit
+    // on a floating pane of glass. No children, so its opacity is the glass's
+    // own alpha and needs no layer.
+    if root.glass && root.presenting: Rectangle {
+        x: 10px;
+        y: root.height - App.player-height;
+        width: root.width - 20px;
+        height: App.player-height - 8px;
+        border-radius: 24px;
+        opacity: root.expansion;
+        background: @conic-gradient(#474c5301 0deg, #ffffff1f 360deg);
     }
 }
 

@@ -35,6 +35,12 @@ type PhysicalSize = euclid::Size2D<f32, PhysicalPx>;
 type PhysicalPoint = euclid::Point2D<f32, PhysicalPx>;
 type PhysicalBorderRadius = BorderRadius<f32, PhysicalPx>;
 
+/// TIDE patch: glass material for rectangles (backdrop blur).
+pub mod glass;
+
+/// TIDE patch: perspective tilt for a rectangle's children.
+mod tilt;
+
 /// TIDE patch: memory controls for the GPU side of the renderer. Upstream
 /// leaves Skia's GPU resource cache at its default budget (256 MB) and never
 /// trims it, so textures for artwork, layers and video frames that were on

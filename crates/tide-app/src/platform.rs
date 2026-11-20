@@ -16,6 +16,12 @@ pub fn configure_backend() {
         tracing::info!(%renderer, "Selecting UI renderer");
         if renderer == "skia" {
             selector = selector.require_metal();
+            // The player bar's glass is drawn by TIDE's patch to this
+            // renderer; the window's buffers must be readable for it.
+            if std::env::var("TIDE_GLASS").as_deref() != Ok("0") {
+                GLASS.store(true, std::sync::atomic::Ordering::Relaxed);
+                i_slint_renderer_skia::glass::set_available(true);
+            }
         }
         selector = selector.renderer_name(renderer);
         let selected = selector
@@ -32,6 +38,50 @@ pub fn configure_backend() {
         // After the winit backend is loaded so QuartzCore (CADisplayLink) exists.
         install_max_refresh_rate();
     }
+}
+
+/// The renderer can draw the player bar as glass (Skia; `TIDE_GLASS=0` turns
+/// it off). Set in `configure_backend`.
+static GLASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Liquid Glass switch (Settings > Performance & storage): 0 not used
+/// yet, 1 off, 2 on.
+static GLASS_CHOICE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_glass_choice(choice: Option<bool>) {
+    let value = match choice {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    GLASS_CHOICE.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this renderer can draw glass at all; the setting is moot otherwise.
+pub fn glass_available() -> bool {
+    GLASS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the player bar should be glass now. The listener's own choice
+/// decides; until they make one, glass is on unless macOS "Reduce
+/// transparency" (Accessibility > Display) is, as Apple asks of
+/// semitransparent backgrounds. Cheap enough to ask on the UI tick, which is
+/// how a change of the system setting reaches a running app.
+pub fn glass_wanted() -> bool {
+    if !glass_available() {
+        return false;
+    }
+    match GLASS_CHOICE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    #[cfg(target_os = "macos")]
+    {
+        !objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// Hz to ask a display link for, given the screen's `maximumFramesPerSecond`.
@@ -1338,6 +1388,15 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
     window.on_winit_window_event(move |window, event| {
         if let WindowEvent::ModifiersChanged(value) = event {
             modifiers = value.state();
+            crate::controller::set_command_held(if cfg!(target_os = "macos") {
+                modifiers.super_key()
+            } else {
+                modifiers.control_key()
+            });
+        }
+        // ⌘ released in another app never reaches this window.
+        if let WindowEvent::Focused(false) = event {
+            crate::controller::set_command_held(false);
         }
         // The menu advertises the unshifted '=' shortcut. Accept '+' too,
         // including keyboard layouts that produce it without Shift.
@@ -1361,6 +1420,31 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
             && event.logical_key == Key::Named(NamedKey::Space)
             && !(modifiers.super_key() || modifiers.control_key() || modifiers.alt_key())
             && crate::controller::space_toggles_play(
+                event.state == ElementState::Pressed,
+                event.repeat,
+            )
+        {
+            return EventResult::PreventDefault;
+        }
+        // ↑ ↓ in a focused search / filter field move the row or card Enter
+        // plays; ← → stay with the field for moving the caret.
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && let Key::Named(key @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) = &event.logical_key
+            && !(modifiers.super_key() || modifiers.control_key() || modifiers.alt_key())
+            && crate::controller::move_pick(
+                if *key == NamedKey::ArrowUp { -1 } else { 1 },
+                event.state == ElementState::Pressed,
+            )
+        {
+            return EventResult::PreventDefault;
+        }
+        // Single keys open the sidebar pages ("/" the page's filter), on the
+        // same terms as Space.
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && let Key::Character(text) = &event.logical_key
+            && !(modifiers.super_key() || modifiers.control_key() || modifiers.alt_key())
+            && crate::controller::nav_shortcut(
+                text,
                 event.state == ElementState::Pressed,
                 event.repeat,
             )

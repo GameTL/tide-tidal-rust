@@ -15,7 +15,8 @@ use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 use tide_api::{
-    ApiHandle, ArtistRef, Card, CatalogDetail, FavoriteIds, LaterItems, Lyrics, Section,
+    ApiHandle, ArtistRef, Card, CatalogDetail, FavoriteIds, LaterItems, Lyrics, PlaylistDetail,
+    Section,
     TidalService, TrackItem,
 };
 use tide_audio::{AudioPlayer, TrackQueueItem};
@@ -52,6 +53,8 @@ pub struct Settings {
     pub quality: String,
     pub show_collection: bool,
     pub show_audio_metadata: bool,
+    /// Draw each sidebar page's key letter white. Holding ⌘ shows them anyway.
+    pub show_key_letters: bool,
     /// Size limit of the offline audio cache.
     pub cache_max_gb: f64,
     /// Re-download the most played tracks when they are missing from the cache.
@@ -69,6 +72,13 @@ pub struct Settings {
     /// graphics budget. Off by default: TIDE keeps its memory low and still
     /// animates at the display's refresh rate.
     pub fancy_animation: bool,
+    /// Now Playing shows the lyrics beside the artwork (the Lyrics toggle).
+    #[serde(default = "default_true")]
+    pub show_lyrics: bool,
+    /// Draw the player bar as glass over what scrolls beneath it. Unset until
+    /// the listener uses the switch: glass then follows macOS Reduce
+    /// Transparency. Their choice overrides it either way.
+    pub glass: Option<bool>,
     /// Last window placement, kept with preferences so logout preserves it.
     #[cfg(target_os = "macos")]
     pub window: Option<crate::window_state::WindowState>,
@@ -86,6 +96,7 @@ impl Default for Settings {
             quality: "max".into(),
             show_collection: true,
             show_audio_metadata: true,
+            show_key_letters: true,
             cache_max_gb: 20.0,
             keep_most_played: true,
             rate_matching: true,
@@ -93,6 +104,8 @@ impl Default for Settings {
             grid_size: 3,
             zoom_percent: 100,
             fancy_animation: false,
+            show_lyrics: true,
+            glass: None,
             #[cfg(target_os = "macos")]
             window: None,
             skipped_version: String::new(),
@@ -115,6 +128,92 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_summary_reads_like_the_official_header() {
+        let detail = |tracks, duration, followers| PlaylistDetail {
+            track_count: tracks,
+            duration,
+            followers,
+            ..Default::default()
+        };
+        assert_eq!(
+            playlist_summary(&detail(500, 72_600, 11_500)),
+            "500 TRACKS  (20:10:00)  •  11.5K FANS"
+        );
+        assert_eq!(playlist_summary(&detail(1, 187, 1)), "1 TRACK  (3:07)  •  1 FAN");
+        assert_eq!(playlist_summary(&detail(0, 0, 0)), "0 TRACKS");
+        assert_eq!(
+            [999, 1_000, 999_949, 999_950, 2_340_000].map(fmt_count),
+            ["999", "1K", "999.9K", "1M", "2.3M"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn add_targets_put_the_recently_changed_playlists_first() {
+        let playlist = |id: &str, by: &str, updated: &str| Card {
+            id: id.into(),
+            kind: "playlist".into(),
+            title: id.into(),
+            by: by.into(),
+            updated: updated.into(),
+            ..Default::default()
+        };
+        let mut cards = vec![
+            Card {
+                id: "folder".into(),
+                kind: "folder".into(),
+                ..Default::default()
+            },
+            playlist("a", "Me", "2020-01-01T00:00:00.000+0000"),
+            playlist("b", "Me", "2026-03-01T00:00:00.000+0000"),
+            playlist("theirs", "TIDAL", "2026-11-01T00:00:00.000+0000"),
+            playlist("c", "Me", ""),
+            playlist("d", "Me", "2026-01-01T00:00:00.000+0000"),
+            playlist("e", "Me", "2021-01-01T00:00:00.000+0000"),
+            playlist("f", "Me", "2025-01-01T00:00:00.000+0000"),
+            playlist("g", "Me", "2019-01-01T00:00:00.000+0000"),
+        ];
+        let ids = |cards: &[Card], adds: &HashMap<String, i64>| {
+            let (order, recent) = add_targets(cards, adds);
+            let ids: Vec<String> = order.into_iter().map(|card| card.id).collect();
+            (ids.join(""), recent)
+        };
+        // Newest five first, then the others as listed; never someone else's.
+        assert_eq!(ids(&cards, &HashMap::new()), ("bdfeacg".to_string(), 5));
+        // A playlist TIDE just added to leads, even before TIDAL's date catches up.
+        let now = tide_api::web::iso_seconds("2026-11-20T00:00:00");
+        let adds = HashMap::from([("g".to_string(), now), ("gone".to_string(), now)]);
+        assert_eq!(ids(&cards, &adds), ("gbdfeac".to_string(), 5));
+        // Nothing to promote when every playlist fits in the recent rows.
+        cards.truncate(6);
+        assert_eq!(ids(&cards, &adds), ("abcd".to_string(), 0));
+    }
+
+    #[test]
+    fn lyric_rows_skip_blank_lines_and_the_sung_row_follows_the_time() {
+        let synced: Vec<(u64, String)> = [(1_000, "One"), (4_000, ""), (6_000, "Two"), (9_000, " Three ")]
+            .map(|(t, l)| (t, l.to_string()))
+            .to_vec();
+        let lyrics = Lyrics { plain: String::new(), synced: synced.clone() };
+        let rows = lyric_rows(&lyrics);
+        let shown: Vec<(String, i32)> = rows.iter().map(|r| (r.text.to_string(), r.time)).collect();
+        assert_eq!(
+            shown,
+            [("One".to_string(), 1_000), ("Two".to_string(), 6_000), ("Three".to_string(), 9_000)]
+        );
+        assert_eq!(sung_row(&synced, 0), -1);
+        assert_eq!(sung_row(&synced, 1_000), 0);
+        assert_eq!(sung_row(&synced, 4_500), -1, "an instrumental break lights no line");
+        assert_eq!(sung_row(&synced, 6_000), 1);
+        assert_eq!(sung_row(&synced, 60_000), 2);
+        // Untimed lyrics: every line, none of them seekable.
+        let plain = Lyrics { plain: "A\n\n  B  \n".into(), synced: vec![] };
+        let rows = lyric_rows(&plain);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.time == -1));
+        assert_eq!(rows[1].text, "B");
+    }
 
     #[test]
     fn kept_window_is_the_request_not_the_clamp() {
@@ -366,6 +465,12 @@ mod tests {
         assert_eq!(flat("A-Z"), ["apple", "Mango", "Zebra"]);
         assert_eq!(flat("Artist"), ["Mango", "Zebra", "apple"]);
         assert_eq!(flat("Release date"), ["Mango", "apple", "Zebra"]);
+        // Search results: "Relevance" leaves the server's order alone.
+        assert_eq!(flat("Relevance"), ["Zebra", "apple", "Mango"]);
+        for kind in ["search-albums", "search-playlists"] {
+            let (sorts, groups) = grid_options(kind);
+            assert_eq!((sorts[0], groups[0]), ("Relevance", "None"));
+        }
 
         // Filtering matches the title or who it is by.
         assert_eq!(
@@ -476,6 +581,63 @@ mod tests {
             .map(|(g, _)| g)
             .collect();
         assert_eq!(artists, ["Lauv", "Weezer"]);
+    }
+
+    #[test]
+    fn pinned_cards_move_to_a_group_on_top() {
+        let album = |title: &str, by: &str| Card {
+            kind: "album".into(),
+            id: title.into(),
+            title: title.into(),
+            by: by.into(),
+            ..Default::default()
+        };
+        let cards = vec![
+            album("Zebra", "Lauv"),
+            album("apple", "Weezer"),
+            album("Mango", "Lauv"),
+        ];
+        let names = |pins: &[&str], filter: &str, group: &str| {
+            let pins: HashSet<String> = pins.iter().map(|id| pin_key("album", id)).collect();
+            arrange_pinned(&cards, &pins, filter, "A-Z", group, false)
+                .into_iter()
+                .map(|(g, members)| {
+                    (
+                        g,
+                        members.iter().map(|c| c.title.clone()).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // No pins: the page as it always was.
+        assert_eq!(
+            names(&[], "", "None"),
+            [(String::new(), vec!["apple".into(), "Mango".into(), "Zebra".into()])]
+        );
+        // Pinned cards lead, sorted like the rest, and leave their old place.
+        assert_eq!(
+            names(&["Zebra", "Mango"], "", "None"),
+            [
+                ("Pinned".into(), vec!["Mango".into(), "Zebra".into()]),
+                (String::new(), vec!["apple".into()]),
+            ]
+        );
+        // Grouping arranges only what is not pinned; an emptied group goes.
+        assert_eq!(
+            names(&["Zebra", "Mango"], "", "Artist"),
+            [
+                ("Pinned".into(), vec!["Mango".into(), "Zebra".into()]),
+                ("Weezer".into(), vec!["apple".into()]),
+            ]
+        );
+        // The filter applies to the pins as well.
+        assert_eq!(
+            names(&["Zebra"], "apple", "None"),
+            [(String::new(), vec!["apple".into()])]
+        );
+        // A pin is per kind: a playlist with the same id stays put.
+        let pins: HashSet<String> = [pin_key("playlist", "Zebra")].into();
+        assert_eq!(arrange_pinned(&cards, &pins, "", "A-Z", "None", false).len(), 1);
     }
 
     #[test]
@@ -688,6 +850,20 @@ mod tests {
         meta.put_json("settings", r#"{"fancy_animation":true}"#)
             .unwrap();
         assert!(Settings::load(&meta).fancy_animation);
+    }
+
+    #[test]
+    fn glass_follows_the_system_until_the_user_chooses() {
+        let meta = MetadataCache::in_memory().unwrap();
+        assert_eq!(Settings::load(&meta).glass, None);
+
+        // 1.1.19 saved `liquid_glass: true` with every settings change; that
+        // was never a choice.
+        meta.put_json("settings", r#"{"liquid_glass":true}"#).unwrap();
+        assert_eq!(Settings::load(&meta).glass, None);
+
+        meta.put_json("settings", r#"{"glass":true}"#).unwrap();
+        assert_eq!(Settings::load(&meta).glass, Some(true));
     }
 
     #[test]
@@ -973,6 +1149,9 @@ enum Page {
     Feed,
     Later,
     Catalog { path: String, title: String },
+    /// Phone layout's Collection tab: My Collection's pages and the playlists,
+    /// what the sidebar holds on a wider window.
+    Collection,
 }
 
 impl Page {
@@ -1037,8 +1216,13 @@ struct State {
     page_context: String,
     tracks_model: Option<Rc<VecModel<TrackData>>>,
     sidebar_cards: Vec<Card>,
+    /// When TIDE last added to each playlist (id → Unix seconds), kept so
+    /// "Add to playlist" can list the ones in use first.
+    playlist_adds: HashMap<String, i64>,
     /// The card grid on screen, as loaded; filter, sort and grouping are applied on top.
     grid: Grid,
+    /// Search result lists the Albums and Playlists tabs sort and group.
+    search_lists: HashMap<Shelf, SearchList>,
     /// Album whose credits are loaded or loading.
     credits_for: String,
     /// Page and artist whose "more albums" and related artists were requested.
@@ -1047,6 +1231,8 @@ struct State {
     menu_track: Option<TrackItem>,
     /// The album, playlist, mix or artist the context menu was opened on.
     menu_card: Option<Card>,
+    /// The playlist open in the Edit dialog, as it was when the dialog opened.
+    editing: Option<PlaylistDetail>,
     queue: Vec<TrackItem>,
     order: Vec<usize>,
     pos: usize,
@@ -1074,7 +1260,9 @@ struct State {
 
     lyrics: Lyrics,
     lyrics_for: String,
-    lyric_idx: Option<usize>,
+    /// The row of `App.lyrics` last shown as being sung (-1: none), or
+    /// `None` before the first update for these lyrics.
+    lyric_row: Option<i32>,
 
     images: HashMap<String, (Image, Color)>,
     image_waiters: ImageWaiters,
@@ -1316,8 +1504,19 @@ fn show_chunks(generation: u64, status: String, stats: String, blocks: Vec<i32>,
         app.set_debug_status(status.into());
         app.set_debug_stats(stats.into());
         app.set_debug_active(active);
+        app.set_loaded(loaded_fraction(&blocks, active));
         app.set_debug_blocks(ModelRc::new(VecModel::from(blocks)));
     });
+}
+
+/// Share of the track playable from the start: the unbroken run of received
+/// chunks. No chunks and not downloading means the whole file is local.
+fn loaded_fraction(blocks: &[i32], active: bool) -> f32 {
+    if blocks.is_empty() {
+        return if active { 0.0 } else { 1.0 };
+    }
+    let run = blocks.iter().take_while(|b| **b == 2).count();
+    run as f32 / blocks.len() as f32
 }
 
 /// Space toggles playback unless a text field, a menu or the create dialog
@@ -1341,6 +1540,53 @@ pub fn space_toggles_play(pressed: bool, repeat: bool) -> bool {
     true
 }
 
+/// ⌘ (Ctrl off macOS) is down: the sidebar shows its page keys.
+pub fn set_command_held(held: bool) {
+    if let Some(ui) = UI.with(|u| u.borrow().clone()) {
+        let app = ui.app();
+        if app.get_command_held() != held {
+            app.set_command_held(held);
+        }
+    }
+}
+
+/// A sidebar page key: e Explore, f Feed, m Mixes, p Playlists,
+/// a Albums, t Tracks, v Videos, o Profiles. "/" focuses the filter of the
+/// collection page on screen, or opens Tracks and focuses its filter. Returns
+/// whether the key was taken. Not while typing, in a menu, a dialog or the
+/// video player.
+pub fn nav_shortcut(text: &str, pressed: bool, repeat: bool) -> bool {
+    let key = match text {
+        "e" => "explore",
+        "f" => "feed",
+        "m" => "mixes",
+        "p" => "playlists",
+        "a" => "albums",
+        "t" => "tracks",
+        "v" => "videos",
+        "o" => "profiles",
+        "/" => "/",
+        _ => return false,
+    };
+    let Some(ui) = UI.with(|u| u.borrow().clone()) else {
+        return false;
+    };
+    let app = ui.app();
+    if !app.get_logged_in()
+        || app.get_menu_open()
+        || !app.get_create_kind().is_empty()
+        || app.get_video_open()
+        || ui.win.get_typing()
+    {
+        return false;
+    }
+    if !pressed || repeat {
+        return true;
+    }
+    ui.page_key(key);
+    true
+}
+
 /// Note a primary click in window coordinates, so a focused text field it
 /// missed lets go of the keyboard.
 pub fn note_click(x: f32, y: f32) {
@@ -1361,6 +1607,24 @@ pub fn request_redraw() {
             ui.win.window().request_redraw();
         }
     });
+}
+
+/// The cover as Now Playing's glass backdrop: its colours and nothing else.
+/// 40 px and blurred, so stretched over the window it is a soft wash that
+/// costs 6 KB rather than a window-sized blur.
+fn backdrop_of(cover: &Image) -> Image {
+    const SIDE: u32 = 40;
+    let Some(pixels) = cover.to_rgba8() else {
+        return Image::default();
+    };
+    let Some(source) =
+        image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec())
+    else {
+        return Image::default();
+    };
+    let small = image::imageops::resize(&source, SIDE, SIDE, image::imageops::FilterType::Triangle);
+    let soft = image::imageops::blur(&small, 3.);
+    Image::from_rgba8(SharedPixelBuffer::clone_from_slice(soft.as_raw(), SIDE, SIDE))
 }
 
 /// `TIDE_FANCY_ANIMATION=1` (or 0) overrides the Fancy Animation setting for
@@ -1391,10 +1655,22 @@ struct Grid {
     group: String,
     /// Fold every playlist creator except Me into one "Others" group.
     combine_others: bool,
+    /// Cards pinned to the top of this page (`pin_key`); empty where pins don't apply.
+    pins: HashSet<String>,
     /// Per-group card models on screen, so artwork can be filled and dropped by range.
     models: Vec<Rc<VecModel<CardData>>>,
     /// The group list on screen, patched in place when a newer copy arrives.
     groups_model: Option<Rc<VecModel<SectionData>>>,
+}
+
+/// One search tab's results in relevance order, and how they are arranged on screen.
+#[derive(Default)]
+struct SearchList {
+    all: Vec<Card>,
+    sort: String,
+    group: String,
+    /// Per-group card models on screen, for artwork windows and favourite patches.
+    models: Vec<Rc<VecModel<CardData>>>,
 }
 
 /// Refreshes of the page on screen still waiting on the server.
@@ -1420,6 +1696,12 @@ fn grid_options(kind: &str) -> (&'static [&'static str], &'static [&'static str]
             &["None", "Creator", "Title"],
         ),
         "artist-releases" => (&["Release date", "A-Z"], &[]),
+        // Search results keep the server's order unless sorted. Same lists as views.slint.
+        "search-albums" => (
+            &["Relevance", "A-Z", "Artist", "Release date"],
+            &["None", "Artist", "Year", "Title"],
+        ),
+        "search-playlists" => (&["Relevance", "A-Z", "Creator"], &["None", "Creator", "Title"]),
         _ => (&["Date added", "A-Z"], &["None", "Title"]),
     }
 }
@@ -1502,6 +1784,46 @@ fn arrange_grid(
     groups
 }
 
+/// Library pages whose cards can be pinned to the top.
+fn pinnable_grid(kind: &str) -> bool {
+    matches!(kind, "mixes" | "playlists" | "albums" | "videos" | "profiles")
+}
+
+/// Where the pins live in the meta store. Not account data: kept through logout.
+const PINS_KEY: &str = "pins";
+
+/// How a card is named among the pins: kinds share ids, so the kind goes with it.
+fn pin_key(kind: &str, id: &str) -> String {
+    format!("{kind}:{id}")
+}
+
+/// `arrange_grid`, with the pinned cards lifted out into a "Pinned" group on top.
+/// Each card shows once: pinned ones leave the groups they would sit in.
+fn arrange_pinned(
+    cards: &[Card],
+    pins: &HashSet<String>,
+    filter: &str,
+    sort: &str,
+    group: &str,
+    combine_others: bool,
+) -> Vec<(String, Vec<Card>)> {
+    let (pinned, rest): (Vec<Card>, Vec<Card>) = cards
+        .iter()
+        .cloned()
+        .partition(|c| pins.contains(&pin_key(&c.kind, &c.id)));
+    let rest = arrange_grid(&rest, filter, sort, group, combine_others);
+    let pinned: Vec<Card> = arrange_grid(&pinned, filter, sort, "None", false)
+        .into_iter()
+        .flat_map(|(_, members)| members)
+        .collect();
+    if pinned.is_empty() {
+        return rest;
+    }
+    std::iter::once(("Pinned".to_string(), pinned))
+        .chain(rest.into_iter().filter(|(_, members)| !members.is_empty()))
+        .collect()
+}
+
 /// "2026-11-12" -> "NOVEMBER 12, 2026".
 fn long_date(iso: &str) -> String {
     const MONTHS: [&str; 12] = [
@@ -1531,6 +1853,78 @@ fn long_date(iso: &str) -> String {
 
 fn fmt_time(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The rows of the lyrics column: every line with words in it, with its start
+/// in milliseconds when the lyrics are timed (-1 otherwise).
+fn lyric_rows(lyrics: &Lyrics) -> Vec<LyricLine> {
+    if lyrics.synced.is_empty() {
+        lyrics
+            .plain
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| LyricLine { text: l.into(), time: -1 })
+            .collect()
+    } else {
+        lyrics
+            .synced
+            .iter()
+            .filter(|(_, text)| !text.trim().is_empty())
+            .map(|(t, text)| LyricLine {
+                text: text.trim().into(),
+                time: (*t).min(i32::MAX as u64) as i32,
+            })
+            .collect()
+    }
+}
+
+/// The row of [`lyric_rows`] being sung `ms` into the track: -1 before the
+/// first line and during a blank (instrumental) line.
+fn sung_row(synced: &[(u64, String)], ms: u64) -> i32 {
+    let Some(idx) = synced.iter().rposition(|(t, _)| *t <= ms) else {
+        return -1;
+    };
+    if synced[idx].1.trim().is_empty() {
+        return -1;
+    }
+    synced[..idx].iter().filter(|(_, text)| !text.trim().is_empty()).count() as i32
+}
+
+/// A long running time the way the official client writes it: `20:10:00`, or
+/// `42:07` under an hour.
+fn fmt_clock(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+    } else {
+        fmt_time(secs)
+    }
+}
+
+/// 11 500 -> "11.5K": a follower count short enough for one line.
+fn fmt_count(n: u64) -> String {
+    let short = |value: f64, unit: &str| {
+        let text = format!("{value:.1}");
+        format!("{}{unit}", text.strip_suffix(".0").unwrap_or(&text))
+    };
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_949 => short(n as f64 / 1e3, "K"),
+        _ => short(n as f64 / 1e6, "M"),
+    }
+}
+
+/// The small-caps line of a playlist page: `500 TRACKS  (20:10:00)  •  11.5K FANS`.
+fn playlist_summary(detail: &PlaylistDetail) -> String {
+    let mut line = tide_api::web::count_label(detail.track_count, detail.video_count);
+    if detail.duration > 0 {
+        line.push_str(&format!("  ({})", fmt_clock(detail.duration)));
+    }
+    if detail.followers > 0 {
+        let fans = if detail.followers == 1 { "FAN" } else { "FANS" };
+        line.push_str(&format!("  •  {} {fans}", fmt_count(detail.followers)));
+    }
+    line
 }
 
 fn in_prefetch_zone(progress: f32) -> bool {
@@ -1618,6 +2012,7 @@ fn card_row(c: &Card) -> CardData {
         image: Image::default(),
         image_url: c.image_url.as_deref().unwrap_or_default().into(),
         by: c.by.as_str().into(),
+        is_public: c.is_public,
         favorite: false,
         tint: tile_tint(&c.id, &c.title),
         detail: video_length(c.duration).into(),
@@ -1922,8 +2317,41 @@ fn card_from_row(card: &CardData) -> Card {
         quality: card.quality.to_string(),
         image_url: (!card.image_url.is_empty()).then(|| card.image_url.to_string()),
         by: card.by.to_string(),
+        is_public: card.is_public,
         ..Default::default()
     }
+}
+
+/// How many playlists "Add to playlist" lists first, most recently changed on top.
+const RECENT_PLAYLISTS: usize = 5;
+
+/// The user's own playlists in "Add to playlist" order: the few that last had
+/// something added (here, or anywhere according to TIDAL) first, newest on
+/// top, then the rest as the sidebar lists them. Also returns how many rows
+/// are the recent ones; none when everything fits in that many rows anyway.
+fn add_targets(cards: &[Card], adds: &HashMap<String, i64>) -> (Vec<Card>, usize) {
+    let own: Vec<&Card> = cards
+        .iter()
+        .filter(|c| c.kind == "playlist" && c.by == "Me")
+        .collect();
+    if own.len() <= RECENT_PLAYLISTS {
+        return (own.into_iter().cloned().collect(), 0);
+    }
+    let changed = |card: &Card| {
+        tide_api::web::iso_seconds(&card.updated).max(adds.get(&card.id).copied().unwrap_or(0))
+    };
+    let mut recent: Vec<usize> = (0..own.len()).filter(|&i| changed(own[i]) > 0).collect();
+    recent.sort_by_key(|&i| std::cmp::Reverse(changed(own[i])));
+    recent.truncate(RECENT_PLAYLISTS);
+    let rest = (0..own.len()).filter(|i| !recent.contains(i));
+    let count = recent.len();
+    let order: Vec<Card> = recent
+        .iter()
+        .copied()
+        .chain(rest)
+        .map(|i| own[i].clone())
+        .collect();
+    (order, count)
 }
 
 /// Whether the collection toggle applies: albums, and playlists known to be someone else's.
@@ -1983,6 +2411,99 @@ fn grid_art_px(grid_size: i32) -> u32 {
 /// Cards carry 320px URLs; above that, ask for a size the CDN has for the kind.
 /// Albums and playlists have 640x640; artist pictures skip 640 (403) and have 750x750.
 /// Other kinds (mixes, videos, pages) keep their URL.
+/// Playlists the search page's All tab previews before the Playlists tab.
+const SEARCH_PLAYLIST_PREVIEW: usize = 6;
+
+/// A card list fetched for one page and shown as a grid (videos, playlists).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Shelf {
+    ArtistVideos,
+    SearchVideos,
+    SearchAlbums,
+    SearchPlaylists,
+}
+
+impl Shelf {
+    const ALL: [Shelf; 4] = [
+        Shelf::ArtistVideos,
+        Shelf::SearchVideos,
+        Shelf::SearchAlbums,
+        Shelf::SearchPlaylists,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Shelf::ArtistVideos => "artist-videos",
+            Shelf::SearchVideos => "search-videos",
+            Shelf::SearchAlbums => "search-albums",
+            Shelf::SearchPlaylists => "search-playlists",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Shelf::ALL.into_iter().find(|shelf| shelf.key() == key)
+    }
+
+    /// Search tabs whose results can be sorted and grouped.
+    fn arranged(self) -> bool {
+        matches!(self, Shelf::SearchAlbums | Shelf::SearchPlaylists)
+    }
+
+    /// Heading over the results when they are not grouped.
+    fn label(self) -> &'static str {
+        match self {
+            Shelf::ArtistVideos | Shelf::SearchVideos => "Videos",
+            Shelf::SearchAlbums => "Albums",
+            Shelf::SearchPlaylists => "Playlists",
+        }
+    }
+}
+
+/// Where a grid's Enter pick starts: the first card that plays (folders lead
+/// playlist grids, and Enter only opens them).
+fn first_playable(rows: &[CardData]) -> usize {
+    rows.iter()
+        .position(|row| !matches!(row.kind.as_str(), "folder" | "page"))
+        .unwrap_or(0)
+}
+
+/// ↑ / ↓ while a search or filter field has focus: move the row or card Enter
+/// plays (`delta` -1 or +1). Returns whether the key was taken (the field never
+/// sees it).
+pub fn move_pick(delta: i32, pressed: bool) -> bool {
+    let Some(ui) = UI.with(|u| u.borrow().clone()) else {
+        return false;
+    };
+    let app = ui.app();
+    let view = app.get_view();
+    let picking = match view.as_str() {
+        "search" => app.get_search_focused() && app.get_search_text() == app.get_search_shown(),
+        "tracks" | "grid" => app.get_filter_focused(),
+        _ => false,
+    };
+    if !picking || app.get_menu_open() {
+        return false;
+    }
+    let count = if view == "grid" {
+        app.get_grid_cards().row_count()
+    } else {
+        app.get_tracks().row_count()
+    };
+    if count == 0 {
+        return true;
+    }
+    if pressed {
+        let at = (app.get_pick_index() + delta).clamp(0, count as i32 - 1);
+        app.set_pick_index(at);
+        if view == "grid"
+            && let Some(row) = app.get_grid_cards().row_data(at as usize)
+        {
+            app.set_grid_pick_id(row.id);
+        }
+    }
+    true
+}
+
 fn card_art_url(kind: &str, url: &str, max_px: u32) -> String {
     if max_px <= 320 || !url.ends_with("/320x320.jpg") {
         return url.to_string();
@@ -2211,6 +2732,14 @@ impl Ui {
         crate::window_state::restore(self.win.window(), &self.ctx);
     }
 
+    fn set_liquid_glass(self: &Rc<Self>, on: bool) {
+        self.update_settings(|s| s.glass = Some(on));
+        crate::platform::set_glass_choice(Some(on));
+        let glass = crate::platform::glass_wanted();
+        self.app().set_liquid_glass(glass);
+        self.app().set_glass(glass);
+    }
+
     // ------------------------------------------------------------ memory
 
     fn fancy_animation(&self) -> bool {
@@ -2388,6 +2917,7 @@ impl Ui {
         bind!(on_navigate, |ui, key| ui.navigate_key(&key));
         bind!(on_open_card, |ui, card| ui.open_card(card));
         bind!(on_play_card, |ui, card| ui.play_card(card));
+        bind!(on_play_grid_pick, |ui| ui.play_grid_pick());
         bind!(on_toggle_card_favorite, |ui, card| ui
             .toggle_card_favorite(card));
         bind!(on_set_home_tab, |ui, tab| ui.set_home_tab(tab));
@@ -2430,14 +2960,30 @@ impl Ui {
         bind!(on_artist_release_art, |ui, singles, from, upto| {
             ui.artist_release_art(singles, from.max(0) as usize, upto.max(0) as usize);
         });
-        bind!(on_catalog_video_art, |ui, artist, from, upto| {
-            let app = ui.app();
-            let (key, model) = if artist {
-                ("artist-videos", app.get_artist_videos())
-            } else {
-                ("search-videos", app.get_search_videos())
+        bind!(on_catalog_art, |ui, shelf, group, from, upto| {
+            let Some(shelf) = Shelf::from_key(&shelf) else {
+                return;
             };
-            ui.card_art(key, model, from.max(0) as usize, upto.max(0) as usize);
+            let (from, upto) = (from.max(0) as usize, upto.max(0) as usize);
+            if group < 0 {
+                let model = ui.shelf_model(shelf);
+                ui.card_art(shelf.key(), model, from, upto);
+                return;
+            }
+            let model = ui
+                .state
+                .borrow()
+                .search_lists
+                .get(&shelf)
+                .and_then(|list| list.models.get(group as usize).cloned());
+            if let Some(model) = model {
+                ui.card_art(&format!("{}:{group}", shelf.key()), ModelRc::from(model), from, upto);
+            }
+        });
+        bind!(on_arrange_search, |ui, shelf, sort, group| {
+            if let Some(shelf) = Shelf::from_key(&shelf).filter(|s| s.arranged()) {
+                ui.arrange_search(shelf, Some(sort.to_string()), Some(group.to_string()));
+            }
         });
         bind!(on_sort_playlists, |ui| {
             let app = ui.app();
@@ -2462,6 +3008,8 @@ impl Ui {
         bind!(on_reset_zoom, |ui| ui.set_zoom(100));
         bind!(on_create_in_collection, |ui, kind, name| ui
             .create_in_collection(&kind, name.trim()));
+        bind!(on_save_playlist, |ui, title, description, public| ui
+            .save_playlist(&title, &description, public));
         bind!(on_toggle_page_favorite, |ui| ui.toggle_page_favorite());
         bind!(on_page_action, |ui, action, arg| ui
             .page_action(&action, &arg));
@@ -2511,9 +3059,19 @@ impl Ui {
         });
         bind!(on_search, |ui, q| {
             let q = q.trim().to_string();
-            if !q.is_empty() {
-                ui.show(Page::Search(q), true);
+            if q.is_empty() {
+                return;
             }
+            // Enter again on the results already shown plays the picked hit
+            // (the first, or where ↑ ↓ moved it).
+            if matches!(ui.current_page(), Some(Page::Search(shown)) if shown == q) {
+                let at = ui.app().get_pick_index().max(0) as usize;
+                if let Some(track) = ui.app().get_tracks().row_data(at) {
+                    ui.app().invoke_play_track(track.id);
+                }
+                return;
+            }
+            ui.show(Page::Search(q), true);
         });
         bind!(on_filter, |ui, text| ui.apply_filter(&text));
         bind!(on_rows_visible, |ui, first, count| ui
@@ -2524,6 +3082,11 @@ impl Ui {
             .open_card_menu(card, x, y));
         bind!(on_menu_action, |ui, action, arg| ui
             .menu_action(&action, &arg));
+        bind!(on_add_track_to_playlist, |ui, id, title, playlist| {
+            if !id.is_empty() && !playlist.is_empty() {
+                ui.add_to_playlist(&playlist, vec![id.to_string()], title.to_string());
+            }
+        });
         bind!(on_play_track_next, |ui, id| ui.play_track_next(&id));
         bind!(on_copy_track_link, |ui, id| {
             if let Err(error) = ui.copy_track_link(&id) {
@@ -2606,11 +3169,20 @@ impl Ui {
             .update_settings(|s| s.show_collection = on));
         bind!(on_set_show_audio_metadata, |ui, on| ui
             .update_settings(|s| s.show_audio_metadata = on));
+        bind!(on_set_show_key_letters, |ui, on| ui
+            .update_settings(|s| s.show_key_letters = on));
         bind!(on_clear_cache, |ui| {
             if let Err(e) = ui.ctx.audio.clear() {
                 tracing::warn!("could not clear the audio cache: {e}");
             }
             ui.present_settings();
+        });
+        bind!(on_open_cache_folder, |ui| {
+            let dir = ui.ctx.audio.dir();
+            let _ = std::fs::create_dir_all(dir);
+            if let Err(e) = std::process::Command::new("open").arg(dir).spawn() {
+                tracing::warn!("could not open the audio cache folder: {e}");
+            }
         });
         bind!(on_pkce_start, |ui| ui.pkce_start(None));
         bind!(on_pkce_start_safari, |ui| ui
@@ -2635,6 +3207,12 @@ impl Ui {
         bind!(on_set_keep_most_played, |ui, on| ui
             .update_settings(|s| s.keep_most_played = on));
         bind!(on_set_fancy_animation, |ui, on| ui.set_fancy_animation(on));
+        bind!(on_set_liquid_glass, |ui, on| ui.set_liquid_glass(on));
+        bind!(on_set_show_lyrics, |ui, on| {
+            ui.update_settings(|s| s.show_lyrics = on);
+            ui.app().set_show_lyrics(on);
+        });
+        bind!(on_seek_lyric, |ui, row| ui.seek_lyric(row));
         bind!(on_pkce_finish, |ui, url| ui
             .pkce_finish(url.trim().to_string()));
         self.dsp_wire();
@@ -2691,6 +3269,9 @@ impl Ui {
         }
         if let Some(sections) = load::<Vec<Section>>(&self.ctx.meta, "home") {
             self.set_sections(sections);
+        }
+        if let Some(adds) = load::<HashMap<String, i64>>(&self.ctx.meta, "playlist-adds") {
+            self.state.borrow_mut().playlist_adds = adds;
         }
         if let Some(cards) = load::<Vec<Card>>(&self.ctx.meta, "cards:playlists") {
             self.set_sidebar(&cards);
@@ -3287,8 +3868,12 @@ impl Ui {
         app.set_quality(settings.quality.into());
         app.set_show_collection(settings.show_collection);
         app.set_show_audio_metadata(settings.show_audio_metadata);
+        app.set_show_key_letters(settings.show_key_letters);
         app.set_keep_most_played(settings.keep_most_played);
         app.set_fancy_animation(fancy_animation_override().unwrap_or(settings.fancy_animation));
+        app.set_show_lyrics(settings.show_lyrics);
+        app.set_liquid_glass(crate::platform::glass_wanted());
+        app.set_glass_available(crate::platform::glass_available());
         app.set_rate_matching(settings.rate_matching);
         app.set_restore_sample_rate(settings.restore_sample_rate);
         app.set_grid_size(settings.grid_size.clamp(0, 4));
@@ -3559,19 +4144,32 @@ impl Ui {
 
     fn set_sidebar(self: &Rc<Self>, cards: &[Card]) {
         self.state.borrow_mut().sidebar_cards = cards.to_vec();
-        let own: Vec<CardData> = cards
-            .iter()
-            .filter(|c| c.kind == "playlist" && c.by == "Me")
-            .map(card_row)
-            .collect();
-        self.app()
-            .set_own_playlists(ModelRc::new(VecModel::from(own)));
+        self.present_add_targets();
         self.present_sidebar();
+    }
+
+    /// Fill the "Add to playlist" list (the menu's flyout and the panel a
+    /// dragged track is dropped on).
+    fn present_add_targets(self: &Rc<Self>) {
+        let (own, recent) = {
+            let st = self.state.borrow();
+            add_targets(&st.sidebar_cards, &st.playlist_adds)
+        };
+        let app = self.app();
+        app.set_own_playlists(ModelRc::from(self.cards_model("own-playlists", &own, 96)));
+        app.set_recent_playlists(recent as i32);
     }
 
     fn present_sidebar(self: &Rc<Self>) {
         let app = self.app();
         let mut cards = self.state.borrow().sidebar_cards.clone();
+        // "Move to folder" lists them by name, whichever way the sidebar is sorted.
+        let folders: Vec<CardData> = cards
+            .iter()
+            .filter(|card| card.kind == "folder")
+            .map(card_row)
+            .collect();
+        app.set_folders(ModelRc::new(VecModel::from(folders)));
         if !app.get_sidebar_ascending() {
             // Reverse within each group, with folders still above playlists.
             cards.reverse();
@@ -3589,8 +4187,9 @@ impl Ui {
     fn present_grid(self: &Rc<Self>) {
         let groups = {
             let st = self.state.borrow();
-            arrange_grid(
+            arrange_pinned(
                 &st.grid.all,
+                &st.grid.pins,
                 &st.grid.filter,
                 &st.grid.sort,
                 &st.grid.group,
@@ -3630,6 +4229,7 @@ impl Ui {
             st.grid.groups_model = Some(outer.clone());
         }
         let app = self.app();
+        self.reset_grid_pick(&flat, false);
         app.set_grid_cards(ModelRc::new(VecModel::from(flat)));
         app.set_grid_groups(ModelRc::from(outer));
     }
@@ -3651,8 +4251,9 @@ impl Ui {
         self.state.borrow_mut().grid.all = cards.to_vec();
         let (groups, collection, old, ranges) = {
             let st = self.state.borrow();
-            let groups = arrange_grid(
+            let groups = arrange_pinned(
                 &st.grid.all,
+                &st.grid.pins,
                 &st.grid.filter,
                 &st.grid.sort,
                 &st.grid.group,
@@ -3690,7 +4291,8 @@ impl Ui {
             .into_iter()
             .map(|(cards, ..)| cards)
             .collect();
-        // Only its length is read; the cards themselves live in the groups.
+        // Its length and the picked card are read; the cards live in the groups.
+        self.reset_grid_pick(&flat, true);
         self.app()
             .set_grid_cards(ModelRc::new(VecModel::from(flat)));
         for (now, before) in patched.kept {
@@ -3699,6 +4301,104 @@ impl Ui {
             }
         }
         settle_fresh(patched.fresh_cards, Vec::new());
+    }
+
+    /// Every pinned card, as `pin_key`s.
+    fn pins(&self) -> HashSet<String> {
+        self.ctx
+            .meta
+            .get_json(PINS_KEY)
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// Pin a card to the top of its library page, or let it go back to its place.
+    fn toggle_pin(self: &Rc<Self>, card: &Card) {
+        let key = pin_key(&card.kind, &card.id);
+        let mut pins = self.pins();
+        let pinned = !pins.remove(&key);
+        if pinned {
+            pins.insert(key);
+        }
+        let mut sorted: Vec<&String> = pins.iter().collect();
+        sorted.sort();
+        if let Err(e) = self
+            .ctx
+            .meta
+            .put_json(PINS_KEY, &serde_json::json!(sorted).to_string())
+        {
+            tracing::warn!("could not save the pins: {e}");
+        }
+        let text = if pinned {
+            format!("Pinned “{}”", card.title)
+        } else {
+            format!("Unpinned “{}”", card.title)
+        };
+        crate::alerts::notice(&self.app(), &text);
+        let on_grid = self.app().get_view() == "grid" && {
+            let mut st = self.state.borrow_mut();
+            let pinnable = pinnable_grid(&st.grid.kind);
+            if pinnable {
+                st.grid.pins = pins;
+            }
+            pinnable
+        };
+        if on_grid {
+            self.reflow_grid(&card.kind, &card.id);
+        }
+    }
+
+    /// Rearrange the grid on screen in place, so every card that stays keeps
+    /// its element and glides to its new slot, and the card that moved flies
+    /// over from where it was (views.slint GridItem).
+    fn reflow_grid(self: &Rc<Self>, kind: &str, id: &str) {
+        let app = self.app();
+        app.set_grid_reflow(true);
+        // The artwork already on screen, so a card that changes group keeps
+        // its cover in flight instead of waiting on the artwork loader.
+        let covers: HashMap<(String, String), slint::Image> = self
+            .state
+            .borrow()
+            .grid
+            .models
+            .iter()
+            .flat_map(|model| model.iter())
+            .filter(|row| row.image.size().width > 0)
+            .map(|row| ((row.kind.to_string(), row.id.to_string()), row.image))
+            .collect();
+        let all = self.state.borrow().grid.all.clone();
+        self.update_grid(&all);
+        let mut group = -1;
+        for (g, model) in self.state.borrow().grid.models.iter().enumerate() {
+            for i in 0..model.row_count() {
+                let Some(mut row) = model.row_data(i) else { continue };
+                let moved = row.kind == kind && row.id == id;
+                if moved {
+                    group = g as i32;
+                }
+                let cover = (row.image.size().width == 0)
+                    .then(|| covers.get(&(row.kind.to_string(), row.id.to_string())))
+                    .flatten();
+                // The moved card arrives as a new row: it flies, not pops.
+                if cover.is_some() || (moved && row.fresh) {
+                    if let Some(cover) = cover {
+                        row.image = cover.clone();
+                    }
+                    if moved {
+                        row.fresh = false;
+                    }
+                    model.set_row_data(i, row);
+                }
+            }
+        }
+        app.set_grid_fly_group(group);
+        let ui = Rc::downgrade(self);
+        slint::Timer::single_shot(Duration::from_millis(300), move || {
+            if let Some(ui) = ui.upgrade() {
+                ui.app().set_grid_reflow(false);
+                ui.app().set_grid_fly_group(-1);
+            }
+        });
     }
 
     /// Change the sort and / or grouping of the grid on screen and remember it for that page kind.
@@ -3737,12 +4437,15 @@ impl Ui {
         self.present_grid();
     }
 
-    /// Create an empty playlist or folder, or rename / delete a folder.
+    /// What the name dialog confirmed: create an empty playlist or folder, rename
+    /// or delete a folder, delete a playlist or make it public.
     fn create_in_collection(self: &Rc<Self>, kind: &str, name: &str) {
         let target = self.app().get_create_folder_id().to_string();
         match kind {
             "rename-folder" => self.rename_folder(&target, name),
             "delete-folder" => self.delete_folder(&target, name),
+            "delete-playlist" => self.delete_playlist(&target, name),
+            "publish-playlist" => self.set_playlist_public(&target, name, true),
             _ => self.create_collection_item(kind == "folder", name, &target),
         }
     }
@@ -3827,11 +4530,229 @@ impl Ui {
         });
     }
 
+    /// What only a playlist's menu or page offers. Everything but moving it to
+    /// a folder is for the user's own playlists.
+    fn playlist_action(self: &Rc<Self>, card: &Card, action: &str, arg: &str) {
+        let app = self.app();
+        let own = card.by == "Me";
+        let confirm = |kind: &str| {
+            app.set_create_folder_id(card.id.as_str().into());
+            app.set_create_name(card.title.as_str().into());
+            app.set_create_kind(kind.into());
+        };
+        match action {
+            "move-to-folder" if !arg.is_empty() => self.move_playlist(card, arg),
+            "edit" if own => self.edit_playlist(card),
+            // Going public is confirmed first; going private again is harmless.
+            "make-public" if own => confirm("publish-playlist"),
+            "make-private" if own => self.set_playlist_public(&card.id, &card.title, false),
+            // The dialog asks before anything goes.
+            "delete" if own => confirm("delete-playlist"),
+            _ => {}
+        }
+    }
+
+    /// Open the Edit dialog on one of the user's own playlists, with its
+    /// current description and sharing fetched first.
+    fn edit_playlist(self: &Rc<Self>, card: &Card) {
+        let app = self.app();
+        let on_page = self
+            .page_card()
+            .is_some_and(|page| page.kind == card.kind && page.id == card.id);
+        let menu = app.get_menu_card();
+        app.set_edit_cover(if on_page {
+            app.get_page_cover()
+        } else if menu.id == card.id.as_str() {
+            menu.image
+        } else {
+            Image::default()
+        });
+        let (id, title) = (card.id.clone(), card.title.clone());
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            match api.playlist_detail(&id).await {
+                Ok(detail) => on_ui(move |ui| {
+                    let app = ui.app();
+                    app.set_create_folder_id(detail.card.id.as_str().into());
+                    app.set_create_name(detail.card.title.as_str().into());
+                    app.set_edit_description(detail.description.as_str().into());
+                    app.set_edit_public(detail.card.is_public);
+                    ui.state.borrow_mut().editing = Some(detail);
+                    app.set_create_kind("edit-playlist".into());
+                }),
+                Err(e) => tracing::error!("Could not open “{title}” for editing: {e}"),
+            }
+        });
+    }
+
+    /// Save of the Edit dialog: only what changed is sent.
+    fn save_playlist(self: &Rc<Self>, title: &str, description: &str, public: bool) {
+        let Some(was) = self.state.borrow_mut().editing.take() else {
+            return;
+        };
+        let (title, description) = (title.trim().to_string(), description.trim().to_string());
+        let text_changed = title != was.card.title || description != was.description;
+        let public_changed = public != was.card.is_public;
+        if title.is_empty() || !(text_changed || public_changed) {
+            return;
+        }
+        let id = was.card.id;
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            let saved = async {
+                if text_changed {
+                    api.edit_playlist(&id, &title, &description).await?;
+                }
+                if public_changed {
+                    api.set_playlist_public(&id, public).await?;
+                }
+                Ok::<(), tide_api::ApiError>(())
+            };
+            match saved.await {
+                Ok(()) => on_ui(move |ui| {
+                    crate::alerts::notice(&ui.app(), &format!("Saved “{title}”"));
+                    ui.playlist_edited(&id, Some(&description), |card| {
+                        card.title = title.clone();
+                        card.is_public = public;
+                    });
+                }),
+                Err(e) => tracing::error!("Could not save “{title}”: {e}"),
+            }
+        });
+    }
+
+    fn set_playlist_public(self: &Rc<Self>, id: &str, name: &str, public: bool) {
+        if id.is_empty() {
+            return;
+        }
+        let (id, name) = (id.to_string(), name.to_string());
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            let state = if public { "public" } else { "private" };
+            match api.set_playlist_public(&id, public).await {
+                Ok(()) => on_ui(move |ui| {
+                    crate::alerts::notice(&ui.app(), &format!("“{name}” is now {state}"));
+                    ui.playlist_edited(&id, None, |card| card.is_public = public);
+                }),
+                Err(e) => tracing::error!("Could not make “{name}” {state}: {e}"),
+            }
+        });
+    }
+
+    /// Put a playlist of the collection into `folder` ("root": out of its folder).
+    fn move_playlist(self: &Rc<Self>, card: &Card, folder: &str) {
+        let target = self
+            .state
+            .borrow()
+            .sidebar_cards
+            .iter()
+            .find(|c| c.kind == "folder" && c.id == folder)
+            .map(|c| c.title.clone());
+        let (id, name, folder) = (card.id.clone(), card.title.clone(), folder.to_string());
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            match api.move_playlist(&id, &folder).await {
+                Ok(()) => on_ui(move |ui| {
+                    let text = match &target {
+                        Some(target) => format!("Moved “{name}” to “{target}”"),
+                        None => format!("Moved “{name}” out of its folder"),
+                    };
+                    crate::alerts::notice(&ui.app(), &text);
+                    ui.reload_collection(None);
+                }),
+                Err(e) => tracing::error!("Could not move “{name}”: {e}"),
+            }
+        });
+    }
+
+    /// A playlist the user just changed: every copy on screen follows at once,
+    /// without waiting for TIDAL to hand the change back.
+    fn playlist_edited(
+        self: &Rc<Self>,
+        id: &str,
+        description: Option<&str>,
+        change: impl Fn(&mut Card),
+    ) {
+        let is_it = |card: &Card| card.kind == "playlist" && card.id == id;
+        let cards = {
+            let mut st = self.state.borrow_mut();
+            for page in st.history.iter_mut() {
+                if let Page::Detail(card) = page
+                    && is_it(card)
+                {
+                    change(card);
+                }
+            }
+            for card in st.sidebar_cards.iter_mut().filter(|card| is_it(card)) {
+                change(card);
+            }
+            st.sidebar_cards.clone()
+        };
+        self.set_sidebar(&cards);
+        // The page's saved detail, so the header agrees now and on the next visit.
+        let key = format!("catalog:playlist:{id}");
+        let saved = self.ctx.meta.get_json(&key);
+        if let Some(mut detail) = saved
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<PlaylistDetail>(json).ok())
+        {
+            change(&mut detail.card);
+            if let Some(description) = description {
+                detail.description = description.to_string();
+            }
+            if let Ok(json) = serde_json::to_string(&detail) {
+                let _ = self.ctx.meta.put_json(&key, &json);
+            }
+            self.present_playlist_detail(&detail);
+        }
+        self.reload_collection(None);
+    }
+
+    /// Delete one of the user's own playlists, once the dialog has confirmed it.
+    fn delete_playlist(self: &Rc<Self>, id: &str, name: &str) {
+        if id.is_empty() {
+            return;
+        }
+        let (id, name) = (id.to_string(), name.to_string());
+        self.spawn(move |ctx| async move {
+            let Some(api) = ctx.api() else { return };
+            match api.delete_playlist(&id).await {
+                Ok(()) => on_ui(move |ui| {
+                    let text = if name.is_empty() {
+                        "Deleted playlist".into()
+                    } else {
+                        format!("Deleted playlist “{name}”")
+                    };
+                    crate::alerts::notice(&ui.app(), &text);
+                    // Gone at once, without waiting for the sync below.
+                    let cards: Vec<Card> = {
+                        let st = ui.state.borrow();
+                        st.sidebar_cards
+                            .iter()
+                            .filter(|card| !(card.kind == "playlist" && card.id == id))
+                            .cloned()
+                            .collect()
+                    };
+                    ui.set_sidebar(&cards);
+                    ui.reload_collection(Some(&id));
+                }),
+                Err(e) => tracing::error!("Could not delete playlist “{name}”: {e}"),
+            }
+        });
+    }
+
     /// Refresh the sidebar and the playlists grid after a collection write.
-    fn reload_collection(self: &Rc<Self>, deleted_folder: Option<&str>) {
+    /// `deleted` is the folder or playlist that is gone: its page gives way to
+    /// the playlists grid.
+    fn reload_collection(self: &Rc<Self>, deleted: Option<&str>) {
         self.sync_playlists();
+        let gone = |page: &Page| match page {
+            Page::Folder { id, .. } => deleted == Some(id.as_str()),
+            Page::Detail(card) => card.kind == "playlist" && deleted == Some(card.id.as_str()),
+            _ => false,
+        };
         let page = match self.current_page() {
-            Some(Page::Folder { id, .. }) if deleted_folder == Some(id.as_str()) => {
+            Some(page) if gone(&page) => {
                 let mut st = self.state.borrow_mut();
                 let pos = st.hist_pos;
                 if let Some(slot) = st.history.get_mut(pos) {
@@ -3951,11 +4872,34 @@ impl Ui {
             (tracks, title)
         };
         self.set_tracks(tracks, title);
+        self.app().set_pick_index(0);
     }
 
     // ------------------------------------------------------------ navigation
 
+    /// A page key from the keyboard or the Navigation menu: open the page and
+    /// close Now Playing over it. "/" focuses the filter of the collection
+    /// page on screen, or opens Tracks and focuses its filter.
+    fn page_key(self: &Rc<Self>, key: &str) {
+        let app = self.app();
+        app.set_show_now_playing(false);
+        if key == "/" {
+            let view = app.get_view();
+            if view != "grid" && view != "tracks" {
+                self.navigate_key("tracks");
+            }
+            let app = self.app();
+            app.set_focus_filter(app.get_focus_filter().wrapping_add(1));
+        } else {
+            self.navigate_key(key);
+        }
+    }
+
     fn navigate_key(self: &Rc<Self>, key: &str) {
+        if let Some(key) = key.strip_prefix("page-key:") {
+            self.page_key(key);
+            return;
+        }
         let page = match key {
             "home" => Page::Home,
             "tracks" => Page::Tracks,
@@ -3971,6 +4915,17 @@ impl Ui {
             }
             "focus-search" => {
                 let app = self.app();
+                // Phone layout has no search in the top bar: ⌘F goes to
+                // Explore, whose search field takes the focus when it appears.
+                if app.get_phone_layout() && !app.get_video_open() {
+                    app.set_show_now_playing(false);
+                    let on_search = app.get_view() == "search"
+                        || (app.get_view() == "modules" && app.get_nav_key() == "explore");
+                    if !on_search {
+                        self.show(Page::Explore, true);
+                    }
+                }
+                let app = self.app();
                 app.set_focus_search(app.get_focus_search() + 1);
                 return;
             }
@@ -3979,6 +4934,7 @@ impl Ui {
             "videos" => Page::Videos,
             "profiles" => Page::Profiles,
             "later" => Page::Later,
+            "collection" => Page::Collection,
             _ => return,
         };
         self.show(page, true);
@@ -4458,6 +5414,7 @@ impl Ui {
         app.set_page_year("".into());
         app.set_page_quality("".into());
         app.set_page_summary("".into());
+        app.set_page_description("".into());
         app.set_page_biography("".into());
         app.set_page_tint(Color::from_rgb_u8(34, 34, 34));
         app.set_artist_tab(0);
@@ -4468,7 +5425,14 @@ impl Ui {
         app.set_search_cards(ModelRc::default());
         app.set_search_videos(ModelRc::default());
         app.set_search_videos_status("".into());
+        app.set_search_playlists(ModelRc::default());
+        app.set_search_playlists_status("".into());
+        app.set_search_albums_status("".into());
+        app.set_search_album_groups(ModelRc::default());
+        app.set_search_playlist_groups(ModelRc::default());
         app.set_search_tab(0);
+        app.set_grid_pick_id("".into());
+        app.set_pick_index(0);
         app.set_catalog_error(false);
         app.set_loading(false);
         app.set_page_favorite(false);
@@ -4508,6 +5472,11 @@ impl Ui {
                     api.catalog_page(&path).await
                 });
             }
+            Page::Collection => {
+                app.set_view("collection".into());
+                app.set_nav_key("collection".into());
+                app.set_page_title("Collection".into());
+            }
             Page::Feed => {
                 app.set_view("feed".into());
                 app.set_nav_key("feed".into());
@@ -4540,7 +5509,7 @@ impl Ui {
             Page::Mixes => self.show_grid(
                 "mixes",
                 "mixes",
-                "Media & Radio",
+                "Mixes",
                 page_gen,
                 |api| async move { api.mixes().await },
             ),
@@ -4600,14 +5569,21 @@ impl Ui {
                 if matches!(view, "artist" | "album") {
                     self.load_catalog_detail(kind, id, page_gen);
                 }
+                if kind == "playlist" {
+                    // Its own count is the line below; the creator arrives with the detail.
+                    if card.by == "Me" {
+                        app.set_page_subtitle("".into());
+                    }
+                    self.load_playlist_detail(id, page_gen);
+                }
                 if view == "artist" {
                     self.load_artist_releases(id, page_gen);
                     self.load_related_artists(id, page_gen);
                     let video_id = id.clone();
-                    self.load_video_catalog(
+                    self.load_shelf(
                         format!("artist-videos:{id}"),
                         page_gen,
-                        true,
+                        Shelf::ArtistVideos,
                         move |api| async move { api.artist_videos(&video_id).await },
                     );
                 }
@@ -4669,16 +5645,32 @@ impl Ui {
                 app.set_view("search".into());
                 app.set_nav_key("".into());
                 app.set_search_text(query.as_str().into());
+                app.set_search_shown(query.as_str().into());
                 app.set_page_title(format!("Results for “{query}”").into());
                 app.set_tracks_show_date(false);
+                self.reset_search_lists();
                 let cache_key = format!("search:{}", query.to_lowercase());
                 let catalog_query = query.clone();
                 let video_query = query.clone();
-                self.load_video_catalog(
+                let playlist_query = query.clone();
+                let album_query = query.clone();
+                self.load_shelf(
+                    format!("search-albums:{}", query.to_lowercase()),
+                    page_gen,
+                    Shelf::SearchAlbums,
+                    move |api| async move { api.search_albums(&album_query).await },
+                );
+                self.load_shelf(
                     format!("search-videos:{}", query.to_lowercase()),
                     page_gen,
-                    false,
+                    Shelf::SearchVideos,
                     move |api| async move { api.search_videos(&video_query).await },
+                );
+                self.load_shelf(
+                    format!("search-playlists:{}", query.to_lowercase()),
+                    page_gen,
+                    Shelf::SearchPlaylists,
+                    move |api| async move { api.search_playlists(&playlist_query).await },
                 );
                 self.load_catalog(
                     format!("search-catalog:{}", query.to_lowercase()),
@@ -4909,28 +5901,222 @@ impl Ui {
         );
     }
 
-    fn present_video_catalog(&self, artist: bool, cards: Vec<Card>) {
+    /// Creator, description, length and follower count of the playlist page.
+    fn load_playlist_detail(self: &Rc<Self>, id: &str, page_gen: u64) {
+        let id = id.to_string();
+        self.load_catalog(
+            format!("catalog:playlist:{id}"),
+            page_gen,
+            move |api| async move { api.playlist_detail(&id).await },
+            |ui, detail: PlaylistDetail| ui.present_playlist_detail(&detail),
+        );
+    }
+
+    fn present_playlist_detail(self: &Rc<Self>, detail: &PlaylistDetail) {
+        let card = &detail.card;
+        // The page's own card learns whose playlist it is and whether it is public.
+        {
+            let mut st = self.state.borrow_mut();
+            let pos = st.hist_pos;
+            match st.history.get_mut(pos) {
+                Some(Page::Detail(page)) if page.kind == "playlist" && page.id == card.id => {
+                    page.title = card.title.clone();
+                    page.by = card.by.clone();
+                    page.is_public = card.is_public;
+                }
+                _ => return,
+            }
+        }
+        let app = self.app();
+        app.set_page_title(card.title.as_str().into());
+        let creator = match card.by.as_str() {
+            "Me" => "Created by me",
+            by => by,
+        };
+        app.set_page_subtitle(creator.into());
+        // One paragraph: the header has two lines for it.
+        let description = detail.description.split_whitespace().collect::<Vec<_>>();
+        app.set_page_description(description.join(" ").into());
+        app.set_page_summary(playlist_summary(detail).into());
+        let mut row = app.get_page_card();
+        row.title = card.title.as_str().into();
+        row.by = card.by.as_str().into();
+        row.is_public = card.is_public;
+        app.set_page_card(row);
+        app.set_page_can_favorite(can_favorite(card));
+    }
+
+    fn shelf_model(&self, shelf: Shelf) -> ModelRc<CardData> {
+        let app = self.app();
+        match shelf {
+            Shelf::ArtistVideos => app.get_artist_videos(),
+            Shelf::SearchVideos => app.get_search_videos(),
+            Shelf::SearchAlbums => ModelRc::default(),
+            Shelf::SearchPlaylists => app.get_search_playlists(),
+        }
+    }
+
+    fn present_shelf(self: &Rc<Self>, shelf: Shelf, cards: Vec<Card>) {
         let model = ModelRc::new(VecModel::from(self.rows_for(&cards)));
-        if artist {
-            self.app().set_artist_videos(model);
-        } else {
-            self.app().set_search_videos(model);
+        let app = self.app();
+        match shelf {
+            Shelf::ArtistVideos => app.set_artist_videos(model),
+            Shelf::SearchVideos => app.set_search_videos(model),
+            Shelf::SearchAlbums => {}
+            Shelf::SearchPlaylists => {
+                app.set_search_playlists(model.clone());
+                // The All tab shows the first few without a grid of its own to ask for art.
+                self.card_art(shelf.key(), model, 0, SEARCH_PLAYLIST_PREVIEW);
+            }
+        }
+        if shelf.arranged() {
+            self.state
+                .borrow_mut()
+                .search_lists
+                .entry(shelf)
+                .or_default()
+                .all = cards;
+            self.present_search_list(shelf);
         }
     }
 
-    fn set_video_catalog_status(&self, artist: bool, status: &str) {
-        if artist {
-            self.app().set_artist_videos_status(status.into());
-        } else {
-            self.app().set_search_videos_status(status.into());
+    /// Saved sort and grouping for each sortable search tab, before results arrive.
+    fn reset_search_lists(self: &Rc<Self>) {
+        let mut lists = HashMap::new();
+        for shelf in Shelf::ALL.into_iter().filter(|s| s.arranged()) {
+            let (sorts, groups) = grid_options(shelf.key());
+            let saved: Vec<String> = self
+                .ctx
+                .meta
+                .get_json(&format!("grid-prefs:{}", shelf.key()))
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            let pick = |saved: Option<&String>, options: &[&str]| {
+                saved
+                    .filter(|s| options.contains(&s.as_str()))
+                    .cloned()
+                    .unwrap_or_else(|| options[0].to_string())
+            };
+            let list = SearchList {
+                sort: pick(saved.first(), sorts),
+                group: pick(saved.get(1), groups),
+                ..Default::default()
+            };
+            self.show_search_arrangement(shelf, &list.sort, &list.group);
+            lists.insert(shelf, list);
+        }
+        self.state.borrow_mut().search_lists = lists;
+        for shelf in Shelf::ALL.into_iter().filter(|s| s.arranged()) {
+            self.present_search_list(shelf);
         }
     }
 
-    fn load_video_catalog<F, Fut>(
+    fn show_search_arrangement(&self, shelf: Shelf, sort: &str, group: &str) {
+        let app = self.app();
+        match shelf {
+            Shelf::SearchAlbums => {
+                app.set_search_album_sort(sort.into());
+                app.set_search_album_group(group.into());
+            }
+            Shelf::SearchPlaylists => {
+                app.set_search_playlist_sort(sort.into());
+                app.set_search_playlist_group(group.into());
+            }
+            _ => {}
+        }
+    }
+
+    fn arrange_search(self: &Rc<Self>, shelf: Shelf, sort: Option<String>, group: Option<String>) {
+        let (sort, group) = {
+            let mut st = self.state.borrow_mut();
+            let list = st.search_lists.entry(shelf).or_default();
+            if let Some(sort) = sort {
+                list.sort = sort;
+            }
+            if let Some(group) = group {
+                list.group = group;
+            }
+            (list.sort.clone(), list.group.clone())
+        };
+        let _ = self.ctx.meta.put_json(
+            &format!("grid-prefs:{}", shelf.key()),
+            &serde_json::json!([sort, group]).to_string(),
+        );
+        self.show_search_arrangement(shelf, &sort, &group);
+        self.present_search_list(shelf);
+    }
+
+    /// Sort and group one search tab's results into titled grids. Ungrouped
+    /// (or empty) results are one grid under the tab's name.
+    fn present_search_list(self: &Rc<Self>, shelf: Shelf) {
+        let groups = {
+            let st = self.state.borrow();
+            let Some(list) = st.search_lists.get(&shelf) else {
+                return;
+            };
+            let mut groups = arrange_grid(&list.all, "", &list.sort, &list.group, false);
+            if groups.is_empty() {
+                groups.push((String::new(), Vec::new()));
+            }
+            groups
+        };
+        let models: Vec<Rc<VecModel<CardData>>> = groups
+            .iter()
+            .map(|(_, cards)| Rc::new(VecModel::from(self.rows_for(cards))))
+            .collect();
+        let sections: Vec<SectionData> = groups
+            .iter()
+            .zip(models.iter())
+            .map(|((title, cards), model)| SectionData {
+                title: if title.is_empty() {
+                    shelf.label().into()
+                } else {
+                    format!("{title}  ·  {}", cards.len()).into()
+                },
+                layout: "cards".into(),
+                cards: ModelRc::from(model.clone()),
+                tracks: ModelRc::default(),
+            })
+            .collect();
+        {
+            let mut st = self.state.borrow_mut();
+            let stale: Vec<String> = st
+                .art_keep
+                .keys()
+                .filter(|k| k.starts_with(&format!("{}:", shelf.key())))
+                .cloned()
+                .collect();
+            for key in stale {
+                st.art_keep.remove(&key);
+            }
+            if let Some(list) = st.search_lists.get_mut(&shelf) {
+                list.models = models;
+            }
+        }
+        let outer = ModelRc::new(VecModel::from(sections));
+        let app = self.app();
+        match shelf {
+            Shelf::SearchAlbums => app.set_search_album_groups(outer),
+            Shelf::SearchPlaylists => app.set_search_playlist_groups(outer),
+            _ => {}
+        }
+    }
+
+    fn set_shelf_status(&self, shelf: Shelf, status: &str) {
+        let app = self.app();
+        match shelf {
+            Shelf::ArtistVideos => app.set_artist_videos_status(status.into()),
+            Shelf::SearchVideos => app.set_search_videos_status(status.into()),
+            Shelf::SearchAlbums => app.set_search_albums_status(status.into()),
+            Shelf::SearchPlaylists => app.set_search_playlists_status(status.into()),
+        }
+    }
+
+    fn load_shelf<F, Fut>(
         self: &Rc<Self>,
         key: String,
         page_gen: u64,
-        artist: bool,
+        shelf: Shelf,
         fetch: F,
     ) where
         F: FnOnce(ApiHandle) -> Fut + Send + 'static,
@@ -4941,9 +6127,9 @@ impl Ui {
             .as_deref()
             .and_then(|json| serde_json::from_str::<Vec<Card>>(json).ok());
         let has_cache = cached_cards.is_some();
-        self.set_video_catalog_status(artist, if has_cache { "" } else { "loading" });
+        self.set_shelf_status(shelf, if has_cache { "" } else { "loading" });
         if let Some(cards) = cached_cards {
-            self.present_video_catalog(artist, cards);
+            self.present_shelf(shelf, cards);
         }
         self.spawn(move |ctx| async move {
             let result = match ctx.api() {
@@ -4961,17 +6147,17 @@ impl Ui {
                         changed = Some(cards);
                     }
                 }
-                Err(error) => tracing::warn!("video catalog load failed for {key}: {error}"),
+                Err(error) => tracing::warn!("catalog shelf load failed for {key}: {error}"),
             }
             on_ui(move |ui| {
                 if ui.state.borrow().page_gen != page_gen {
                     return;
                 }
                 if let Some(cards) = changed {
-                    ui.present_video_catalog(artist, cards);
+                    ui.present_shelf(shelf, cards);
                 }
-                ui.set_video_catalog_status(
-                    artist,
+                ui.set_shelf_status(
+                    shelf,
                     if failed && !has_cache { "error" } else { "" },
                 );
             });
@@ -5087,11 +6273,14 @@ impl Ui {
         });
     }
 
-    /// Share and Credits on an album, playlist or mix page.
+    /// Share, Credits, Edit and Private / Public on an album, playlist or mix page.
     fn page_action(self: &Rc<Self>, action: &str, _arg: &str) {
         let Some(card) = self.page_card() else { return };
         match action {
             "copy-link" => self.copy_card_link(&card),
+            "edit" | "make-public" | "make-private" if card.kind == "playlist" => {
+                self.playlist_action(&card, action, "");
+            }
             "credits" if card.kind == "album" => {
                 {
                     let mut st = self.state.borrow_mut();
@@ -5173,6 +6362,7 @@ impl Ui {
         app.set_menu_kind(row.kind.clone());
         app.set_menu_card(row);
         app.set_menu_can_favorite(can_favorite(&card));
+        app.set_menu_pinned(self.pins().contains(&pin_key(&card.kind, &card.id)));
         app.set_menu_favorite(on_page && app.get_page_favorite());
         app.set_menu_x(x);
         app.set_menu_y(y);
@@ -5212,6 +6402,7 @@ impl Ui {
         match action {
             "open" => self.open_card(app.get_menu_card()),
             "copy-link" => self.copy_card_link(&card),
+            "pin" => self.toggle_pin(&card),
             "rename" if card.kind == "folder" => {
                 app.set_create_folder_id(card.id.into());
                 app.set_create_name(card.title.into());
@@ -5221,6 +6412,11 @@ impl Ui {
                 app.set_create_folder_id(card.id.into());
                 app.set_create_name(card.title.into());
                 app.set_create_kind("delete-folder".into());
+            }
+            "edit" | "make-public" | "make-private" | "move-to-folder" | "delete"
+                if card.kind == "playlist" =>
+            {
+                self.playlist_action(&card, action, arg);
             }
             "create-playlist" if card.kind == "folder" => {
                 app.set_create_folder_id(card.id.into());
@@ -5241,12 +6437,13 @@ impl Ui {
                     let Some(api) = ctx.api() else { return };
                     match set_card_favorite(&api, &card, favorite).await {
                         Ok(()) => on_ui(move |ui| {
-                            let text = if favorite {
-                                "Added to My Collection"
-                            } else {
-                                "Removed from My Collection"
+                            let text = match (card.kind.as_str(), favorite) {
+                                ("playlist", true) => format!("Following “{}”", card.title),
+                                ("playlist", false) => format!("Unfollowed “{}”", card.title),
+                                (_, true) => "Added to My Collection".to_string(),
+                                (_, false) => "Removed from My Collection".to_string(),
                             };
-                            crate::alerts::notice(&ui.app(), text);
+                            crate::alerts::notice(&ui.app(), &text);
                             if card.kind == "playlist" {
                                 ui.sync_playlists();
                             }
@@ -5359,16 +6556,50 @@ impl Ui {
 
     fn add_to_playlist(self: &Rc<Self>, playlist: &str, ids: Vec<String>, title: String) {
         let playlist = playlist.to_string();
+        let name = self
+            .state
+            .borrow()
+            .sidebar_cards
+            .iter()
+            .find(|card| card.kind == "playlist" && card.id == playlist)
+            .map(|card| card.title.clone())
+            .filter(|name| !name.is_empty());
+        let target = name.map_or("the playlist".to_string(), |name| format!("“{name}”"));
         self.spawn(move |ctx| async move {
             let Some(api) = ctx.api() else { return };
             match api.add_to_playlist(&playlist, &ids).await {
                 Ok(()) => on_ui(move |ui| {
-                    crate::alerts::notice(&ui.app(), &format!("Added “{title}” to the playlist"));
+                    crate::alerts::notice(&ui.app(), &format!("Added “{title}” to {target}"));
+                    ui.remember_playlist_add(&playlist);
                     ui.sync_playlists();
                 }),
-                Err(e) => tracing::error!("Could not add “{title}” to the playlist: {e}"),
+                Err(e) => tracing::error!("Could not add “{title}” to {target}: {e}"),
             }
         });
+    }
+
+    /// The playlist just added to goes to the top of "Add to playlist", now
+    /// and after a restart; TIDAL's own date for it arrives with the next sync.
+    fn remember_playlist_add(self: &Rc<Self>, playlist: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let json = {
+            let mut st = self.state.borrow_mut();
+            st.playlist_adds.insert(playlist.to_string(), now);
+            // Only the newest few can ever be listed.
+            if st.playlist_adds.len() > 4 * RECENT_PLAYLISTS {
+                let mut times: Vec<i64> = st.playlist_adds.values().copied().collect();
+                times.sort_unstable_by_key(|&t| std::cmp::Reverse(t));
+                let oldest_kept = times[4 * RECENT_PLAYLISTS - 1];
+                st.playlist_adds.retain(|_, t| *t >= oldest_kept);
+            }
+            serde_json::to_string(&st.playlist_adds).unwrap_or_default()
+        };
+        if let Err(e) = self.ctx.meta.put_json("playlist-adds", &json) {
+            tracing::warn!("could not save the recent playlists: {e}");
+        }
+        self.present_add_targets();
     }
 
     fn artist_release_art(self: &Rc<Self>, singles: bool, from: usize, upto: usize) {
@@ -5472,6 +6703,7 @@ impl Ui {
                 .map(|(cards, _, _)| cards.clone())
                 .collect();
             models.extend(st.grid.models.iter().cloned());
+            models.extend(st.search_lists.values().flat_map(|l| l.models.iter().cloned()));
             (st.collection.clone(), models)
         };
         for model in models {
@@ -5483,6 +6715,7 @@ impl Ui {
         restamp_model(&app.get_artist_singles(), &collection);
         restamp_model(&app.get_artist_videos(), &collection);
         restamp_model(&app.get_search_videos(), &collection);
+        restamp_model(&app.get_search_playlists(), &collection);
         restamp_model(&app.get_related_artists(), &collection);
         let mut page = app.get_page_card();
         let fav = match page.kind.as_str() {
@@ -5504,6 +6737,7 @@ impl Ui {
                 .map(|(cards, _, _)| cards.clone())
                 .collect();
             models.extend(st.grid.models.iter().cloned());
+            models.extend(st.search_lists.values().flat_map(|l| l.models.iter().cloned()));
             models
         };
         let patch = |model: &ModelRc<CardData>| {
@@ -5527,6 +6761,7 @@ impl Ui {
         patch(&app.get_artist_singles());
         patch(&app.get_artist_videos());
         patch(&app.get_search_videos());
+        patch(&app.get_search_playlists());
         patch(&app.get_related_artists());
         let mut page = app.get_page_card();
         if page.kind == kind && page.id == id {
@@ -5621,6 +6856,43 @@ impl Ui {
             ..Default::default()
         });
         self.set_sections(sections);
+    }
+
+    /// Put a grid's Enter pick on its first playable card, or with `keep`, leave
+    /// it on the card it is on while that card is still shown (a server refresh).
+    fn reset_grid_pick(&self, rows: &[CardData], keep: bool) {
+        let app = self.app();
+        let current = app.get_grid_pick_id();
+        let kept = keep
+            .then(|| rows.iter().position(|row| row.id == current && !current.is_empty()))
+            .flatten();
+        let at = kept.unwrap_or_else(|| first_playable(rows));
+        app.set_pick_index(at as i32);
+        app.set_grid_pick_id(rows.get(at).map(|row| row.id.clone()).unwrap_or_default());
+    }
+
+    /// Enter in a grid's filter: play the picked playlist, album or artist, or
+    /// open a picked folder. Already playing stays playing.
+    fn play_grid_pick(self: &Rc<Self>) {
+        let app = self.app();
+        let picked = app.get_grid_pick_id();
+        let cards = app.get_grid_cards();
+        let Some(row) = (0..cards.row_count())
+            .filter_map(|i| cards.row_data(i))
+            .find(|row| row.id == picked && !picked.is_empty())
+        else {
+            return;
+        };
+        if matches!(row.kind.as_str(), "folder" | "page") {
+            self.open_card(row);
+            return;
+        }
+        let current = self.state.borrow().playing_card.clone();
+        let same = current.is_some_and(|(kind, id)| kind == row.kind.as_str() && id == row.id.as_str());
+        if same && app.get_playing() {
+            return;
+        }
+        self.play_card(row);
     }
 
     fn play_card(self: &Rc<Self>, row: CardData) {
@@ -5901,11 +7173,17 @@ impl Ui {
         app.set_grid_can_create(kind == "playlists");
         app.set_grid_filter_hint(format!("Filter {kind}").into());
         app.set_filter_text("".into());
+        let pins = if pinnable_grid(kind) {
+            self.pins()
+        } else {
+            HashSet::new()
+        };
         self.state.borrow_mut().grid = Grid {
             kind: kind.into(),
             sort,
             group,
             combine_others: combine,
+            pins,
             ..Default::default()
         };
         let cache_key = format!("cards:{key}");
@@ -6394,6 +7672,7 @@ impl Ui {
         app.set_total(fmt_time(track.duration_secs as u64).into());
         app.set_elapsed("0:00".into());
         app.set_progress(0.0);
+        app.set_loaded(0.0);
         let cover = track.cover_url.as_deref().map(|u| sized_cover(u, 640));
         let cached_cover = cover
             .as_deref()
@@ -6408,6 +7687,7 @@ impl Ui {
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_tint(tint);
+                    ui.app().set_np_backdrop(backdrop_of(&img));
                     if let Some(path) =
                         ui.ctx.images.cached(&url_key(&cover_url_for_cache, 0), &cover_url_for_cache)
                     {
@@ -6421,6 +7701,7 @@ impl Ui {
         } else {
             app.set_np_cover(Image::default());
             app.set_np_cover_large(Image::default());
+            app.set_np_backdrop(Image::default());
         }
         if app.get_show_now_playing() {
             self.load_lyrics();
@@ -7232,10 +8513,12 @@ impl Ui {
             let mut st = self.state.borrow_mut();
             st.lyrics_for = track.id.clone();
             st.lyrics = Lyrics::default();
-            st.lyric_idx = None;
+            st.lyric_row = None;
         }
         let app = self.app();
         app.set_lyrics(ModelRc::default());
+        app.set_lyric_index(-1);
+        app.set_lyrics_synced(false);
         app.set_lyrics_status("".into());
         let id = track.id.clone();
         self.spawn(|ctx| async move {
@@ -7258,63 +8541,59 @@ impl Ui {
                     return;
                 }
                 let lyrics = lyrics.unwrap_or_default();
-                let empty = lyrics.plain.trim().is_empty() && lyrics.synced.is_empty();
-                ui.app().set_lyrics_status(
-                    if empty {
+                let rows = lyric_rows(&lyrics);
+                let app = ui.app();
+                app.set_lyrics_status(
+                    if rows.is_empty() {
                         "No lyrics available for this track"
                     } else {
                         ""
                     }
                     .into(),
                 );
-                if lyrics.synced.is_empty() && !empty {
-                    let lines: Vec<LyricLine> = lyrics
-                        .plain
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .take(8)
-                        .map(|l| LyricLine {
-                            text: l.trim().into(),
-                            active: false,
-                        })
-                        .collect();
-                    ui.app()
-                        .set_lyrics(ModelRc::from(Rc::new(VecModel::from(lines))));
-                }
+                app.set_lyrics_synced(!lyrics.synced.is_empty());
+                app.set_lyrics(ModelRc::from(Rc::new(VecModel::from(rows))));
                 ui.state.borrow_mut().lyrics = lyrics;
                 ui.update_lyric_line(ui.effective_elapsed());
             });
         });
     }
 
-    /// Show a window of lines around the one being sung.
+    /// Mark the line being sung. The column holds every line; only the index
+    /// changes, and only when another line starts.
     fn update_lyric_line(&self, elapsed: Duration) {
-        let lines = {
+        let row = {
             let mut st = self.state.borrow_mut();
             if st.lyrics.synced.is_empty() {
                 return;
             }
-            let ms = elapsed.as_millis() as u64;
-            let idx = st.lyrics.synced.iter().rposition(|(t, _)| *t <= ms);
-            if idx == st.lyric_idx && st.lyric_idx.is_some() {
+            let row = sung_row(&st.lyrics.synced, elapsed.as_millis() as u64);
+            if st.lyric_row == Some(row) {
                 return;
             }
-            st.lyric_idx = idx.or(Some(usize::MAX));
-            let current = idx.unwrap_or(0);
-            let start = current.saturating_sub(2);
-            st.lyrics.synced[start..]
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, text))| !text.is_empty())
-                .take(7)
-                .map(|(i, (_, text))| LyricLine {
-                    text: text.as_str().into(),
-                    active: idx == Some(start + i),
-                })
-                .collect::<Vec<_>>()
+            st.lyric_row = Some(row);
+            row
         };
-        self.app()
-            .set_lyrics(ModelRc::from(Rc::new(VecModel::from(lines))));
+        self.app().set_lyric_index(row);
+    }
+
+    /// Seek to where line `row` of `App.lyrics` starts.
+    fn seek_lyric(self: &Rc<Self>, row: i32) {
+        let Some(line) = usize::try_from(row)
+            .ok()
+            .and_then(|row| self.app().get_lyrics().row_data(row))
+        else {
+            return;
+        };
+        let Some(track) = self.current_track() else {
+            return;
+        };
+        if line.time < 0 || track.duration_secs == 0 {
+            return;
+        }
+        let at = Duration::from_millis(line.time as u64);
+        self.seek(at.as_secs_f32() / track.duration_secs as f32);
+        self.update_lyric_line(at);
     }
 
     // ------------------------------------------------------------ session

@@ -37,6 +37,8 @@ export struct CardData {
     image-url: string,
     /// Album artists, or a playlist's creator ("Me" for the user's own).
     by: string,
+    /// A playlist anyone can open from its creator's profile.
+    is-public: bool,
     /// In My Collection (albums / other people's playlists).
     favorite: bool,
     /// Fallback fill for genre / mood / decade tiles that have no artwork.
@@ -65,7 +67,9 @@ export struct SignalStage {
 
 export struct LyricLine {
     text: string,
-    active: bool,
+    // Start of the line in the track, in milliseconds; -1 for lyrics without
+    // timing.
+    time: int,
 }
 
 export struct ErrorEntry {
@@ -158,9 +162,43 @@ export global App {
     callback zoom-in();
     callback zoom-out();
     callback reset-zoom();
-    // Logical viewport gets smaller as the interface is magnified.
+    // Logical viewport gets smaller as the interface is magnified, or as the
+    // window is made narrower. Three arrangements, by the window's width:
+    //   wide     (960 and up)  full sidebar, one-row player bar;
+    //   compact  (720 - 960)   icon sidebar, three-row player bar;
+    //   phone    (below 720)   no sidebar: a tab bar at the bottom with a mini
+    //                          player above it (PhoneDock), pages in one column.
+    // Both are set by MainWindow from its width.
     in-out property <bool> compact-layout: false;
+    in-out property <bool> phone-layout: false;
+    // The player bar's height. Now Playing and the video draw a bar of this
+    // height in every arrangement (in phone layout too).
     out property <length> player-height: compact-layout ? 144px : 96px;
+    // Phone layout: the mini player (while there is a track) over the tab bar.
+    out property <length> mini-height: 64px;
+    out property <length> tabs-height: 58px;
+    // What the window's bottom edge holds under the pages: the player bar, or
+    // in phone layout the mini player and the tab bar.
+    out property <length> dock-height: phone-layout ? (has-track ? mini-height : 0px) + tabs-height : player-height;
+    // Where the playing artwork sits in the dock (from its top edge, 16px in):
+    // Now Playing grows from there and the video from its own 16:9 slot.
+    out property <length> art-slot-size: phone-layout ? 44px : compact-layout ? 48px : 62px;
+    out property <length> art-slot-top: phone-layout ? 10px : compact-layout ? 12px : 17px;
+    out property <length> video-slot-w: phone-layout ? 78px : compact-layout ? 85px : 100px;
+    out property <length> video-slot-h: phone-layout ? 44px : compact-layout ? 48px : 56px;
+    out property <length> video-slot-top: phone-layout ? 10px : compact-layout ? 12px : 20px;
+    // The smallest side margin of a page: tighter on a phone-width window.
+    out property <length> page-gutter: phone-layout ? 16px : 24px;
+    // The player bar is glass: what scrolls beneath it shows through. Set by
+    // the app where the renderer can draw it (Skia) and macOS "Reduce
+    // transparency" is off; otherwise the bar is opaque and pages end above it.
+    in property <bool> glass: false;
+    // How far the pages and the sidebar run under the player bar (or the
+    // phone dock). Scrolling content ends with this much extra room so its
+    // last row clears it.
+    out property <length> bar-inset: glass ? dock-height : 0px;
+    // Now Playing or the video covers the whole window, the bar included.
+    in-out property <bool> bar-covered: false;
     // Session
     in property <bool> logged-in: false;
     in property <string> username: "";
@@ -189,6 +227,8 @@ export global App {
     in property <string> page-year;
     in property <string> page-quality;
     in property <string> page-summary;
+    // A playlist's description, as one paragraph.
+    in property <string> page-description;
     in property <string> page-biography;
     in property <bool> catalog-error;
     in-out property <int> artist-tab;
@@ -215,6 +255,20 @@ export global App {
     in-out property <length> pane-width;
     in-out property <length> pane-height;
     in-out property <string> search-text: "";
+    // Query the search page shows; Enter on the same text plays its first track.
+    in property <string> search-shown: "";
+    // The toolbar search field has keyboard focus.
+    in-out property <bool> search-focused: false;
+    // A "/" filter field (track list or card grid) has keyboard focus. The
+    // field keeps it in step (and resets it when built); a page re-shown under
+    // a focused field (a data refresh) must not clear it.
+    in-out property <bool> filter-focused: false;
+    // The row or card Enter plays from a focused search / filter field; ↑ ↓ move
+    // it. pick-index indexes App.tracks (track lists, search) or grid-cards.
+    in-out property <int> pick-index: 0;
+    // The picked grid card (grids draw it by id, inside their groups).
+    in property <string> grid-pick-id: "";
+    callback play-grid-pick();
     in-out property <string> filter-text: "";
     in-out property <string> edit-command;
     in-out property <int> edit-revision;
@@ -247,6 +301,14 @@ export global App {
     in property <[SectionData]> grid-groups;
     callback grid-art(int, int, int);
     in property <string> grid-kind: ""; // mixes | playlists | albums | profiles
+    // Pinning rearranges the grid: while this is on, cards that moved glide
+    // to their new place (250ms). The card pinned flies from where its menu
+    // was opened (fly-from-*, set by the card), over the groups after it.
+    in property <bool> grid-reflow: false;
+    in property <int> grid-fly-group: -1;
+    in-out property <string> fly-from-key;
+    in-out property <length> fly-from-x;
+    in-out property <length> fly-from-y;
     in property <string> grid-filter-hint: "Filter";
     in property <[string]> grid-sort-options;
     in property <string> grid-sort;
@@ -261,14 +323,89 @@ export global App {
     callback set-grid-group(string);
     callback set-grid-size(int);
     callback set-grid-combine-others(bool);
-    // Name dialog: "" (closed) | playlist | folder | rename-folder | delete-folder.
+    // Collection dialog: "" (closed) | playlist | folder | rename-folder
+    // | delete-folder | delete-playlist | publish-playlist | edit-playlist.
     in-out property <string> create-kind: "";
-    // Folder to create in, or the folder being renamed / deleted.
+    // Folder to create in, or the folder or playlist the dialog is about.
     in-out property <string> create-folder-id: "";
     in-out property <string> create-name: "";
     callback create-in-collection(string, string); // kind, name
-    // The user's own playlists, for "Add to playlist".
+    // The rest of what "edit-playlist" opens with.
+    in property <string> edit-description;
+    in property <bool> edit-public;
+    in property <image> edit-cover;
+    callback save-playlist(string, string, bool); // title, description, public
+    // The collection's folders by name, for "Move to folder".
+    in property <[CardData]> folders;
+    // The user's own playlists, for "Add to playlist": the first
+    // `recent-playlists` are the ones that last had something added, newest
+    // on top; the rest follow by name.
     in property <[CardData]> own-playlists;
+    in property <int> recent-playlists: 0;
+
+    // A track on its way to a playlist: grabbed by its name or artwork (player
+    // bar, track rows) and dragged. While `drag-active` the playlists take the
+    // sidebar's place (PlaylistDrop) and a chip follows the pointer.
+    out property <bool> drag-active: false;
+    // True from the moment a press turns into a drag until the button is let
+    // go, also after Esc: the release is not a click.
+    out property <bool> drag-gesture: false;
+    out property <string> drag-track-id;
+    out property <string> drag-title;
+    out property <string> drag-artist;
+    out property <image> drag-cover;
+    // Pointer position, in window coordinates.
+    out property <length> drag-x;
+    out property <length> drag-y;
+    // The playlist under the pointer, "" for none, and who says so: "panel"
+    // (PlaylistDrop's rows) or "grid" (playlist cards on a grid page). Each
+    // clears only what it set, so moving from one to the other never ends up
+    // with the target the first one cleared.
+    in-out property <string> drop-target: "";
+    in-out property <string> drop-title: "";
+    in-out property <string> drop-source: "";
+    out property <length> drop-panel-width: 256px;
+    // The pointer is over the page itself: beside the playlists panel, between
+    // the top bar and the player bar, with nothing covering the page.
+    out property <bool> drag-over-page: drag-active && !show-now-playing && !video-open
+        && drag-x >= max(pane-x, drop-panel-width) && drag-x < pane-x + pane-width
+        && drag-y >= pane-y + 64px && drag-y < pane-y + pane-height - bar-inset;
+    callback add-track-to-playlist(string, string, string); // track id, title, playlist id
+
+    // From a TouchArea's `moved`: (dx, dy) is how far the pointer is from where
+    // it was pressed, (x, y) where it is in the window.
+    public function drag-move(id: string, title: string, artist: string, cover: image, dx: length, dy: length, x: length, y: length) {
+        if (!drag-gesture && !id.is-empty && (abs(dx) > 6px || abs(dy) > 6px)) {
+            drag-gesture = true;
+            drag-track-id = id;
+            drag-title = title;
+            drag-artist = artist;
+            drag-cover = cover;
+            drop-target = "";
+            drop-title = "";
+            drop-source = "";
+            drag-active = true;
+        }
+        if (drag-active) {
+            drag-x = x;
+            drag-y = y;
+        }
+    }
+
+    // From the same TouchArea's `pointer-event`, when the left button goes up
+    // (`clicked` has already run by then) or the press is cancelled.
+    public function drag-release(drop: bool) {
+        if (drag-active && drop && !drop-target.is-empty) {
+            add-track-to-playlist(drag-track-id, drag-title, drop-target);
+        }
+        drag-active = false;
+        drag-gesture = false;
+    }
+
+    // Esc: the drag is off, and the button coming up later adds nothing.
+    public function drag-cancel() {
+        drag-active = false;
+    }
 
     // Album and artist pages
     in property <bool> page-favorite: false; // in the collection / artist followed
@@ -281,7 +418,7 @@ export global App {
     in property <[CreditLine]> page-credits;
     in property <string> page-credits-status;
     callback toggle-page-favorite();
-    // copy-link | credits
+    // copy-link | credits | edit | make-public | make-private
     callback page-action(string, string);
     callback related-art(int, int);
     in property <[CardData]> artist-albums;
@@ -291,13 +428,24 @@ export global App {
     in property <[CardData]> search-cards;
     in property <[CardData]> search-videos;
     in property <string> search-videos-status;
+    in property <[CardData]> search-playlists;
+    in property <string> search-playlists-status;
+    in property <[SectionData]> search-playlist-groups;
+    in property <string> search-playlist-sort: "Relevance";
+    in property <string> search-playlist-group: "None";
+    in property <string> search-albums-status;
+    in property <[SectionData]> search-album-groups;
+    in property <string> search-album-sort: "Relevance";
+    in property <string> search-album-group: "None";
     in-out property <int> search-tab;
     in property <[CardData]> sidebar-playlists;
     in-out property <bool> sidebar-collapsed;
     out property <bool> sidebar-compact: sidebar-collapsed || compact-layout;
     in-out property <bool> sidebar-ascending: true;
     in property <bool> show-collection;
-    out property <bool> bpm-available: false;
+    // Sidebar key letters drawn white (Settings); ⌘ held shows them anyway.
+    in property <bool> show-key-letters: true;
+    // The BPM column of track lists (Settings, and the column's own heading).
     in property <bool> show-audio-metadata;
 
     // Player
@@ -317,6 +465,9 @@ export global App {
     in property <image> np-cover;
     in property <image> np-cover-large;
     in property <color> np-tint: #3a3a3a;
+    // The cover reduced to a soft wash of its colours: Now Playing's backdrop
+    // when the interface is glass.
+    in property <image> np-backdrop;
     in property <bool> np-explicit: false;
     in property <bool> np-favorite: false;
     in property <bool> playing: false;
@@ -379,6 +530,8 @@ export global App {
     callback update-dismiss();
     callback open-update-page();
     in property <float> progress: 0.0;
+    // How far from the start the stream is downloaded, 0..1 (drawn behind progress).
+    in property <float> loaded: 0.0;
     in property <int> duration-secs: 0;
     in-out property <bool> show-remaining: false;
     in property <string> elapsed: "0:00";
@@ -478,8 +631,19 @@ export global App {
 
     // Now playing overlay
     in-out property <bool> show-now-playing: false;
+    // Every line of the track's lyrics (blank lines left out).
     in property <[LyricLine]> lyrics;
+    // The line being sung, as an index into `lyrics`; -1 before the first
+    // line, in an instrumental break, or when the lyrics have no timing.
+    in property <int> lyric-index: -1;
+    // The lyrics have timing: the column follows the song, a line seeks.
+    in property <bool> lyrics-synced: false;
     in property <string> lyrics-status: "";
+    // The Lyrics toggle of Now Playing, remembered in Settings.
+    in-out property <bool> show-lyrics: true;
+    callback set-show-lyrics(bool);
+    // Seek to the start of a line of `lyrics`.
+    callback seek-lyric(int);
 
     // The context menu (see context-menu.slint). One per window.
     in-out property <bool> menu-open;
@@ -500,13 +664,16 @@ export global App {
     // For cards: whether it is in the collection, and whether that can change.
     in property <bool> menu-favorite: false;
     in property <bool> menu-can-favorite: false;
+    // Whether the card is pinned to the top of its library page (a local choice).
+    in property <bool> menu-pinned: false;
     in property <length> menu-x;
     in property <length> menu-y;
     callback request-track-menu(string, length, length);
     callback request-card-menu(CardData, length, length);
     // Card entries, and "add-to-playlist" (argument: playlist id) for any kind:
     // play | play-next | favorite | artist | open | copy-link | add-to-playlist
-    // | rename | delete | create-playlist.
+    // | rename | delete | create-playlist | edit | make-public | make-private
+    // | move-to-folder (argument: folder id, "root" for none) | pin (toggles).
     callback menu-action(string, string);
     callback play-track-next(string);
     callback copy-track-link(string);
@@ -524,7 +691,11 @@ export global App {
     callback show-artist-tracks();
     callback show-artist-releases(bool);
     callback artist-release-art(bool, int, int);
-    callback catalog-video-art(bool, int, int);
+    // Artwork window for a card shelf ("artist-videos" | "search-videos" |
+    // "search-albums" | "search-playlists"): group index, or -1 for the flat list.
+    callback catalog-art(string, int, int, int);
+    // Sort and group a search tab: shelf, sort, group.
+    callback arrange-search(string, string, string);
     callback sort-playlists();
     callback back();
     callback forward();
@@ -571,17 +742,33 @@ export global App {
     in-out property <string> cache-max: "20";
     in property <bool> keep-most-played: true;
     in property <bool> fancy-animation;
+    // The Liquid Glass setting; `glass` is whether the bar is glass right now.
+    in property <bool> liquid-glass: true;
+    in property <bool> glass-available: true;
     callback pkce-start-safari();
     callback set-cache-max(string);
     callback set-keep-most-played(bool);
     callback set-fancy-animation(bool);
+    callback set-liquid-glass(bool);
     in property <string> app-version: "";
-    // Bumped to move keyboard focus into the search field.
+    // Bumped to move keyboard focus into the search field. The active field
+    // marks it seen, so a field that appears after the bump (the Explore
+    // page's, in phone layout) still takes it.
     in property <int> focus-search: 0;
+    in-out property <int> focus-search-seen: 0;
+    // Bumped by "/" to focus the collection page's filter field. The field
+    // marks it seen, so a filter created after the bump (on a page "/"
+    // navigated to) still takes focus when it appears.
+    in property <int> focus-filter: 0;
+    // ⌘ is held: the sidebar shows the key of each page.
+    in property <bool> command-held: false;
+    in-out property <int> focus-filter-seen: 0;
     callback set-quality(string);
     callback set-show-collection(bool);
+    callback set-show-key-letters(bool);
     callback set-show-audio-metadata(bool);
     callback clear-cache();
+    callback open-cache-folder();
     callback pkce-start();
     callback pkce-finish(string);
 }
@@ -612,7 +799,27 @@ export component EditableInput inherits TextInput {
             if App.edit-command == "copy" { self.copy(); }
             if App.edit-command == "paste" { self.paste(); }
             if App.edit-command == "select-all" { self.select-all(); }
+            if App.edit-command == "blur" { self.clear-focus(); }
         }
+    }
+}
+
+// One key of a shortcut hint (⌘F in the search field, the sidebar keys, / in a filter).
+export component Kbd inherits Rectangle {
+    in property <string> glyph;
+    width: max(20px, label.preferred-width + 10px);
+    height: 20px;
+    border-radius: 5px;
+    background: #2a2a2a;
+    border-width: 1px;
+    border-color: #3a3a3a;
+    label := Text {
+        text: root.glyph;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        font-weight: Theme.medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -779,8 +986,12 @@ export component MinimizeButton inherits Rectangle {
     width: 96px;
     height: 36px;
     border-radius: 18px;
-    background: ta.pressed ? #ffffff42 : ta.has-hover ? #ffffff2e : #ffffff1a;
-    animate background { duration: 120ms; }
+    // Glass: see PlayerBar. The tint lightens as the plain button does.
+    in property <bool> glass: false;
+    background: root.glass ? (ta.pressed ? @conic-gradient(#474c5301 0deg, #ffffff52 360deg)
+            : ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff3d 360deg)
+            : @conic-gradient(#474c5301 0deg, #ffffff26 360deg))
+        : ta.pressed ? #ffffff42 : ta.has-hover ? #ffffff2e : #ffffff1a;
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => { if (root.enabled) { root.clicked(); } }

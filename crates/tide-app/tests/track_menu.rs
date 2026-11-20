@@ -317,3 +317,217 @@ fn folder_menu_is_rename_delete_create_without_opening_the_folder() {
         ]
     );
 }
+
+#[test]
+fn playlist_menu_is_edit_share_and_delete_for_mine_and_follow_for_others() {
+    use slint::{ModelRc, VecModel};
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
+    app.set_logged_in(true);
+    app.set_menu_kind("playlist".into());
+    app.set_menu_x(400.);
+    app.set_menu_y(200.);
+    app.set_folders(ModelRc::new(VecModel::from(vec![CardData {
+        id: "f1".into(),
+        kind: "folder".into(),
+        title: "Archive".into(),
+        ..Default::default()
+    }])));
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    app.on_menu_action({
+        let actions = actions.clone();
+        move |action, arg| {
+            actions
+                .borrow_mut()
+                .push((action.to_string(), arg.to_string()))
+        }
+    });
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
+
+    // Open the menu on a playlist and run its entry `down` steps below Play now.
+    let open = |by: &str, public: bool, followed: bool| {
+        app.set_menu_card(CardData {
+            id: "p1".into(),
+            kind: "playlist".into(),
+            title: "2000's".into(),
+            by: by.into(),
+            is_public: public,
+            ..Default::default()
+        });
+        app.set_menu_can_favorite(by != "Me");
+        app.set_menu_favorite(followed);
+        app.set_menu_open(true);
+    };
+    let entry = |down: usize| {
+        for _ in 0..down {
+            press(win, Key::DownArrow);
+        }
+        press(win, Key::Return);
+        assert!(!app.get_menu_open());
+        actions.borrow().last().cloned().unwrap()
+    };
+    let plain = |action: &str| (action.to_string(), String::new());
+
+    // Mine: Play now, Play next, Add to playlist, Edit, Make public, Move to
+    // folder, Delete, Pin, Share.
+    open("Me", false, false);
+    assert_eq!(entry(3), plain("edit"));
+    open("Me", false, false);
+    assert_eq!(entry(4), plain("make-public"));
+    open("Me", true, false);
+    assert_eq!(entry(4), plain("make-private"));
+    open("Me", false, false);
+    assert_eq!(entry(6), plain("delete"));
+    open("Me", false, false);
+    assert_eq!(entry(7), plain("pin"));
+
+    // Move to folder lists "No folder" first, then the folders.
+    open("Me", false, false);
+    for _ in 0..5 {
+        press(win, Key::DownArrow);
+    }
+    press(win, Key::RightArrow);
+    assert_eq!(app.get_menu_sub(), "folders");
+    press(win, Key::DownArrow);
+    press(win, Key::Return);
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("move-to-folder".to_string(), "f1".to_string()))
+    );
+    open("Me", false, false);
+    for _ in 0..5 {
+        press(win, Key::DownArrow);
+    }
+    press(win, Key::RightArrow);
+    press(win, Key::Return);
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("move-to-folder".to_string(), "root".to_string()))
+    );
+
+    // Someone else's: Follow / Unfollow where mine has Edit, and no Delete.
+    // Until it is followed, Move to folder is skipped (on the way to Pin, then Share).
+    open("TIDAL", false, true);
+    assert_eq!(entry(3), plain("favorite"));
+    open("TIDAL", false, false);
+    for _ in 0..5 {
+        press(win, Key::DownArrow);
+    }
+    press(win, Key::RightArrow);
+    assert_eq!(app.get_menu_sub(), "share");
+    press(win, Key::Escape);
+    press(win, Key::Escape);
+    assert!(!app.get_menu_open());
+}
+
+#[test]
+fn edit_playlist_dialog_saves_what_it_was_opened_with_until_changed() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
+    app.set_logged_in(true);
+    let saved = Rc::new(RefCell::new(None));
+    app.on_save_playlist({
+        let saved = saved.clone();
+        move |title, description, public| {
+            *saved.borrow_mut() = Some((title.to_string(), description.to_string(), public));
+        }
+    });
+    app.on_create_in_collection(|_, _| panic!("editing must not go through the name dialog"));
+
+    app.set_create_folder_id("p1".into());
+    app.set_create_name("2000's".into());
+    app.set_edit_description("Indie and pop".into());
+    app.set_edit_public(true);
+    app.set_create_kind("edit-playlist".into());
+
+    // The title field has focus: typing appends, Return saves.
+    win.dispatch_event(WindowEvent::KeyPressed { text: "!".into() });
+    win.dispatch_event(WindowEvent::KeyReleased { text: "!".into() });
+    press(win, Key::Return);
+    assert_eq!(
+        saved.borrow().clone(),
+        Some(("2000's!".to_string(), "Indie and pop".to_string(), true))
+    );
+    assert_eq!(app.get_create_kind(), "");
+}
+
+#[test]
+fn moving_the_cursor_over_the_playlist_flyout_never_scrolls_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(1440., 900.),
+    });
+    app.set_logged_in(true);
+    app.set_own_playlists(slint::ModelRc::new(slint::VecModel::from(
+        (0..40)
+            .map(|i| CardData {
+                id: format!("p{i}").into(),
+                kind: "playlist".into(),
+                title: format!("Playlist {i}").into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    app.set_menu_kind("album".into());
+    app.set_menu_card(CardData {
+        id: "9".into(),
+        kind: "album".into(),
+        title: "An album".into(),
+        ..Default::default()
+    });
+    app.set_menu_x(400.);
+    app.set_menu_y(100.);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    app.on_menu_action({
+        let actions = actions.clone();
+        move |action, arg| {
+            actions
+                .borrow_mut()
+                .push((action.to_string(), arg.to_string()))
+        }
+    });
+
+    win.dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(1., 1.),
+    });
+    app.set_menu_open(true);
+    // Add to playlist, opened from the keyboard (its first playlist focused).
+    press(win, Key::DownArrow);
+    press(win, Key::DownArrow);
+    press(win, Key::RightArrow);
+    assert_eq!(app.get_menu_sub(), "playlists");
+
+    // The flyout hangs off the third entry: 14 rows of 44px from y 264.
+    let x = 400. + 300. + 4. + 140.;
+    let row = |i: f32| 256. + 8. + 44. * i + 22.;
+    // Sweep the cursor down every visible row, then back up a little.
+    for i in (0..14).chain((9..13).rev()) {
+        win.dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(x, row(i as f32)),
+        });
+    }
+    // The list has not moved: the 14th visible row is still the 14th playlist.
+    click(win, x, row(13.), PointerEventButton::Left);
+    assert_eq!(
+        actions.borrow().last().cloned(),
+        Some(("add-to-playlist".to_string(), "p13".to_string()))
+    );
+}

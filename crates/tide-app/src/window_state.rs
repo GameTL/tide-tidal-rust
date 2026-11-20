@@ -11,6 +11,12 @@ use slint::winit_030::WinitWindowAccessor;
 
 use crate::{controller::Ctx, platform};
 
+/// The window's native minimum (MainWindow's min-width / min-height at 100%
+/// zoom): as narrow as a phone, where TIDE shows its phone layout. Zoomed in,
+/// Slint's own minimum grows with the zoom and widens the window if needed.
+const MIN_WIDTH: f64 = 320.0;
+const MIN_HEIGHT: f64 = 620.0;
+
 thread_local! {
     // Startup and Dock reopen must restore before native events can save defaults.
     static READY: Cell<bool> = const { Cell::new(false) };
@@ -53,10 +59,10 @@ impl Rect {
     fn fitted(self, visible: Self) -> Self {
         let width = self
             .width
-            .clamp(960.0_f64.min(visible.width), visible.width);
+            .clamp(MIN_WIDTH.min(visible.width), visible.width);
         let height = self
             .height
-            .clamp(620.0_f64.min(visible.height), visible.height);
+            .clamp(MIN_HEIGHT.min(visible.height), visible.height);
         Self {
             x: self.x.clamp(visible.x, visible.x + visible.width - width),
             y: self.y.clamp(visible.y, visible.y + visible.height - height),
@@ -415,7 +421,7 @@ mod tests {
             Rect {
                 x: -1600.0,
                 y: 350.0,
-                width: 960.0,
+                width: 320.0,
                 height: 620.0
             }
         );

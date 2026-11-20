@@ -73,6 +73,8 @@ export component VideoView inherits Rectangle {
     border-radius: 4px * (1 - root.expansion);
     out property <float> expansion: App.video-open ? 1 : 0;
     animate expansion { duration: 250ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    // Fully open, the view hides the page's player bar: it need not be glass.
+    changed expansion => { App.bar-covered = self.expansion >= 1; }
     property <float> controls-opacity: root.controls ? max(0, (root.expansion - 0.75) / 0.25) : 0;
     accessible-role: button;
     accessible-label: App.video-open ? "Play or pause video" : "Expand video";
@@ -94,7 +96,10 @@ export component VideoView inherits Rectangle {
         root.controls = true;
     }
 
-    init => { root.wake(); }
+    init => {
+        root.wake();
+        App.bar-covered = self.expansion >= 1;
+    }
 
     property <int> wake-rev: App.video-wake;
     changed wake-rev => { root.wake(); }
@@ -205,9 +210,12 @@ export component VideoView inherits Rectangle {
         }
     }
 
+    // Narrow, as in Now Playing: no room for the search beside the traffic lights.
     header := HeaderTools {
         x: parent.width - self.width;
         y: 0px;
+        width: root.width < 720px ? 101px : 407px;
+        search: root.width >= 720px;
         active: App.video-open;
         opacity: root.controls-opacity;
         // Opacity hides idle controls; keep the input focusable so the search

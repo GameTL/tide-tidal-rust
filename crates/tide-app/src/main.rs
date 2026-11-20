@@ -71,8 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fancy = controller::fancy_animation_override()
         .unwrap_or(ctx.settings.read().unwrap().fancy_animation);
     platform::apply_memory_profile(!fancy);
+    platform::set_glass_choice(ctx.settings.read().unwrap().glass);
 
     let main_window = MainWindow::new()?;
+    main_window.global::<App>().set_glass(platform::glass_wanted());
     platform::configure_input(main_window.window(), ctx.clone());
     #[cfg(target_os = "macos")]
     {
@@ -94,10 +96,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ticker = slint::Timer::default();
     let tick_ui = ui.clone();
+    let tick_window = main_window.as_weak();
     ticker.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(250),
-        move || tick_ui.tick(),
+        move || {
+            tick_ui.tick();
+            // Follows macOS "Reduce transparency" while the app runs.
+            if let Some(window) = tick_window.upgrade() {
+                let app = window.global::<App>();
+                let glass = platform::glass_wanted();
+                if app.get_glass() != glass {
+                    app.set_glass(glass);
+                    app.set_liquid_glass(glass);
+                }
+            }
+        },
     );
 
     if let Some(dir) = snapshot_dir {

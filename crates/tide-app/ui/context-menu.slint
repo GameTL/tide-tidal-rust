@@ -71,7 +71,7 @@ struct CtxItem {
     label: string,
     icon: image,
     available: bool,
-    // Name of the flyout this entry opens: "" | playlists | share.
+    // Name of the flyout this entry opens: "" | playlists | folders | share.
     flyout: string,
 }
 
@@ -137,6 +137,10 @@ export component ContextMenu inherits Rectangle {
     property <bool> favorite: kind == "track" ? track.favorite : App.menu-favorite;
     property <string> collection-label: favorite ? "Remove from My Collection" : "Add to My Collection";
     property <image> collection-icon: favorite ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+    // Pins are local: they sort a card to the top of its library page.
+    property <CtxItem> pin-item: { id: "pin", label: App.menu-pinned ? "Unpin" : "Pin", icon: App.menu-pinned ? @image-url("icons/pin-off.svg") : @image-url("icons/pin.svg"), available: true, flyout: "" };
+    // The small-caps count line ("98 TRACKS") of an own playlist or a folder.
+    property <bool> counted: kind == "folder" || (kind == "playlist" && card.by == "Me");
 
     property <[CtxItem]> items: kind == "track" ? [
         { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
@@ -151,38 +155,62 @@ export component ContextMenu inherits Rectangle {
         { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
         { id: "favorite", label: collection-label, icon: collection-icon, available: true, flyout: "" },
         { id: "artist", label: "Go to artist", icon: @image-url("icons/user.svg"), available: true, flyout: "" },
+        pin-item,
+        { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
+    ] : kind == "playlist" && card.by == "Me" ? [
+        { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
+        { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
+        { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        { id: "edit", label: "Edit playlist", icon: @image-url("icons/edit.svg"), available: true, flyout: "" },
+        { id: card.is-public ? "make-private" : "make-public", label: card.is-public ? "Make private" : "Make public",
+            icon: card.is-public ? @image-url("icons/lock.svg") : @image-url("icons/unlock.svg"), available: true, flyout: "" },
+        { id: "move-to-folder", label: "Move to folder", icon: @image-url("icons/folder.svg"), available: true, flyout: "folders" },
+        // The user's own playlists are always in the collection: they are deleted, not unfollowed.
+        { id: "delete", label: "Delete playlist", icon: @image-url("icons/trash.svg"), available: true, flyout: "" },
+        pin-item,
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
     ] : kind == "playlist" ? [
         { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
         { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
         { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
-        // The user's own playlists are always in the collection.
-        { id: "favorite", label: collection-label, icon: collection-icon, available: App.menu-can-favorite, flyout: "" },
+        // Unavailable until the playlist is known to be someone else's.
+        { id: "favorite", label: favorite ? "Unfollow" : "Follow", icon: collection-icon, available: App.menu-can-favorite, flyout: "" },
+        // Only a playlist of the collection has a place among its folders.
+        { id: "move-to-folder", label: "Move to folder", icon: @image-url("icons/folder.svg"), available: favorite, flyout: "folders" },
+        pin-item,
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
     ] : kind == "mix" ? [
         { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
         { id: "play-next", label: "Play next", icon: @image-url("icons/queue.svg"), available: true, flyout: "" },
         { id: "add-to-playlist", label: "Add to playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "playlists" },
+        pin-item,
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
     ] : kind == "video" ? [
         { id: "play", label: "Play now", icon: @image-url("icons/play.svg"), available: true, flyout: "" },
         { id: "favorite", label: collection-label, icon: collection-icon, available: true, flyout: "" },
+        pin-item,
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
     ] : kind == "folder" ? [
         { id: "rename", label: "Rename folder", icon: @image-url("icons/folder.svg"), available: true, flyout: "" },
         { id: "delete", label: "Delete folder", icon: @image-url("icons/folder.svg"), available: true, flyout: "" },
         { id: "create-playlist", label: "Create playlist", icon: @image-url("icons/playlist.svg"), available: true, flyout: "" },
+        pin-item,
     ] : [
         { id: "open", label: "Go to artist", icon: @image-url("icons/user.svg"), available: true, flyout: "" },
+        pin-item,
         { id: "share", label: "Share", icon: @image-url("icons/share.svg"), available: true, flyout: "share" },
     ];
 
     property <int> selected: 0;
-    // The open flyout: "" | playlists | share.
+    // The open flyout: "" | playlists | folders | share.
     property <string> sub <=> App.menu-sub;
     // Entry of the flyout that has keyboard focus; -1 while the main list has it.
     property <int> sub-selected: -1;
-    property <int> sub-count: sub == "playlists" ? App.own-playlists.length : sub == "share" ? 1 : 0;
+    // The flyout selection was last moved by the keyboard: only then does
+    // the list scroll to it. Hovering never scrolls what is under the cursor.
+    property <bool> sub-keyed: false;
+    // "Move to folder" leads with the way out of every folder.
+    property <int> sub-count: sub == "playlists" ? App.own-playlists.length : sub == "folders" ? App.folders.length + 1 : sub == "share" ? 1 : 0;
     // Main entry the flyout hangs off.
     property <int> sub-anchor: 0;
     property <length> margin: 8px;
@@ -218,6 +246,7 @@ export component ContextMenu inherits Rectangle {
     function open-flyout(index: int, focused: bool) {
         sub-anchor = index;
         sub = items[index].flyout;
+        sub-keyed = focused;
         sub-selected = focused && sub-count > 0 ? 0 : -1;
     }
 
@@ -260,6 +289,9 @@ export component ContextMenu inherits Rectangle {
         } else if (sub == "playlists" && index >= 0 && index < App.own-playlists.length) {
             root.dismiss();
             App.menu-action("add-to-playlist", App.own-playlists[index].id);
+        } else if (sub == "folders" && index >= 0 && index <= App.folders.length) {
+            root.dismiss();
+            App.menu-action("move-to-folder", index == 0 ? "root" : App.folders[index - 1].id);
         }
     }
 
@@ -281,6 +313,7 @@ export component ContextMenu inherits Rectangle {
             }
             if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab) {
                 if (root.sub-selected >= 0 && root.sub-count > 0) {
+                    root.sub-keyed = true;
                     root.sub-selected = mod(root.sub-selected + (event.text == Key.UpArrow || event.modifiers.shift ? -1 : 1) + root.sub-count, root.sub-count);
                 } else {
                     root.move-selection(event.text == Key.UpArrow || event.modifiers.shift ? -1 : 1);
@@ -307,7 +340,7 @@ export component ContextMenu inherits Rectangle {
     menu := Surface {
         x: clamp(App.menu-x, root.margin, root.width - self.width - root.margin);
         y: clamp(App.menu-y, root.margin, root.height - self.height - root.margin);
-        width: 300px;
+        width: min(300px, root.width - 2 * root.margin);
         height: root.head-h + root.items.length * root.row-h + 10px;
         accessible-role: groupbox;
         accessible-label: "Options";
@@ -344,11 +377,12 @@ export component ContextMenu inherits Rectangle {
 
         Text {
             x: root.kind == "folder" ? 74px : 82px;
-            y: 40px;
+            y: root.counted ? 43px : 40px;
             width: parent.width - self.x - 16px;
             text: root.kind == "track" ? root.track.artist : root.card.subtitle;
             color: Theme.text-secondary;
-            font-size: 14px;
+            font-size: root.counted ? 11px : 14px;
+            letter-spacing: root.counted ? 0.8px : 0px;
             font-weight: Theme.demibold;
             overflow: elide;
         }
@@ -375,17 +409,36 @@ export component ContextMenu inherits Rectangle {
         }
     }
 
-    // Flyouts open beside the entry, on whichever side has room.
+    // Flyouts open beside the entry, on whichever side has room. On a window
+    // too narrow for either (phone width), the flyout covers the menu below
+    // its entry, so the entry stays in sight.
     property <length> flyout-y: menu.y + root.head-h + root.sub-anchor * root.row-h - 8px;
+    pure function fits-right(width: length) -> bool {
+        return menu.x + menu.width + 4px + width <= root.width - root.margin;
+    }
+    pure function fits-left(width: length) -> bool {
+        return menu.x - width - 4px >= root.margin;
+    }
     pure function flyout-x(width: length) -> length {
-        return menu.x + menu.width + 4px + width <= root.width - root.margin ? menu.x + menu.width + 4px : menu.x - width - 4px;
+        return root.fits-right(width) ? menu.x + menu.width + 4px
+            : root.fits-left(width) ? menu.x - width - 4px
+            : clamp(menu.x + menu.width - width - 12px, root.margin, root.width - width - root.margin);
+    }
+    pure function flyout-top(width: length) -> length {
+        return root.fits-right(width) || root.fits-left(width) ? root.flyout-y : root.flyout-y + root.row-h + 4px;
+    }
+    // How tall a flyout's list may be: the window, or below its entry when
+    // it covers the menu (the list scrolls).
+    pure function flyout-room(width: length) -> length {
+        return root.fits-right(width) || root.fits-left(width) ? root.height - 2 * root.margin - 16px
+            : max(2 * root.row-h, root.height - root.margin - root.flyout-top(width) - 16px);
     }
 
     if sub == "share": Surface {
-        width: 200px;
+        width: min(200px, root.width - 2 * root.margin);
         height: root.row-h + 16px;
         x: root.flyout-x(self.width);
-        y: clamp(root.flyout-y, root.margin, root.height - self.height - root.margin);
+        y: clamp(root.flyout-top(self.width), root.margin, root.height - self.height - root.margin);
         accessible-role: groupbox;
         accessible-label: "Share";
         MenuEntry {
@@ -395,23 +448,75 @@ export component ContextMenu inherits Rectangle {
             label: "Copy link";
             icon: @image-url("icons/link.svg");
             selected: root.sub-selected == 0;
-            entered => { root.sub-selected = 0; }
+            entered => { root.sub-keyed = false; root.sub-selected = 0; }
             activate => { root.activate-sub(0); }
+        }
+    }
+    if sub == "folders": Surface {
+        property <int> rows: App.folders.length + 1;
+        property <int> focused: root.sub-selected;
+        width: min(260px, root.width - 2 * root.margin);
+        // As tall as the window allows, up to 12 rows.
+        height: min(rows * root.row-h, 12 * root.row-h, root.flyout-room(self.width)) + 16px;
+        x: root.flyout-x(self.width);
+        y: clamp(root.flyout-top(self.width), root.margin, root.height - self.height - root.margin);
+        accessible-role: groupbox;
+        accessible-label: "Move to folder";
+        // Keep the keyboard-focused folder in view, scrolling no further than needed.
+        changed focused => {
+            if (focused >= 0 && root.sub-keyed) {
+                folders.content-y = -clamp(-folders.content-y, (focused + 1) * root.row-h - folders.height, focused * root.row-h);
+            }
+        }
+        folders := Flickable {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            content-height: rows * root.row-h;
+            MenuEntry {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                label: "No folder";
+                icon: @image-url("icons/playlist.svg");
+                selected: root.sub-selected == 0;
+                entered => { root.sub-keyed = false; root.sub-selected = 0; }
+                activate => { root.activate-sub(0); }
+            }
+            for folder[index] in App.folders: MenuEntry {
+                x: 0px;
+                y: (index + 1) * root.row-h;
+                width: parent.width;
+                label: folder.title;
+                icon: @image-url("icons/folder.svg");
+                selected: root.sub-selected == index + 1;
+                entered => { root.sub-keyed = false; root.sub-selected = index + 1; }
+                activate => { root.activate-sub(index + 1); }
+            }
         }
     }
     if sub == "playlists": Surface {
         property <int> rows: App.own-playlists.length;
+        // The recently used playlists lead the list, set off by a hairline.
+        property <int> recent: App.recent-playlists;
+        property <length> gap: recent > 0 ? 13px : 0px;
+        property <length> content-h: rows * root.row-h + gap;
         property <int> focused: root.sub-selected;
-        width: 280px;
-        height: clamp(rows, 1, 8) * root.row-h + 16px;
+        pure function row-y(index: int) -> length {
+            return index * root.row-h + (index >= recent ? gap : 0px);
+        }
+        width: min(280px, root.width - 2 * root.margin);
+        // As tall as the window allows, up to 14 playlists.
+        height: min(max(rows, 1) * root.row-h + gap, 14 * root.row-h + gap, root.flyout-room(self.width)) + 16px;
         x: root.flyout-x(self.width);
-        y: clamp(root.flyout-y, root.margin, root.height - self.height - root.margin);
+        y: clamp(root.flyout-top(self.width), root.margin, root.height - self.height - root.margin);
         accessible-role: groupbox;
         accessible-label: "Add to playlist";
-        // Keep the keyboard-focused playlist in view.
+        // Keep the keyboard-focused playlist in view, scrolling no further than needed.
         changed focused => {
-            if (focused >= 0) {
-                list.content-y = -clamp(focused * root.row-h - 3 * root.row-h, 0px, max(0px, rows * root.row-h - list.height));
+            if (focused >= 0 && root.sub-keyed) {
+                list.content-y = -clamp(-list.content-y, row-y(focused) + root.row-h - list.height, row-y(focused));
             }
         }
 
@@ -427,15 +532,22 @@ export component ContextMenu inherits Rectangle {
             y: 8px;
             width: parent.width - 16px;
             height: parent.height - 16px;
-            content-height: rows * root.row-h;
+            content-height: content-h;
+            if recent > 0: Rectangle {
+                x: 14px;
+                y: recent * root.row-h + 6px;
+                width: parent.width - 28px;
+                height: 1px;
+                background: #ffffff1f;
+            }
             for playlist[index] in App.own-playlists: MenuEntry {
                 x: 0px;
-                y: index * root.row-h;
+                y: row-y(index);
                 width: parent.width;
                 label: playlist.title;
                 icon: @image-url("icons/playlist.svg");
                 selected: root.sub-selected == index;
-                entered => { root.sub-selected = index; }
+                entered => { root.sub-keyed = false; root.sub-selected = index; }
                 activate => { root.activate-sub(index); }
             }
         }

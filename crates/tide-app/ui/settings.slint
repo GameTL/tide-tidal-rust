@@ -18,11 +18,20 @@ component Row inherits Rectangle {
     in property <string> title;
     in property <string> detail;
     in property <bool> divider: true;
+    // Room kept free on the right for the row's controls.
+    in property <length> controls-width: 190px;
+    // The row has controls (a switch, buttons, a field).
+    in property <bool> has-controls: true;
+    // Phone width: the controls go under the text, at the right. (By the
+    // page's width: the row's own would depend on its padding.)
+    property <bool> stacked: App.pane-width < 520px;
     min-height: 82px;
     VerticalLayout {
         alignment: center;
         spacing: 6px;
-        padding-right: 190px;
+        padding-right: root.stacked ? 0px : root.controls-width;
+        padding-top: root.stacked ? 18px : 0px;
+        padding-bottom: !root.stacked ? 0px : root.has-controls ? 66px : 18px;
         Text {
             text: root.title;
             color: Theme.text;
@@ -43,7 +52,11 @@ component Row inherits Rectangle {
         height: 1px;
         background: #19191c;
     }
-    @children
+    Rectangle {
+        y: root.stacked ? root.height - 62px : 0px;
+        height: root.stacked ? 46px : root.height;
+        @children
+    }
 }
 
 component QualityRow inherits Rectangle {
@@ -55,7 +68,8 @@ component QualityRow inherits Rectangle {
     property <bool> selected: App.quality == key;
     // Tier colours (Goal.md, "Quality colours"): Low white, High blue, Max gold.
     property <color> tier-color: key == "max" ? Theme.max : key == "high" ? Theme.lossless : Theme.text;
-    height: 82px;
+    // Phone width: the detail wraps.
+    height: App.pane-width < 480px ? 96px : 82px;
     // Faint wash in the tier colour, as in the official client: strongest in the
     // row's lower-left corner, gone by mid-card and by the top of the row. Two
     // linear fades stand in for an off-centre ellipse, which Slint cannot draw.
@@ -97,6 +111,7 @@ component QualityRow inherits Rectangle {
 
     VerticalLayout {
         x: 48px;
+        width: parent.width - 48px;
         alignment: center;
         spacing: 8px;
         Text {
@@ -110,6 +125,7 @@ component QualityRow inherits Rectangle {
             text: root.detail;
             color: #b2b2b6;
             font-size: 13px;
+            wrap: word-wrap;
         }
     }
 
@@ -392,14 +408,14 @@ export component MaxLogin inherits VerticalLayout {
 }
 
 export component SettingsView inherits Rectangle {
-    property <length> column-w: min(892px, self.width - 64px);
+    property <length> column-w: min(892px, self.width - 2 * (App.phone-layout ? 16px : 32px));
     ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: (root.width - root.column-w) / 2;
             padding-right: (root.width - root.column-w) / 2;
             padding-top: 12px;
-            padding-bottom: 60px;
+            padding-bottom: 60px + App.bar-inset;
             alignment: start;
             Text {
                 text: "Settings";
@@ -491,6 +507,7 @@ export component SettingsView inherits Rectangle {
                     Row {
                         title: "Sound output";
                         detail: App.output-info;
+                        has-controls: false;
                     }
 
                     Row {
@@ -555,13 +572,23 @@ export component SettingsView inherits Rectangle {
                 }
 
                 Card {
-                    if App.bpm-available: Row {
-                        title: "Audio metadata";
-                        detail: "Show BPM in track lists when there is room.";
+                    Row {
+                        title: "BPM";
+                        detail: "Show the tempo of each track in track lists (albums, playlists, My Tracks) when there is room.";
                         Toggle {
                             x: parent.width - self.width;
                             on: App.show-audio-metadata;
                             toggled(v) => { App.set-show-audio-metadata(v); }
+                        }
+                    }
+
+                    Row {
+                        title: "Highlight shortcut letters";
+                        detail: "Show the key that opens each sidebar page in white. Hold ⌘ to see them when this is off.";
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.show-key-letters;
+                            toggled(v) => { App.set-show-key-letters(v); }
                         }
                     }
 
@@ -589,7 +616,16 @@ export component SettingsView inherits Rectangle {
                     Row {
                         title: "Offline audio cache";
                         detail: App.cache-info;
+                        controls-width: 240px;
                         SmallButton {
+                            x: clear-button.x - self.width - 10px;
+                            text: "Open folder";
+                            clicked => {
+                                App.open-cache-folder();
+                            }
+                        }
+
+                        clear-button := SmallButton {
                             x: parent.width - self.width;
                             text: "Clear";
                             clicked => {
@@ -657,12 +693,25 @@ export component SettingsView inherits Rectangle {
                     Row {
                         title: "Fancy Animation";
                         detail: "Sliding back / forward page transitions, with a bigger graphics cache and an extra window buffer. Off, TIDE uses as little memory as it can and still animates at your display's refresh rate.";
-                        divider: false;
+                        divider: App.glass-available;
                         Toggle {
                             x: parent.width - self.width;
                             on: App.fancy-animation;
                             toggled(v) => {
                                 App.set-fancy-animation(v);
+                            }
+                        }
+                    }
+
+                    if App.glass-available: Row {
+                        title: "Liquid Glass";
+                        detail: "The player bar is frosted glass: covers and lists show through, blurred, as they scroll beneath it. Uses about 5 MB more memory; off, the bar is solid. Follows macOS Reduce Transparency until you choose here.";
+                        divider: false;
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.liquid-glass;
+                            toggled(v) => {
+                                App.set-liquid-glass(v);
                             }
                         }
                     }
@@ -730,11 +779,13 @@ export component SettingsView inherits Rectangle {
                 Card {
                     Row {
                         title: "Version " + App.app-version;
+                        has-controls: false;
                         detail: "An unofficial, independent player for TIDAL written in Rust. Not affiliated with or endorsed by TIDAL.";
                     }
 
                     Row {
                         title: "Your data";
+                        has-controls: false;
                         detail: "Login tokens stay on this Mac in a file only your user can read. TIDE talks only to TIDAL's servers. See SECURITY.md.";
                         divider: false;
                     }

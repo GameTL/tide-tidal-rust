@@ -426,10 +426,10 @@ impl MetadataCache {
     }
 
     pub fn clear_json(&self) -> Result<(), CacheError> {
-        // Account data goes; app preferences and the EQs (which belong to this
-        // computer's sound outputs, not to the account) stay.
+        // Account data goes; app preferences, the local pins and the EQs (which
+        // belong to this computer's sound outputs, not to the account) stay.
         self.conn.lock().unwrap().execute(
-            "DELETE FROM kv WHERE key NOT IN ('settings', 'dsp', 'autoeq_index')",
+            "DELETE FROM kv WHERE key NOT IN ('settings', 'dsp', 'autoeq_index', 'pins')",
             [],
         )?;
         Ok(())
@@ -1282,10 +1282,37 @@ impl AudioCache {
             .unwrap_or((0, 0))
     }
 
-    /// Delete every cached audio file.
+    /// Folder that holds the cached audio files.
+    pub fn dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// Delete every cached audio file, keeping the folder itself and the
+    /// `.tmp` / `.parts` of downloads still in flight (deleting those would
+    /// break the track that is playing and fail its background fill).
     pub fn clear(&self) -> Result<(), CacheError> {
+        std::fs::create_dir_all(&self.base_dir)?;
+        let in_flight: std::collections::HashSet<std::ffi::OsString> = {
+            let live = self.live.lock().unwrap();
+            let partials = self.live_partials.lock().unwrap();
+            live.keys()
+                .chain(partials.iter())
+                .filter_map(|key| key.split_once('\0'))
+                .filter_map(|(track, quality)| {
+                    self.file_path(track, quality)
+                        .file_stem()
+                        .map(|s| s.to_os_string())
+                })
+                .collect()
+        };
         for entry in std::fs::read_dir(&self.base_dir)?.flatten() {
             let path = entry.path();
+            if path
+                .file_stem()
+                .is_some_and(|stem| in_flight.contains(stem))
+            {
+                continue;
+            }
             if path.is_dir() {
                 std::fs::remove_dir_all(path)?;
             } else if entry.metadata().is_ok_and(|m| m.is_file()) {
@@ -1628,13 +1655,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logging_out_keeps_preferences_and_eqs_but_not_account_data() {
+    fn logging_out_keeps_preferences_pins_and_eqs_but_not_account_data() {
         let cache = MetadataCache::in_memory().unwrap();
-        for key in ["settings", "dsp", "autoeq_index", "home", "favorites"] {
+        for key in ["settings", "dsp", "autoeq_index", "pins", "home", "favorites"] {
             cache.put_json(key, "{}").unwrap();
         }
         cache.clear_json().unwrap();
-        for key in ["settings", "dsp", "autoeq_index"] {
+        for key in ["settings", "dsp", "autoeq_index", "pins"] {
             assert!(cache.get_json(key).is_some(), "{key} should survive");
         }
         for key in ["home", "favorites"] {
@@ -1719,6 +1746,30 @@ mod tests {
         let cache = AudioCache::with_dir(dir.clone(), 1024 * 1024).unwrap();
         let path = cache.file_path("12345", "HI_RES");
         assert!(path.to_str().unwrap().contains("12345_HI_RES.audio"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_empties_the_folder_but_spares_downloads_in_flight() {
+        let dir = std::env::temp_dir().join(format!("tide_clear_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = AudioCache::with_dir(dir.clone(), 1024 * 1024).unwrap();
+        let done = cache.file_path("1", "MAX");
+        std::fs::write(&done, b"audio").unwrap();
+        std::fs::create_dir_all(cache.file_path("2", "MAX").with_extension("parts")).unwrap();
+        let live_parts = cache.file_path("3", "MAX").with_extension("parts");
+        let live_tmp = cache.file_path("3", "MAX").with_extension("tmp");
+        std::fs::create_dir_all(&live_parts).unwrap();
+        std::fs::write(&live_tmp, b"head").unwrap();
+        cache.live_for("3", "MAX");
+        cache.mark_partial_live("3", "MAX");
+
+        cache.clear().unwrap();
+
+        assert!(dir.is_dir());
+        assert!(!done.exists());
+        assert!(!cache.file_path("2", "MAX").with_extension("parts").exists());
+        assert!(live_parts.is_dir() && live_tmp.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
