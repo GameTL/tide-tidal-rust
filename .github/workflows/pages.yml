@@ -19,12 +19,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Build and deploy site
+  # Build and deploy are separate jobs so the uploaded artifact is registered
+  # before deploy-pages looks it up, and so a failed deploy can be re-run
+  # alone without uploading a second "github-pages" artifact (deploy-pages
+  # refuses a run that holds two).
+  build:
+    name: Build site
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +52,19 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website/dist
+
+  deploy:
+    name: Deploy site
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: website/src/data/site.ts
+          sparse-checkout-cone-mode: false
 
       - id: deployment
         uses: actions/deploy-pages@v4
