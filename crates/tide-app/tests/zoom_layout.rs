@@ -56,18 +56,39 @@ fn zoomed_minimum_window_keeps_navigation_search_and_transport_reachable() {
             position: LogicalPosition::new(0.0, 0.0),
         });
         assert_eq!(app.get_compact_layout(), width < 960.0, "{percent}%");
+        // Zoomed in past 125%, the minimum window is phone width: the tab
+        // bar and the mini player stand in for the sidebar and player bar,
+        // and the search is on Explore.
+        let phone = width < 720.0;
+        assert_eq!(app.get_phone_layout(), phone, "{percent}%");
         let before = plays.get();
-        click(window, width / 2.0, height - app.get_player_height() + 36.0);
-        assert_eq!(plays.get(), before + 1, "transport at {percent}%");
-        let header = if app.get_sidebar_compact() {
-            90.0_f32.max(90.0 / zoom)
+        if phone {
+            let mini = height - app.get_dock_height() + app.get_mini_height() / 2.0;
+            click(window, width - 80.0, mini);
         } else {
-            64.0
-        };
+            click(window, width / 2.0, height - app.get_player_height() + 36.0);
+        }
+        assert_eq!(plays.get(), before + 1, "transport at {percent}%");
         let before = navigations.get();
-        // The test backend renders its menu bar inside the window; AppKit does not.
-        click(window, 36.0, app.get_pane_y() + header + 20.0);
-        assert_eq!(navigations.get(), before + 1, "sidebar at {percent}%");
+        if phone {
+            click(window, 8.0 + (width - 16.0) / 8.0, height - 32.0);
+        } else {
+            let header = if app.get_sidebar_compact() {
+                90.0_f32.max(90.0 / zoom)
+            } else {
+                64.0
+            };
+            // The test backend renders its menu bar inside the window; AppKit does not.
+            click(window, 36.0, app.get_pane_y() + header + 20.0);
+        }
+        assert_eq!(navigations.get(), before + 1, "navigation at {percent}%");
+        if phone {
+            app.set_view("modules".into());
+            app.set_nav_key("explore".into());
+        } else {
+            app.set_view("stub".into());
+            app.set_nav_key("".into());
+        }
         app.set_search_text("".into());
         app.set_focus_search(app.get_focus_search() + 1);
         i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));

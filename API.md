@@ -37,18 +37,22 @@
 | `GET https://api.tidal.com/v2/favorites/later` | Save for Later (v2 fallback) | ✅ `later` |
 | `GET https://api.tidal.com/v2/favorites/mixes` | Favourite mixes | ✅ `mixes` |
 | **Playlists & folders** | | |
-| `GET https://api.tidal.com/v1/playlists/{id}` | Playlist metadata and ETag | ✅ `add_to_playlist` |
+| `GET https://api.tidal.com/v1/playlists/{id}` | Playlist metadata and ETag | ✅ `add_to_playlist`, `playlist_detail` |
+| `POST https://api.tidal.com/v1/playlists/{id}` | Edit title and description | ✅ `edit_playlist` |
 | `GET https://api.tidal.com/v1/playlists/{id}/items` | Playlist tracks | ✅ `tracks_of` |
 | `POST https://api.tidal.com/v1/playlists/{id}/items` | Append tracks | ✅ `add_to_playlist` |
 | `DELETE https://api.tidal.com/v1/playlists/{id}/items/{indices}` | Remove tracks by index | ❌ |
 | `GET https://api.tidal.com/v1/playlists/{id}/recommendations/items` | Playlist recommendations | ❌ |
 | `GET https://api.tidal.com/v2/user-playlists/{id}/public` | A user's public playlists | ❌ |
+| `GET https://api.tidal.com/v2/user-playlists/{id}` | Creator profile and follower count | ✅ `playlist_detail` |
+| `PUT https://api.tidal.com/v2/playlists/{id}/set-public`, `…/set-private` | Show or hide a playlist on the profile | ✅ `set_playlist_public` |
 | `GET https://api.tidal.com/v2/my-collection/playlists/folders` | List folders and playlists | ✅ `playlists` |
 | `GET https://api.tidal.com/v2/my-collection/playlists/folders/flattened` | All folders, flattened | ❌ |
 | `PUT https://api.tidal.com/v2/my-collection/playlists/folders/create-folder` | Create folder | ✅ `create_in_collection` |
 | `PUT https://api.tidal.com/v2/my-collection/playlists/folders/create-playlist` | Create playlist | ✅ `create_in_collection` |
 | `PUT https://api.tidal.com/v2/my-collection/playlists/folders/rename` | Rename folder | ✅ `rename_folder` |
-| `PUT https://api.tidal.com/v2/my-collection/playlists/folders/remove` | Delete folder | ✅ `delete_folder` |
+| `PUT https://api.tidal.com/v2/my-collection/playlists/folders/remove` | Delete folder or playlist | ✅ `delete_folder`, `delete_playlist` |
+| `PUT https://api.tidal.com/v2/my-collection/playlists/folders/move` | Move a playlist to a folder | ✅ `move_playlist` |
 | `GET https://api.tidal.com/v2/my-collection/artists/folders` | Artist collection folders | ❌ |
 | **Catalogue** | | |
 | `GET https://api.tidal.com/v1/tracks/{id}` | Track metadata | ✅ `track` |

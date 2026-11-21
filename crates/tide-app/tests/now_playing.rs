@@ -222,3 +222,83 @@ fn source_jump_centers_the_requested_track_including_the_last_row() {
         );
     }
 }
+
+fn wheel(win: &slint::Window, x: f32, y: f32, dy: f32) {
+    let position = LogicalPosition::new(x, y);
+    win.dispatch_event(WindowEvent::PointerMoved { position });
+    win.dispatch_event(WindowEvent::PointerScrolled { position, delta_x: 0., delta_y: dy });
+}
+
+/// The Lyrics toggle, the lyric column's click-to-seek and "Sync lyrics".
+/// (The arrangements themselves are drawn in now_playing_render.rs; the
+/// ElementHandle API that could measure them needs a debug-info build.)
+#[test]
+fn lyrics_toggle_seek_and_sync() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    app.set_logged_in(true);
+    app.set_has_track(true);
+    app.set_current_id("1".into());
+    app.set_np_title("Fixture track".into());
+    app.set_lyrics(ModelRc::new(VecModel::from(
+        (0..30)
+            .map(|i| LyricLine { text: format!("Line number {i} of the fixture").into(), time: 3_000 * i })
+            .collect::<Vec<_>>(),
+    )));
+    app.set_lyrics_synced(true);
+    app.set_lyric_index(8);
+    let toggles = Rc::new(std::cell::RefCell::new(Vec::new()));
+    app.on_set_show_lyrics({
+        let toggles = toggles.clone();
+        move |on| toggles.borrow_mut().push(on)
+    });
+    let seeks = Rc::new(std::cell::RefCell::new(Vec::new()));
+    app.on_seek_lyric({
+        let seeks = seeks.clone();
+        move |row| seeks.borrow_mut().push(row)
+    });
+    app.set_show_now_playing(true);
+    advance(win, 700);
+
+    // The window draws its menu bar here: the content starts at y 40 and is
+    // 860 high. The lyric column spans x 755..1315, y 104..740; the sung
+    // line rests 38% of the way down; the Lyrics pill is left of the
+    // search field.
+    let top = 40.;
+    let (pill_x, pill_y) = (1440. - 407. - 101. + 34., top + 32.);
+    let (line_x, anchor) = (790., top + 64. + 636. * 0.38);
+    click(win, line_x, anchor);
+    assert_eq!(*seeks.borrow(), [8], "the sung line sits at the anchor and seeks");
+
+    // The pill is a toggle, remembered through set-show-lyrics. Without
+    // lyrics there is no column to click.
+    click(win, pill_x, pill_y);
+    assert!(!app.get_show_lyrics());
+    advance(win, 700);
+    click(win, line_x, anchor);
+    assert_eq!(seeks.borrow().len(), 1, "the column left with the lyrics");
+    click(win, pill_x, pill_y);
+    assert!(app.get_show_lyrics());
+    assert_eq!(*toggles.borrow(), [false, true]);
+    advance(win, 700);
+
+    // Scrolled by hand, the column stays put: another line is at the anchor.
+    wheel(win, line_x, 400., -150.);
+    advance(win, 700);
+    click(win, line_x, anchor);
+    let picked = *seeks.borrow().last().unwrap();
+    assert!(picked > 8, "scrolling down shows later lines (got {picked})");
+    // Clicking a line goes back to following; so does "Sync lyrics", at the
+    // column's bottom right.
+    advance(win, 700);
+    wheel(win, line_x, 400., -150.);
+    advance(win, 700);
+    click(win, 1315. - 50., 740. - 24.);
+    advance(win, 700);
+    click(win, line_x, anchor);
+    assert_eq!(*seeks.borrow().last().unwrap(), 8, "Sync lyrics returns to the sung line");
+}

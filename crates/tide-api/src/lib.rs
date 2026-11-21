@@ -11,7 +11,8 @@ pub mod hls;
 pub mod web;
 pub use catalog::{LaterItems, feed_group, feed_group_on};
 pub use web::{
-    ApiHandle, Card, CatalogDetail, Credit, FavoriteIds, Lyrics, Section, StreamInfo, VideoStream,
+    ApiHandle, Card, CatalogDetail, Credit, FavoriteIds, Lyrics, PlaylistDetail, Section,
+    StreamInfo, VideoStream,
     VideoVariant, plain_bio,
 };
 

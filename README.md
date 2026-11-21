@@ -37,6 +37,8 @@ click Done, then System Settings › Privacy & Security › **Open Anyway**.
   20 bands, and automatic preamp
 - Home feed, favourite tracks, playlists (with folders), mixes, artist pages,
   album details and catalog search
+- Pin albums, playlists and profiles to the top of their library page. Pins
+  stay on this computer and survive logging out
 - Music videos: search, a Videos tab on each artist page, and a quality
   selector
 - Seek, shuffle, repeat and gapless hand-over to the next track

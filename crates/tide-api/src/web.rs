@@ -51,6 +51,12 @@ pub struct Card {
     /// Length in seconds — videos only.
     #[serde(default)]
     pub duration: u32,
+    /// ISO date a playlist last had an item added (or was last changed).
+    #[serde(default)]
+    pub updated: String,
+    /// A playlist anyone can open from the creator's profile.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,6 +85,20 @@ pub struct CatalogDetail {
     pub release_date: String,
     #[serde(default)]
     pub copyright: String,
+}
+
+/// What a playlist page shows beside its tracks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlaylistDetail {
+    pub card: Card,
+    /// Plain text; empty when the creator wrote none.
+    pub description: String,
+    pub track_count: u64,
+    pub video_count: u64,
+    /// Total length in seconds.
+    pub duration: u64,
+    /// People following it ("fans"); 0 when unknown.
+    pub followers: u64,
 }
 
 /// One line of album credits: a role and everyone credited with it.
@@ -223,6 +243,84 @@ pub(crate) fn s(v: &Value, key: &str) -> String {
     }
 }
 
+/// "98 TRACKS": what one of the user's own playlists holds, in the small caps
+/// the official client uses. Videos are named only when there is nothing else.
+pub fn count_label(tracks: u64, videos: u64) -> String {
+    let (n, what) = if tracks == 0 && videos > 0 {
+        (videos, "VIDEO")
+    } else {
+        (tracks, "TRACK")
+    };
+    format!("{n} {what}{}", if n == 1 { "" } else { "S" })
+}
+
+/// A playlist description as plain text: links and markup go, the words and
+/// line breaks stay. Unlike [`plain_bio`] it keeps square brackets, which
+/// people type in their own descriptions.
+pub fn plain_description(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        if let Some(n) = html_break_len(rest.as_bytes()) {
+            out.push('\n');
+            rest = &rest[n..];
+            continue;
+        }
+        let tag = match c {
+            '[' if rest.starts_with("[wimpLink") || rest.starts_with("[/wimpLink") => Some(']'),
+            '<' if rest[1..].starts_with(|n: char| n.is_ascii_alphabetic() || n == '/') => Some('>'),
+            _ => None,
+        };
+        match tag.and_then(|close| rest.find(close)) {
+            Some(end) => rest = &rest[end + 1..],
+            None => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    decode_entities(&out)
+        .split('\n')
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// A playlist page's facts, from the v1 playlist and (when it could be read)
+/// the v2 `user-playlists` answer that carries the follower count.
+pub fn parse_playlist_detail(v1: &Value, v2: Option<&Value>, me: u64) -> Option<PlaylistDetail> {
+    let mut card = parse_card("PLAYLIST", v1, me)?;
+    if let Some(v2) = v2 {
+        // v1 names only the creator's id; v2 knows who that is.
+        let name = v2
+            .pointer("/profile/name")
+            .or_else(|| v2.pointer("/playlist/creator/name"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if card.by != "Me" && !name.is_empty() {
+            card.by = name.to_string();
+            card.subtitle = format!("Created by {name}");
+        }
+        if s(v2.get("playlist").unwrap_or(&Value::Null), "sharingLevel") == "PUBLIC" {
+            card.is_public = true;
+        }
+    }
+    let count = |key: &str| v1.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(PlaylistDetail {
+        card,
+        description: plain_description(&s(v1, "description")),
+        track_count: count("numberOfTracks"),
+        video_count: count("numberOfVideos"),
+        duration: count("duration"),
+        followers: v2
+            .and_then(|v| v.pointer("/followInfo/nrOfFollowers"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
 /// Readable artist bio: keep `[wimpLink …]Name[/wimpLink]` inner text, turn `<br/>` into paragraphs.
 pub fn plain_bio(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -339,6 +437,19 @@ pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468
+}
+
+/// "2026-11-11T04:40:02.184+0000" -> seconds since the Unix epoch, 0 when it
+/// is not a date. The API's dates are UTC, so the offset is not read.
+pub fn iso_seconds(iso: &str) -> i64 {
+    let field = |range: std::ops::Range<usize>| iso.get(range).and_then(|p| p.parse::<i64>().ok());
+    let (Some(y), Some(m), Some(d)) = (field(0..4), field(5..7), field(8..10)) else {
+        return 0;
+    };
+    let time = field(11..13).unwrap_or(0) * 3600
+        + field(14..16).unwrap_or(0) * 60
+        + field(17..19).unwrap_or(0);
+    days_from_civil(y, m, d) * 86_400 + time
 }
 
 /// "2026-11-11T04:40:02.184+0000" -> "Today" / "Last week" / "Mar 2024".
@@ -549,6 +660,14 @@ pub(crate) fn parse_card(kind: &str, d: &Value, me: u64) -> Option<Card> {
                 subtitle: by,
                 image_url: img.map(|u| image_url(&u, 320)),
                 by: owner,
+                updated: ["lastItemAddedAt", "lastUpdated", "created"]
+                    .iter()
+                    .map(|key| s(d, key))
+                    .find(|date| !date.is_empty())
+                    .unwrap_or_default(),
+                // v1 has a flag, the v2 collection a sharing level.
+                is_public: d.get("publicPlaylist").and_then(Value::as_bool) == Some(true)
+                    || s(d, "sharingLevel") == "PUBLIC",
                 ..Default::default()
             }
         }
@@ -887,7 +1006,7 @@ impl ApiHandle {
                         id: s(d, "id"),
                         kind: "folder".into(),
                         title: s(it, "name"),
-                        subtitle: format!("{n} playlist{}", if n == 1 { "" } else { "s" }),
+                        subtitle: format!("{n} PLAYLIST{}", if n == 1 { "" } else { "S" }),
                         image_url: None,
                         added: s(it, "addedAt"),
                         ..Default::default()
@@ -897,9 +1016,10 @@ impl ApiHandle {
                         d.pointer("/creator/id").and_then(Value::as_u64) == Some(self.user_id);
                     card.added = s(it, "addedAt");
                     card.subtitle = if mine {
-                        let n = d.get("numberOfTracks").and_then(Value::as_u64).unwrap_or(0)
-                            + d.get("numberOfVideos").and_then(Value::as_u64).unwrap_or(0);
-                        format!("{n} item{}", if n == 1 { "" } else { "s" })
+                        count_label(
+                            d.get("numberOfTracks").and_then(Value::as_u64).unwrap_or(0),
+                            d.get("numberOfVideos").and_then(Value::as_u64).unwrap_or(0),
+                        )
                     } else {
                         let name = d
                             .pointer("/creator/name")
@@ -1248,10 +1368,71 @@ impl ApiHandle {
     }
 
     pub async fn delete_folder(&self, folder_id: &str) -> Result<(), ApiError> {
-        let url = format!("{V2}/my-collection/playlists/folders/remove");
-        let trn = format!("trn:folder:{folder_id}");
+        self.remove_from_playlists(&format!("trn:folder:{folder_id}"))
+            .await
+    }
+
+    /// Delete one of the user's own playlists. On someone else's playlist the
+    /// same call only takes it out of the collection.
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ApiError> {
+        self.remove_from_playlists(&format!("trn:playlist:{playlist_id}"))
+            .await
+    }
+
+    /// Title, description, length and follower count of a playlist.
+    pub async fn playlist_detail(&self, id: &str) -> Result<PlaylistDetail, ApiError> {
+        let (u1, u2) = (
+            format!("{V1}/playlists/{id}"),
+            format!("{V2}/user-playlists/{id}"),
+        );
+        let (v1, v2) = tokio::join!(self.get(&u1, &[]), self.get(&u2, &[]));
+        // The follower count is an extra: the page works without it.
+        parse_playlist_detail(&v1?, v2.ok().as_ref(), self.user_id)
+            .ok_or_else(|| ApiError::Client(format!("missing playlist {id}")))
+    }
+
+    /// Rename one of the user's own playlists and replace its description.
+    pub async fn edit_playlist(
+        &self,
+        playlist_id: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<(), ApiError> {
+        let url = format!("{V1}/playlists/{playlist_id}");
+        let q = [("countryCode", self.country.as_str())];
+        let form = [("title", title), ("description", description)];
+        self.send(http().post(&url).query(&q).form(&form), &url)
+            .await?;
+        Ok(())
+    }
+
+    /// Show one of the user's own playlists on their profile, or hide it again.
+    pub async fn set_playlist_public(&self, playlist_id: &str, public: bool) -> Result<(), ApiError> {
+        let url = format!(
+            "{V2}/playlists/{playlist_id}/set-{}",
+            if public { "public" } else { "private" }
+        );
+        self.send(http().put(&url), &url).await?;
+        Ok(())
+    }
+
+    /// Move a playlist of the collection into a folder ("root" for the top level).
+    pub async fn move_playlist(&self, playlist_id: &str, folder_id: &str) -> Result<(), ApiError> {
+        let url = format!("{V2}/my-collection/playlists/folders/move");
+        let trn = format!("trn:playlist:{playlist_id}");
         let q = [
+            ("folderId", folder_id),
             ("trns", trn.as_str()),
+            ("countryCode", self.country.as_str()),
+        ];
+        self.send(http().put(&url).query(&q), &url).await?;
+        Ok(())
+    }
+
+    async fn remove_from_playlists(&self, trn: &str) -> Result<(), ApiError> {
+        let url = format!("{V2}/my-collection/playlists/folders/remove");
+        let q = [
+            ("trns", trn),
             ("countryCode", self.country.as_str()),
         ];
         self.send(http().put(&url).query(&q), &url).await?;
@@ -1390,6 +1571,36 @@ impl ApiHandle {
         Ok(parse_video_list(&data["videos"], self.user_id))
     }
 
+    pub async fn search_albums(&self, query: &str) -> Result<Vec<Card>, ApiError> {
+        let data = self
+            .get(
+                &format!("{V1}/search"),
+                &[("query", query), ("types", "ALBUMS"), ("limit", "50")],
+            )
+            .await?;
+        Ok(data["albums"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| parse_card("ALBUM", item, self.user_id))
+            .collect())
+    }
+
+    pub async fn search_playlists(&self, query: &str) -> Result<Vec<Card>, ApiError> {
+        let data = self
+            .get(
+                &format!("{V1}/search"),
+                &[("query", query), ("types", "PLAYLISTS"), ("limit", "50")],
+            )
+            .await?;
+        Ok(data["playlists"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| parse_card("PLAYLIST", item, self.user_id))
+            .collect())
+    }
+
     pub async fn artist_videos(&self, id: &str) -> Result<Vec<Card>, ApiError> {
         let url = format!("{V1}/artists/{id}/videos");
         let mut offset = 0;
@@ -1519,6 +1730,38 @@ impl ApiHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_dates_become_comparable_seconds() {
+        assert_eq!(iso_seconds("1970-01-02T00:00:01.000+0000"), 86_401);
+        assert_eq!(
+            iso_seconds("2026-11-11"),
+            iso_seconds("2026-11-11T00:00:00")
+        );
+        assert!(iso_seconds("2026-11-11T04:40:02.184+0000") > iso_seconds("2026-11-10T23:59:59"));
+        assert_eq!(iso_seconds(""), 0);
+        assert_eq!(iso_seconds("soon"), 0);
+    }
+
+    #[test]
+    fn playlist_card_carries_when_it_last_changed() {
+        let added = serde_json::json!({
+            "uuid": "p1", "title": "Fun!", "created": "2020-01-01T00:00:00.000+0000",
+            "lastUpdated": "2024-05-01T00:00:00.000+0000",
+            "lastItemAddedAt": "2026-11-11T04:40:02.184+0000",
+        });
+        assert_eq!(
+            parse_card("PLAYLIST", &added, 1).unwrap().updated,
+            "2026-11-11T04:40:02.184+0000"
+        );
+        let empty = serde_json::json!({
+            "uuid": "p2", "title": "New", "created": "2020-01-01T00:00:00.000+0000",
+        });
+        assert_eq!(
+            parse_card("PLAYLIST", &empty, 1).unwrap().updated,
+            "2020-01-01T00:00:00.000+0000"
+        );
+    }
 
     #[test]
     fn track_keeps_every_credited_artist_separately() {
@@ -1688,6 +1931,42 @@ mod tests {
                 "The son of a Welsh father met Missy Elliott and the Neptunes.",
             )
         );
+    }
+
+    #[test]
+    fn playlist_detail_reads_length_followers_and_sharing() {
+        let v1 = serde_json::json!({
+            "uuid": "p1", "title": "Lofi", "numberOfTracks": 500, "numberOfVideos": 0,
+            "duration": 72600, "publicPlaylist": true, "creator": {"id": 9},
+            "description": "Chill beats &amp; <a href=\"https://x\">click here</a><br/>[live] daily",
+        });
+        let v2 = serde_json::json!({
+            "playlist": {"sharingLevel": "PUBLIC"},
+            "profile": {"userId": 9, "name": "Lofi Girl"},
+            "followInfo": {"nrOfFollowers": 11_500, "followed": true},
+        });
+        let d = super::parse_playlist_detail(&v1, Some(&v2), 1).unwrap();
+        assert_eq!(
+            (d.track_count, d.duration, d.followers, d.card.is_public),
+            (500, 72600, 11_500, true)
+        );
+        assert_eq!(d.card.by, "Lofi Girl");
+        assert_eq!(d.description, "Chill beats & click here\n[live] daily");
+
+        // Without the v2 answer the page still has everything but the followers.
+        let mine = serde_json::json!({"uuid": "p2", "title": "Mine", "numberOfTracks": 1,
+            "creator": {"id": 1}});
+        let d = super::parse_playlist_detail(&mine, None, 1).unwrap();
+        assert_eq!((d.card.by.as_str(), d.followers, d.card.is_public), ("Me", 0, false));
+        assert_eq!(d.description, "");
+    }
+
+    #[test]
+    fn own_playlists_count_tracks_in_caps() {
+        assert_eq!(super::count_label(98, 0), "98 TRACKS");
+        assert_eq!(super::count_label(1, 4), "1 TRACK");
+        assert_eq!(super::count_label(0, 2), "2 VIDEOS");
+        assert_eq!(super::count_label(0, 0), "0 TRACKS");
     }
 
     #[test]

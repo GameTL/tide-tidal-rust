@@ -110,6 +110,15 @@ impl WGPUSurface {
             surface_config.desired_maximum_frame_latency = 1;
         }
 
+        // TIDE patch: glass reads back what is already drawn. A buffer that is
+        // only a render target cannot be read (on Metal wgpu then sets
+        // `framebufferOnly`), so ask for one that can be copied from.
+        if crate::glass::available()
+            && swapchain_capabilities.usages.contains(wgpu::TextureUsages::COPY_SRC)
+        {
+            surface_config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
+
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(device, &surface_config);
         if let Some(e) = spin_on::spin_on(error_scope.pop()) {

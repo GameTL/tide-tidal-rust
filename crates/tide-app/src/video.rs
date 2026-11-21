@@ -496,6 +496,7 @@ impl Ui {
         app.set_debug_stats("HLS · waiting for media requests".into());
         app.set_debug_active(true);
         app.set_debug_blocks(ModelRc::default());
+        app.set_loaded(0.0);
     }
 
     fn present_video_debug(&self, status: VideoStatus, stats: VideoDownloadStats) {
@@ -526,6 +527,12 @@ impl Ui {
             )
             .into(),
         );
+        // Played position plus what AVFoundation holds ahead of it.
+        let total = app.get_duration_secs() as f64;
+        if total > 0.0 {
+            let ahead = stats.buffered_ahead_secs / total;
+            app.set_loaded((f64::from(app.get_progress()) + ahead).clamp(0.0, 1.0) as f32);
+        }
         let shown = stats.chunks_received.min(MAX_DEBUG_CHUNKS) as usize;
         if app.get_debug_blocks().row_count() != shown {
             // AVFoundation only reports completed HLS requests. Do not invent
