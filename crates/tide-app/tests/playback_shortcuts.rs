@@ -68,4 +68,20 @@ fn space_controls_restored_playback_before_any_click_but_preserves_text_input() 
     let enter: slint::SharedString = slint::platform::Key::Return.into();
     key(win, enter.as_str());
     assert_eq!(searches.get(), 1);
+    assert!(ui.get_typing(), "the search field still has focus");
+
+    // A click on the field itself keeps focus; a click elsewhere (a track row)
+    // lets go, so Space plays and pauses again.
+    let click = |x: f32, y: f32| {
+        app.set_click_x(x);
+        app.set_click_y(y);
+        app.set_click_seq(app.get_click_seq() + 1);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+    };
+    // The header search field spans x 1081..1299, y 62..82 at this size.
+    click(1150., 72.);
+    assert!(ui.get_typing(), "a click inside the search field keeps it focused");
+    click(700., 500.);
+    assert!(!ui.get_typing(), "a click outside the search field takes its focus");
+    assert_eq!(app.get_edit_focus(), 0);
 }

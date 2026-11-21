@@ -543,8 +543,28 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             return;
         }
 
+        // TIDE patch: a rectangle whose background is the glass marker shows
+        // what is behind it through glass (glass.rs).
+        let background = rect.background();
+        // TIDE patch: the tilt marker draws nothing and turns its children
+        // in perspective (tilt.rs). The item's save/restore scopes it.
+        if let Some(angles) = crate::tilt::angles(&background) {
+            crate::tilt::apply(self.canvas, to_skia_rect(&geometry), angles);
+            return;
+        }
+        if let Some(tint) = crate::glass::tint(&background) {
+            crate::glass::draw(
+                self.canvas,
+                &skia_safe::RRect::new_rect(to_skia_rect(&geometry)),
+                tint,
+                self.scale_factor.get(),
+                self.current_state.alpha,
+            );
+            return;
+        }
+
         let mut paint = match self.brush_to_paint(
-            rect.background(),
+            background,
             geometry.width_length(),
             geometry.height_length(),
         ) {
@@ -568,8 +588,31 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         let brush_width = layout.brush_size.width_length();
         let brush_height = layout.brush_size.height_length();
 
-        if let Some(mut fill_paint) =
-            self.brush_to_paint(rect.background(), brush_width, brush_height)
+        // TIDE patch: the glass marker as a rounded rectangle's background.
+        let background = rect.background();
+        // TIDE patch: the tilt marker (tilt.rs), as in `draw_rectangle`. A
+        // border would be drawn flat; the tilt is for the children.
+        if let Some(angles) = crate::tilt::angles(&background) {
+            crate::tilt::apply(
+                self.canvas,
+                skia_safe::Rect::from_wh(
+                    layout.brush_size.width_length().get(),
+                    layout.brush_size.height_length().get(),
+                ),
+                angles,
+            );
+            return;
+        }
+        if let Some(tint) = crate::glass::tint(&background) {
+            crate::glass::draw(
+                self.canvas,
+                &to_skia_rrect(&layout.background_rect, &layout.background_radius),
+                tint,
+                self.scale_factor.get(),
+                self.current_state.alpha,
+            );
+        } else if let Some(mut fill_paint) =
+            self.brush_to_paint(background, brush_width, brush_height)
         {
             let background_rect = to_skia_rrect(&layout.background_rect, &layout.background_radius);
             fill_paint.set_style(skia_safe::PaintStyle::Fill);

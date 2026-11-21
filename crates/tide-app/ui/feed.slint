@@ -4,18 +4,19 @@ import { App, Theme, CardData, SectionData } from "common.slint";
 import { ModulesView } from "views.slint";
 
 export component FeedView inherits Rectangle {
-    property <length> pad: clamp((self.width - 900px) * 0.11, 24px, 83px);
+    property <length> pad: clamp((self.width - 900px) * 0.11, App.page-gutter, 83px);
     ScrollView {
         content-y <=> App.scroll-y;
         VerticalLayout {
             padding-left: root.pad;
             padding-right: root.pad;
             padding-top: 8px;
-            padding-bottom: 48px;
+            padding-bottom: 48px + App.bar-inset;
             alignment: start;
             Rectangle {
                 height: 48px;
                 Text {
+                    x: 0px;
                     text: "Feed";
                     color: Theme.text;
                     font-size: 28px;

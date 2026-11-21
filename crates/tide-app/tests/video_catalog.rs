@@ -154,7 +154,9 @@ fn search_video_filter_works_without_tracks_at_minimum_width() {
         PointerEventButton::Left,
     );
     advance(native, 100);
-    assert_eq!(app.get_search_tab(), 1);
+    assert_eq!(app.get_search_tab(), 1, "second tab is Albums");
+    app.set_search_tab(3);
+    advance(native, 100);
     click(
         native,
         left(&app) + 80.,
@@ -177,7 +179,7 @@ fn video_grid_requests_visible_art_and_handles_loading_empty_and_error() {
     let window = fixture("search", 1440.);
     let app = window.global::<App>();
     let native = window.window();
-    app.set_search_tab(1);
+    app.set_search_tab(3);
     app.set_search_videos_status("loading".into());
     advance(native, 100);
     app.set_search_videos_status("error".into());
@@ -185,10 +187,10 @@ fn video_grid_requests_visible_art_and_handles_loading_empty_and_error() {
     app.set_search_videos_status("".into());
     advance(native, 100);
     let ranges = Rc::new(RefCell::new(Vec::new()));
-    app.on_catalog_video_art({
+    app.on_catalog_art({
         let ranges = ranges.clone();
-        move |artist, from, upto| {
-            assert!(!artist);
+        move |shelf, _group, from, upto| {
+            assert_eq!(shelf, "search-videos");
             ranges.borrow_mut().push((from, upto));
         }
     });
@@ -210,4 +212,163 @@ fn video_grid_requests_visible_art_and_handles_loading_empty_and_error() {
             .iter()
             .any(|&(from, upto)| from > 0 && upto > from && upto < 100)
     );
+}
+
+fn playlists(count: usize) -> ModelRc<CardData> {
+    ModelRc::new(VecModel::from(
+        (0..count)
+            .map(|index| CardData {
+                id: format!("playlist-{index}").into(),
+                kind: "playlist".into(),
+                title: format!("Playlist {index}").into(),
+                subtitle: "Created by TIDAL".into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+#[test]
+fn search_all_previews_playlists_without_videos_and_the_tab_lists_them() {
+    let window = fixture("search", 1440.);
+    let app = window.global::<App>();
+    let native = window.window();
+    app.set_search_videos(videos(3));
+    app.set_search_playlists(playlists(20));
+    let shelves = Rc::new(RefCell::new(Vec::new()));
+    app.on_catalog_art({
+        let shelves = shelves.clone();
+        move |shelf, group, from, upto| {
+            shelves.borrow_mut().push((shelf.to_string(), group, from, upto))
+        }
+    });
+    advance(native, 100);
+    advance(native, 200);
+    {
+        let seen = shelves.borrow();
+        assert!(
+            seen.iter().all(|(shelf, ..)| shelf != "search-videos"),
+            "All tab shows no videos: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(shelf, group, from, upto)| shelf == "search-playlists"
+                && *group == -1
+                && *from == 0
+                && *upto == 6),
+            "All tab previews six playlists: {seen:?}"
+        );
+    }
+    shelves.borrow_mut().clear();
+    // Playlists tab, grouped in two: each group asks for its own artwork.
+    app.set_search_playlist_groups(ModelRc::new(VecModel::from(vec![
+        SectionData {
+            title: "Me  ·  12".into(),
+            layout: "cards".into(),
+            cards: playlists(12),
+            tracks: ModelRc::default(),
+        },
+        SectionData {
+            title: "TIDAL  ·  8".into(),
+            layout: "cards".into(),
+            cards: playlists(8),
+            tracks: ModelRc::default(),
+        },
+    ])));
+    app.set_search_tab(2);
+    advance(native, 100);
+    advance(native, 200);
+    let seen = shelves.borrow();
+    assert!(
+        seen.iter().any(|(shelf, group, from, upto)| shelf == "search-playlists"
+            && *group == 0
+            && *from == 0
+            && *upto > 6),
+        "Playlists tab lists more than the preview: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(shelf, group, ..)| shelf == "search-playlists" && *group == 1),
+        "second group requests its own art: {seen:?}"
+    );
+}
+
+fn press_enter(window: &slint::Window) {
+    let text = slint::SharedString::from(slint::platform::Key::Return);
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    window.dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+#[test]
+fn enter_in_a_track_filter_plays_the_first_track() {
+    let window = fixture("tracks", 1440.);
+    let app = window.global::<App>();
+    let native = window.window();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    app.on_play_track({
+        let played = played.clone();
+        move |id| played.borrow_mut().push(id.to_string())
+    });
+    app.set_focus_filter(app.get_focus_filter() + 1);
+    advance(native, 50);
+    assert!(app.get_filter_focused(), "\"/\" focuses the filter");
+    press_enter(native);
+    assert_eq!(*played.borrow(), ["track-1"]);
+}
+
+#[test]
+fn enter_in_a_grid_filter_plays_the_first_card() {
+    let window = fixture("grid", 1440.);
+    let app = window.global::<App>();
+    let native = window.window();
+    let played = Rc::new(Cell::new(0));
+    app.on_play_grid_pick({
+        let played = played.clone();
+        move || played.set(played.get() + 1)
+    });
+    app.set_focus_filter(app.get_focus_filter() + 1);
+    advance(native, 50);
+    assert!(app.get_filter_focused(), "\"/\" focuses the filter");
+    press_enter(native);
+    assert_eq!(played.get(), 1);
+}
+
+#[test]
+fn enter_plays_the_track_the_pick_moved_to() {
+    let window = fixture("tracks", 1440.);
+    let app = window.global::<App>();
+    let native = window.window();
+    app.set_tracks(ModelRc::new(VecModel::from(
+        (1..=3)
+            .map(|n| TrackData {
+                id: format!("track-{n}").into(),
+                title: format!("Track {n}").into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    let played = Rc::new(RefCell::new(Vec::new()));
+    app.on_play_track({
+        let played = played.clone();
+        move |id| played.borrow_mut().push(id.to_string())
+    });
+    app.set_focus_filter(app.get_focus_filter() + 1);
+    advance(native, 50);
+    app.set_pick_index(2);
+    advance(native, 50);
+    press_enter(native);
+    assert_eq!(*played.borrow(), ["track-3"]);
+}
+
+#[test]
+fn a_page_refresh_under_a_focused_filter_keeps_the_pick() {
+    let window = fixture("tracks", 1440.);
+    let app = window.global::<App>();
+    let native = window.window();
+    app.set_focus_filter(app.get_focus_filter() + 1);
+    advance(native, 50);
+    assert!(app.get_filter_focused());
+    // A data refresh re-shows the page: the view and its field stay.
+    app.set_view("tracks".into());
+    app.set_tracks(app.get_tracks());
+    advance(native, 50);
+    assert!(app.get_filter_focused(), "still picking after a refresh");
 }

@@ -276,6 +276,8 @@ pub(super) struct DspState {
     redo: Vec<DspSnap>,
     /// Last live (slider / drag) edit, for coalescing one gesture into one undo.
     live_at: Option<Instant>,
+    /// Name last put in the name field, so a refresh mid-typing leaves the text alone.
+    shown_name: String,
 }
 
 impl DspState {
@@ -860,6 +862,10 @@ impl Ui {
             dsp.bands.set_vec(rows);
         }
 
+        if current.name != dsp.shown_name {
+            dsp.shown_name = current.name.clone();
+            app.set_dsp_name(current.name.as_str().into());
+        }
         app.set_dsp_selected(selected.map_or(-1, |i| i as i32));
         if let Some(band) = selected.map(|i| current.bands[i]) {
             app.set_dsp_band_kind(match band.kind {
