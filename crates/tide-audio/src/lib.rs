@@ -28,6 +28,7 @@ use thiserror::Error;
 use rt_lock::RtMutex;
 
 pub mod eq;
+mod physical;
 mod rt_lock;
 mod upsample;
 pub use eq::{Band, BandKind, EqChain, EqProfile};
@@ -159,6 +160,10 @@ pub struct OutputInfo {
     pub sample_rate: u32,
     /// Standard rates the device can be switched to.
     pub supported_rates: Vec<u32>,
+    /// Bits per sample the device takes (its physical format). 0 when unknown.
+    pub bit_depth: u32,
+    /// Depths the device offers at this rate, ascending.
+    pub supported_depths: Vec<u32>,
 }
 
 impl Default for OutputInfo {
@@ -169,6 +174,8 @@ impl Default for OutputInfo {
             kind: OutputKind::Unknown,
             sample_rate: 48_000,
             supported_rates: Vec::new(),
+            bit_depth: 0,
+            supported_depths: Vec::new(),
         }
     }
 }
@@ -770,10 +777,13 @@ struct Shared {
     /// Upsampling target as a multiple of the family's base rate (44.1 or
     /// 48 kHz): 2, 4 or 8, and 0 for off.
     upsample: AtomicU32,
+    /// Least bit depth to run the device at: 0 for each track's own. More
+    /// than the device has gets its deepest.
+    depth: AtomicU32,
     output: Mutex<OutputInfo>,
-    /// (device id, rate) the output had before TIDE first touched it, so it
-    /// can be handed back the way it was found.
-    original: Mutex<Option<(String, u32)>>,
+    /// (device id, rate, bit depth) the output had before TIDE first touched
+    /// it, so it can be handed back the way it was found.
+    original: Mutex<Option<(String, u32, u32)>>,
     /// The device has been handed back (paused / quitting) and must be
     /// re-clocked before playback continues.
     released: AtomicBool,
@@ -1015,6 +1025,9 @@ fn describe_output(device: &cpal::Device, sample_rate: u32, channels: u16) -> Ou
             .copied()
             .filter(|rate| ranges.iter().any(|(min, max)| (*min..=*max).contains(rate)))
             .collect(),
+        // Filled in by `settle_depth` once the stream is open.
+        bit_depth: 0,
+        supported_depths: Vec::new(),
     }
 }
 
@@ -1049,8 +1062,10 @@ fn build_stream(
     {
         // First contact with this device: whatever it runs at now is "original".
         let mut original = shared.original.lock().unwrap();
-        if original.as_ref().is_none_or(|(id, _)| *id != described.id) {
-            *original = Some((described.id.clone(), default_config.sample_rate()));
+        if original.as_ref().is_none_or(|(id, ..)| *id != described.id) {
+            let rate = default_config.sample_rate();
+            let bits = physical::read(rate).map_or(0, |p| p.bits);
+            *original = Some((described.id.clone(), rate, bits));
         }
     }
 
@@ -1199,6 +1214,38 @@ fn build_stream(
     ))
 }
 
+/// Run the output at `want` bits, or the nearest depth it has (0: leave it as
+/// it is), and note the depth it ends up at. `force` sets it regardless of
+/// the rate-matching rules, to put a device back the way it was found.
+fn settle_depth(shared: &Shared, want: u32, force: bool) {
+    let (rate, may_match) = {
+        let output = shared.output.lock().unwrap();
+        (
+            output.sample_rate,
+            force
+                || (shared.rate_matching.load(Ordering::Relaxed)
+                    && output.kind.allows_rate_matching()),
+        )
+    };
+    let Some(mut now) = physical::read(rate) else {
+        return;
+    };
+    let target = physical::pick(want, &now.depths)
+        .filter(|bits| want != 0 && may_match && *bits != now.bits);
+    if let Some(bits) = target {
+        if physical::set(rate, bits) {
+            tracing::info!(from = now.bits, to = bits, rate, "Output bit depth changed");
+            now.bits = bits;
+        } else {
+            tracing::warn!(bits, rate, "Could not change the output bit depth");
+            now.bits = physical::read(rate).map_or(now.bits, |p| p.bits);
+        }
+    }
+    let mut output = shared.output.lock().unwrap();
+    output.bit_depth = now.bits;
+    output.supported_depths = now.depths;
+}
+
 fn decoder_loop(shared: Arc<Shared>) {
     let mut chunk = Vec::with_capacity(16_384);
     let mut glitches = GlitchReporter::new();
@@ -1297,6 +1344,7 @@ impl AudioPlayer {
             rate_matching: AtomicBool::new(true),
             restore_sample_rate: AtomicBool::new(true),
             upsample: AtomicU32::new(0),
+            depth: AtomicU32::new(0),
             output: Mutex::new(OutputInfo::default()),
             original: Mutex::new(None),
             released: AtomicBool::new(false),
@@ -1310,6 +1358,7 @@ impl AudioPlayer {
             .device_rate
             .store(output.sample_rate, Ordering::Relaxed);
         *shared.output.lock().unwrap() = output;
+        settle_depth(&shared, 0, false);
 
         let decoder_shared = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -1323,9 +1372,10 @@ impl AudioPlayer {
         })
     }
 
-    /// Open the current default output again, at `want_rate` when the device
-    /// allows it. Returns true if the device rate changed.
-    fn rebuild_stream(&self, want_rate: Option<u32>, force: bool) -> bool {
+    /// Open the current default output again, at `want_rate` and `want_bits`
+    /// (0: the depth it has) when the device allows it. Returns true if the
+    /// device rate changed.
+    fn rebuild_stream(&self, want_rate: Option<u32>, want_bits: u32, force: bool) -> bool {
         let before = self.shared.device_rate.load(Ordering::Relaxed);
         let mut stream = self.stream.lock().unwrap();
         // The old stream must be gone before CoreAudio lets us reconfigure the device.
@@ -1345,6 +1395,7 @@ impl AudioPlayer {
                 let changed = output.sample_rate != before;
                 *self.shared.output.lock().unwrap() = output;
                 *stream = Some(new_stream);
+                settle_depth(&self.shared, want_bits, force);
                 changed
             }
             Err(e) => {
@@ -1422,18 +1473,62 @@ impl AudioPlayer {
             .flatten()
     }
 
+    /// Run the device at `tier` bits or more: 0 for each track's own depth,
+    /// and more than the device has for its deepest. The extra bits are zeros,
+    /// so the samples stay as they are. Needs sample-rate matching and an
+    /// output that can be re-clocked. Takes effect straight away.
+    pub fn set_depth(&self, tier: u32) {
+        if self.shared.depth.swap(tier, Ordering::Relaxed) == tier || self.is_released() {
+            // Released: the device is set up again on resume anyway.
+            return;
+        }
+        if let Some(format) = self.format_info() {
+            settle_depth(
+                &self.shared,
+                self.wanted_depth(format.bits_per_sample),
+                false,
+            );
+        }
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.shared.depth.load(Ordering::Relaxed)
+    }
+
+    /// Least depth to ask the device for, for a track of `source_bits`
+    /// (0 for a lossy one, which has no depth of its own).
+    fn wanted_depth(&self, source_bits: u32) -> u32 {
+        source_bits.max(self.depth())
+    }
+
+    /// Depth the device would be switched to for a track of `source_bits`.
+    fn preferred_depth(&self, source_bits: u32) -> u32 {
+        let want = self.wanted_depth(source_bits);
+        let output = self.shared.output.lock().unwrap();
+        if want == 0
+            || !self.shared.rate_matching.load(Ordering::Relaxed)
+            || !output.kind.allows_rate_matching()
+        {
+            return output.bit_depth;
+        }
+        physical::pick(want, &output.supported_depths).unwrap_or(output.bit_depth)
+    }
+
     /// Sample rate of the track that is audible.
     fn current_rate(&self) -> Option<u32> {
         let buf = self.shared.buffer.lock();
         buf.current.as_ref().map(|c| c.format.sample_rate)
     }
 
-    /// Run the output at the preferred rate for this source.
-    fn match_device_rate(&self, source_rate: u32) {
+    /// Run the output at the preferred rate and bit depth for this source.
+    fn match_device(&self, source: FormatInfo) {
         self.shared.released.store(false, Ordering::Relaxed);
-        let rate = self.preferred_output_rate(source_rate);
+        let rate = self.preferred_output_rate(source.sample_rate);
+        let bits = self.wanted_depth(source.bits_per_sample);
         if self.shared.device_rate.load(Ordering::Relaxed) != rate && self.can_match(rate) {
-            self.rebuild_stream(Some(rate), false);
+            self.rebuild_stream(Some(rate), bits, false);
+        } else {
+            settle_depth(&self.shared, bits, false);
         }
     }
 
@@ -1478,45 +1573,55 @@ impl AudioPlayer {
     /// Re-open the output for the current track's rate and resume at the same position.
     fn rematch_current(&self) {
         let position = self.elapsed();
-        let want = self
-            .format_info()
-            .map(|f| self.preferred_output_rate(f.sample_rate));
+        let format = self.format_info();
+        let want = format.map(|f| self.preferred_output_rate(f.sample_rate));
+        let bits = format.map_or(0, |f| self.wanted_depth(f.bits_per_sample));
         self.shared.released.store(false, Ordering::Relaxed);
-        if self.rebuild_stream(want, false) {
+        if self.rebuild_stream(want, bits, false) {
             // Buffered samples were produced for the old rate.
             self.seek(position);
         }
     }
 
-    /// Rate the current device had before TIDE changed it, if it differs from now.
-    fn rate_to_restore(&self) -> Option<u32> {
+    /// Rate and bit depth the current device had before TIDE changed them,
+    /// if either differs from now.
+    fn format_to_restore(&self) -> Option<(u32, u32)> {
         let output = self.shared.output.lock().unwrap();
         let original = self.shared.original.lock().unwrap();
         original
             .as_ref()
-            .filter(|(id, rate)| *id == output.id && *rate != output.sample_rate)
-            .map(|(_, rate)| *rate)
+            .filter(|(id, rate, bits)| {
+                *id == output.id
+                    && (*rate != output.sample_rate || (*bits != 0 && *bits != output.bit_depth))
+            })
+            .map(|(_, rate, bits)| (*rate, *bits))
     }
 
-    /// Hand the device back at the sample rate it had before TIDE changed it,
+    /// Hand the device back at the sample rate and bit depth it had before
+    /// TIDE changed them,
     /// so other apps are not left with a re-clocked output. Called when
     /// playback has been paused for a moment and when quitting. The position
     /// is kept; [`resume`](Self::resume) re-clocks the device again.
-    /// Returns true if the device rate was restored.
+    /// Returns true if the device was restored.
     pub fn release_output(&self) -> bool {
         if self.is_playing() || !self.restore_sample_rate() {
             return false;
         }
-        let Some(original) = self.rate_to_restore() else {
+        let Some((rate, bits)) = self.format_to_restore() else {
             return false;
         };
-        let position = self.elapsed();
-        let restored = self.rebuild_stream(Some(original), true);
-        if restored {
-            self.shared.released.store(true, Ordering::Relaxed);
+        if rate == self.shared.device_rate.load(Ordering::Relaxed) {
+            // Only the depth moved: the stream stays as it is.
+            settle_depth(&self.shared, bits, true);
+        } else {
+            let position = self.elapsed();
+            if !self.rebuild_stream(Some(rate), bits, true) {
+                return false;
+            }
             self.seek(position);
         }
-        restored
+        self.shared.released.store(true, Ordering::Relaxed);
+        true
     }
 
     /// True while the device is running at its original rate because playback is paused.
@@ -1581,7 +1686,7 @@ impl AudioPlayer {
             }
         };
         self.shared.playing.store(false, Ordering::Relaxed);
-        self.match_device_rate(opened.sample_rate);
+        self.match_device(opened.format());
         let rate = self.shared.device_rate.load(Ordering::Relaxed) as f64;
         let frames_played = (actual_start.as_secs_f64() * rate) as u64;
 
@@ -1611,6 +1716,11 @@ impl AudioPlayer {
             let rate = self.preferred_output_rate(probe.sample_rate);
             if rate != self.shared.device_rate.load(Ordering::Relaxed) {
                 tracing::info!(title = %item.title, rate, "Next track needs a different device rate; not queued gaplessly");
+                return false;
+            }
+            let bits = self.preferred_depth(probe.bits_per_sample);
+            if bits != self.shared.output.lock().unwrap().bit_depth {
+                tracing::info!(title = %item.title, bits, "Next track needs a different device bit depth; not queued gaplessly");
                 return false;
             }
         }

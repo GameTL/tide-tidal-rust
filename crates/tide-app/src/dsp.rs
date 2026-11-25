@@ -42,6 +42,10 @@ const UPSAMPLE_TIERS: [u32; 3] = [2, 4, 8];
 /// "Max": every standard rate is within ×8 of its base, so this tier reaches
 /// the highest whole multiple of a track's rate the output supports.
 const UPSAMPLE_MAX: u32 = 8;
+/// Bit depths the output can be raised to. The last is "Max": deeper than
+/// any device goes, so it reaches the deepest this output has.
+const DEPTH_TIERS: [u32; 3] = [24, 32, DEPTH_MAX];
+const DEPTH_MAX: u32 = 64;
 
 const BAND_COLORS: [(u8, u8, u8); 8] = [
     (0x14, 0xb8, 0xa6),
@@ -67,6 +71,9 @@ struct DeviceDsp {
     /// Upsample tracks towards this multiple of their family's base rate
     /// (44.1 or 48 kHz): 2, 4 or 8, and 0 for off.
     upsample: u32,
+    /// Run the output at this many bits or more: 24, 32 or 64 (its deepest),
+    /// and 0 for each track's own depth.
+    depth: u32,
 }
 
 impl Default for DeviceDsp {
@@ -83,6 +90,7 @@ impl Default for DeviceDsp {
             preamp: Some(0.0),
             auto_preamp: false,
             upsample: 0,
+            depth: 0,
         }
     }
 }
@@ -114,6 +122,15 @@ impl DeviceDsp {
     fn playback_upsample(&self) -> u32 {
         if self.enabled && UPSAMPLE_TIERS.contains(&self.upsample) {
             self.upsample
+        } else {
+            0
+        }
+    }
+
+    /// Bit depth to play with: each track's own while DSP is bypassed.
+    fn playback_depth(&self) -> u32 {
+        if self.enabled && DEPTH_TIERS.contains(&self.depth) {
+            self.depth
         } else {
             0
         }
@@ -217,6 +234,9 @@ impl DspStore {
             device.update_auto_preamp();
             if !UPSAMPLE_TIERS.contains(&device.upsample) {
                 device.upsample = 0;
+            }
+            if !DEPTH_TIERS.contains(&device.depth) {
+                device.depth = 0;
             }
             self.devices.insert(name, device);
         }
@@ -548,10 +568,15 @@ impl Ui {
         let device = self.dsp.borrow_mut().device_mut().clone();
         self.ctx.player.set_eq(device.playback_profiles());
         let tier = device.playback_upsample();
-        if self.ctx.player.upsample() != tier {
+        let depth = device.playback_depth();
+        if self.ctx.player.upsample() != tier || self.ctx.player.depth() != depth {
             // Re-opening the device can take a moment: keep it off the UI thread.
-            self.spawn(|ctx| async move {
-                let _ = tokio::task::spawn_blocking(move || ctx.player.set_upsample(tier)).await;
+            self.spawn(move |ctx| async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    ctx.player.set_upsample(tier);
+                    ctx.player.set_depth(depth);
+                })
+                .await;
                 on_ui(|ui| ui.present_signal());
             });
         }
@@ -617,6 +642,51 @@ impl Ui {
         } else {
             "Tracks below the chosen rate are raised to it. The rest play untouched.".to_string()
         };
+        // Bit depth: the depths this output has above 16-bit, then Max.
+        let has_depths = output.supported_depths.len() > 1;
+        let depth_options: Vec<UpsampleOption> = [24, 32]
+            .into_iter()
+            .filter(|bits| output.supported_depths.contains(bits))
+            .map(|bits| UpsampleOption {
+                tier: bits as i32,
+                label: format!("{bits}-bit").into(),
+            })
+            .chain([UpsampleOption {
+                tier: DEPTH_MAX as i32,
+                label: "Max".into(),
+            }])
+            .filter(|_| output.kind.allows_rate_matching() && has_depths)
+            .collect();
+        let depth_note = if !output.kind.allows_rate_matching() {
+            format!(
+                "{} outputs run at a bit depth of their own.",
+                output.kind.label()
+            )
+        } else if !has_depths {
+            "This output has a single bit depth.".to_string()
+        } else if !player.rate_matching() {
+            "Bit-perfect playback is off in Settings, so the output's bit depth is left alone."
+                .to_string()
+        } else if device.depth == 0 {
+            "Off: the output runs at each track's own bit depth.".to_string()
+        } else if !device.enabled {
+            "DSP is off for this output, so it runs at each track's own bit depth.".to_string()
+        } else if !depth_options.iter().any(|o| o.tier as u32 == device.depth) {
+            "This output no longer offers the chosen depth. Pick another.".to_string()
+        } else if player.is_released() || output.bit_depth == 0 {
+            "The output runs at the chosen depth or deeper while a track plays.".to_string()
+        } else {
+            format!("The output is running at {}-bit.", output.bit_depth)
+        };
+        app.set_dsp_depth(device.depth as i32);
+        app.set_dsp_depth_note(depth_note.into());
+        if app
+            .get_dsp_depth_options()
+            .iter()
+            .ne(depth_options.iter().cloned())
+        {
+            app.set_dsp_depth_options(ModelRc::new(VecModel::from(depth_options)));
+        }
         app.set_dsp_upsample(device.upsample as i32);
         app.set_dsp_upsample_note(note.into());
         // Rebuilt only on a change, so a pill is not replaced under the pointer.
@@ -995,6 +1065,21 @@ impl Ui {
                 device.upsample = u32::try_from(tier)
                     .ok()
                     .filter(|tier| UPSAMPLE_TIERS.contains(tier))
+                    .unwrap_or(0);
+                dsp.dirty = true;
+            }
+            ui.dsp_apply();
+            ui.dsp_present();
+            ui.present_signal();
+        });
+        bind!(on_dsp_set_depth, |ui, bits| {
+            {
+                let mut dsp = ui.dsp.borrow_mut();
+                dsp.record_undo(false);
+                let device = dsp.device_mut();
+                device.depth = u32::try_from(bits)
+                    .ok()
+                    .filter(|bits| DEPTH_TIERS.contains(bits))
                     .unwrap_or(0);
                 dsp.dirty = true;
             }
@@ -1658,6 +1743,16 @@ mod tests {
         device.enabled = true;
         device.upsample = 3;
         assert_eq!(device.playback_upsample(), 0);
+
+        // The bit depth follows the same rules.
+        assert_eq!(serde_json::from_str::<DeviceDsp>("{}").unwrap().depth, 0);
+        device.depth = 24;
+        assert_eq!(device.playback_depth(), 24);
+        device.enabled = false;
+        assert_eq!(device.playback_depth(), 0);
+        device.enabled = true;
+        device.depth = 20;
+        assert_eq!(device.playback_depth(), 0);
 
         let dac = [44_100, 48_000, 88_200, 96_000, 192_000];
         assert_eq!(upsample_label(2, &dac).as_deref(), Some("88.2 / 96 kHz"));

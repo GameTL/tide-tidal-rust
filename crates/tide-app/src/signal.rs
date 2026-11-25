@@ -60,6 +60,15 @@ pub fn khz(rate: u32) -> String {
     format!("{} kHz", rate as f32 / 1000.0)
 }
 
+/// "24-bit 96 kHz": what the device runs at. Only the rate while the depth is unknown.
+pub fn output_format(output: &OutputInfo) -> String {
+    if output.bit_depth == 0 {
+        khz(output.sample_rate)
+    } else {
+        format!("{}-bit {}", output.bit_depth, khz(output.sample_rate))
+    }
+}
+
 /// `volume` is TIDE's own (software) volume, 0.0..=1.0. `dsp` describes the
 /// equalisers in the path, when any is changing the samples. `upsampling` is
 /// the multiple the listener's upsampler (DSP page) raises this track by.
@@ -77,6 +86,8 @@ pub fn signal_path(
     // A conversion the device forces, as opposed to one the listener chose.
     let resampled = format.sample_rate != output.sample_rate && upsampling.is_none();
     let attenuated = volume < 0.999;
+    // The device takes fewer bits than the file has: the lowest ones are lost.
+    let truncated = output.bit_depth != 0 && output.bit_depth < format.bits_per_sample;
     let hires_source =
         !lossy_source && (format.bits_per_sample > 16 || format.sample_rate > 44_100);
     let mut stages = vec![Stage {
@@ -142,17 +153,25 @@ pub fn signal_path(
             quality: Quality::High,
         });
     }
+    if truncated {
+        stages.push(Stage {
+            kind: "process",
+            title: "Bit depth reduction".into(),
+            detail: format!("{}-bit to {}-bit", format.bits_per_sample, output.bit_depth),
+            quality: Quality::High,
+        });
+    }
     let link_quality = match output.kind {
         OutputKind::Bluetooth => Quality::Low,
         // The link or driver decides what reaches the speaker; it cannot be verified.
         OutputKind::Network | OutputKind::Virtual => Quality::High,
-        _ if hires_source && !resampled && upsampling.is_none() => Quality::HiRes,
+        _ if hires_source && !resampled && upsampling.is_none() && !truncated => Quality::HiRes,
         _ => Quality::Lossless,
     };
     stages.push(Stage {
         kind: "output",
         title: output.name.clone(),
-        detail: format!("{} · {}", output.kind.label(), khz(output.sample_rate)),
+        detail: format!("{} · {}", output.kind.label(), output_format(output)),
         quality: link_quality,
     });
 
@@ -173,7 +192,7 @@ pub fn signal_path(
     };
 
     let note = if released {
-        "Paused: the device is back at the sample rate it had before TIDE changed it.".to_string()
+        "Paused: the device is back at the format it had before TIDE changed it.".to_string()
     } else if dsp.is_some() && upsampling.is_some() {
         "Enhanced: TIDE's equaliser and upsampler are changing the samples, so the output is not bit-perfect. Turn both off in DSP for an untouched signal.".to_string()
     } else if dsp.is_some() {
@@ -199,12 +218,28 @@ pub fn signal_path(
             "This device doesn't support {}, so the track is resampled.",
             khz(format.sample_rate)
         )
+    } else if truncated && !output.kind.allows_rate_matching() {
+        format!(
+            "This kind of output stays at {}-bit, so the {}-bit track loses its lowest bits.",
+            output.bit_depth, format.bits_per_sample
+        )
+    } else if truncated && !rate_matching {
+        format!(
+            "Bit-perfect playback is turned off, so the device stays at {}-bit and the {}-bit track loses its lowest bits.",
+            output.bit_depth, format.bits_per_sample
+        )
+    } else if truncated {
+        format!(
+            "This device has no {}-bit mode at {}, so the track's lowest bits are lost.",
+            format.bits_per_sample,
+            khz(output.sample_rate)
+        )
     } else if attenuated {
         "Volume below 100% changes the samples. Set TIDE to 100% and use the device's own volume for bit-perfect output.".to_string()
     } else if quality == Quality::High {
         "The device runs at the track's sample rate, but this kind of output may process the audio further.".to_string()
     } else {
-        "Bit-perfect: the device runs at the track's sample rate and TIDE does not alter the samples.".to_string()
+        "Bit-perfect: the device runs at the track's sample rate, takes every bit of it, and TIDE does not alter the samples.".to_string()
     };
     SignalPath {
         quality,
@@ -224,6 +259,8 @@ mod tests {
             kind,
             sample_rate: rate,
             supported_rates: vec![44_100, 48_000, 96_000],
+            bit_depth: 24,
+            supported_depths: vec![16, 24],
         }
     }
 
@@ -358,6 +395,48 @@ mod tests {
         let forced = signal_path(cd, &dac, 1.0, false, false, None, None);
         assert_eq!(forced.quality, Quality::High);
         assert_eq!(forced.stages[1].title, "Sample rate conversion");
+    }
+
+    #[test]
+    fn a_device_with_fewer_bits_than_the_file_is_not_bit_perfect() {
+        let shallow = OutputInfo {
+            bit_depth: 16,
+            ..out(OutputKind::Usb, 96_000)
+        };
+        let path = signal_path(HIRES, &shallow, 1.0, true, false, None, None);
+        assert_eq!(path.quality, Quality::High);
+        assert_eq!(path.stages[1].title, "Bit depth reduction");
+        assert_eq!(path.stages[1].detail, "24-bit to 16-bit");
+        assert_eq!(path.stages[2].detail, "USB · 16-bit 96 kHz");
+        assert_eq!(path.stages[2].quality, Quality::Lossless);
+        assert!(path.note.contains("no 24-bit mode at 96 kHz"));
+        let off = signal_path(HIRES, &shallow, 1.0, false, false, None, None);
+        assert!(off.note.starts_with("Bit-perfect playback is turned off"));
+
+        // More bits than the file has is padding: every sample arrives whole.
+        let cd = FormatInfo {
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            bitrate_kbps: 0,
+        };
+        let padded = signal_path(
+            cd,
+            &out(OutputKind::Usb, 44_100),
+            1.0,
+            true,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(padded.quality, Quality::Lossless);
+        // A depth the system does not report is not held against the path.
+        let unknown = OutputInfo {
+            bit_depth: 0,
+            ..out(OutputKind::Usb, 96_000)
+        };
+        let path = signal_path(HIRES, &unknown, 1.0, true, false, None, None);
+        assert_eq!(path.quality, Quality::HiRes);
+        assert_eq!(path.stages[1].detail, "USB · 96 kHz");
     }
 
     #[test]
