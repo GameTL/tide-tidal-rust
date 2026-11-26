@@ -1402,8 +1402,8 @@ export component SearchField inherits Rectangle {
         y: (parent.height - 20px) / 2;
         height: 20px;
         spacing: 4px;
-        Kbd { glyph: "⌘"; }
-        Kbd { glyph: "F"; }
+        Kbd { glyph: "⌘"; glass: root.glass; }
+        Kbd { glyph: "F"; glass: root.glass; }
     }
 
     if input.text != "": IconButton {

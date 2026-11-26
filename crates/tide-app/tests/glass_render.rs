@@ -192,6 +192,21 @@ fn pages_show_through_the_player_bar_as_glass() {
     let (below, _) = row_stats(&glass, bar_top + 4., x0, x1);
     assert!(rim > below + 4., "no rim highlight ({rim} vs {below})");
 
+    // TopBar chrome (< >, Search, Debug, Profile) uses Liquid Glass when glass is on.
+    let menu = 40.;
+    let top_nav_opaque = luma(at(&opaque, 312., menu + 13.5));
+    let top_nav_glass_rim = luma(at(&glass, 312., menu + 13.5));
+    let top_search_glass_rim = luma(at(&glass, 1180., menu + 12.75));
+    let top_search_glass_body = luma(at(&glass, 1180., menu + 20.));
+    assert!(
+        top_nav_glass_rim > top_nav_opaque + 6.,
+        "TopBar back/forward pill has no glass rim ({top_nav_glass_rim} vs {top_nav_opaque})"
+    );
+    assert!(
+        top_search_glass_rim > top_search_glass_body + 6.,
+        "TopBar search pill has no glass rim ({top_search_glass_rim} vs {top_search_glass_body})"
+    );
+
     // A track list, scrolled, for the record (and a second page type).
     app.set_view("tracks".into());
     app.set_page_title("Tracks".into());
@@ -225,4 +240,30 @@ fn pages_show_through_the_player_bar_as_glass() {
     let beside = luma(at(&playing, 400., bar_top - 20.));
     println!("now playing: pane luma {pane}, page beside it {beside}");
     assert!((pane - beside).abs() > 3., "the controls' pane does not stand out ({pane} vs {beside})");
+
+    // Live expansion (rendering mid-animation frames, as 120 Hz does): once
+    // settled, Search, Debug and Profile all render Liquid Glass over the backdrop.
+    app.set_show_now_playing(false);
+    shoot(&ui, "np-repro-closed");
+    app.set_show_now_playing(true);
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        slint::platform::update_timers_and_animations();
+        let _ = ui.window().take_snapshot().unwrap();
+    }
+    let settled = shoot(&ui, "np-repro-settled");
+    let search_px = at(&settled, 1180., menu + 20.);
+    let search_rim = at(&settled, 1180., menu + 12.75);
+    let debug_px = at(&settled, 1366., menu + 18.);
+    let profile_px = at(&settled, 1409., menu + 18.);
+    println!(
+        "after live expansion: search={search_px:?} rim={search_rim:?} debug={debug_px:?} profile={profile_px:?}"
+    );
+    assert_ne!(search_px, (30, 30, 30), "Search stayed opaque non-glass after live expansion");
+    assert_ne!(debug_px, (42, 42, 42), "Debug stayed opaque non-glass after live expansion");
+    assert_ne!(profile_px, (42, 42, 42), "Profile stayed opaque non-glass after live expansion");
+    assert!(
+        luma(search_rim) > luma(search_px) + 5.,
+        "Now Playing Search pill has no glass rim ({search_rim:?} vs {search_px:?})"
+    );
 }

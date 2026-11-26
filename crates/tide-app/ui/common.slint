@@ -834,15 +834,16 @@ export component EditableInput inherits TextInput {
 // One key of a shortcut hint (⌘F in the search field, the sidebar keys, / in a filter).
 export component Kbd inherits Rectangle {
     in property <string> glyph;
+    in property <bool> glass: false;
     width: max(20px, label.preferred-width + 10px);
     height: 20px;
     border-radius: 5px;
-    background: #2a2a2a;
+    background: root.glass ? #ffffff14 : #2a2a2a;
     border-width: 1px;
-    border-color: #3a3a3a;
+    border-color: root.glass ? #ffffff24 : #3a3a3a;
     label := Text {
         text: root.glyph;
-        color: Theme.text-secondary;
+        color: root.glass ? #ffffffb0 : Theme.text-secondary;
         font-size: 11px;
         font-weight: Theme.medium;
         horizontal-alignment: center;
