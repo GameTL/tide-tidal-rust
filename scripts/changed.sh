@@ -6,8 +6,9 @@
 #   sh scripts/changed.sh <base> [head]   # head defaults to HEAD
 #
 #   app=       anything that goes into the TIDE binary or its packaging:
-#              everything except website/, docs/, Markdown, .github/ and the
-#              website-only releases.json script
+#              everything except website/, docs/, Markdown, .github/, the
+#              website-only releases.json script and Casks/, which the
+#              release workflow writes after the build
 #   website=   website/ or scripts/write-releases-json.sh
 #   workflows= .github/
 #
@@ -33,6 +34,7 @@ echo "app=$(any . \
   ':(exclude)website' \
   ':(exclude)docs' \
   ':(exclude).github' \
+  ':(exclude)Casks' \
   ':(exclude,glob)**/*.md' \
   ':(exclude)scripts/write-releases-json.sh')"
 echo "website=$(any website scripts/write-releases-json.sh)"

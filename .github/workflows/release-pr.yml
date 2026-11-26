@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
 
           if [ "$APP_CHANGED" = "true" ]; then
-            effect="Merging this PR will tag the release, publish the macOS universal dmg, and update the website."
+            effect="Merging this PR will tag the release, publish the macOS universal dmg, the Linux x86_64 and arm64 tarballs (with their Homebrew cask) and the Windows installer, and update the website."
           else
             effect="No app changes since the last tag (website/docs only): merging this PR deploys the website without building or tagging a new release."
           fi

@@ -208,9 +208,89 @@ jobs:
             dmg-basename.txt
           if-no-files-found: error
 
+  # Linux ships the bare binary in tarballs that the Homebrew cask installs;
+  # Windows ships an installer (scripts/windows-installer.iss). Neither updates itself over the air (no TIDE_UPDATES).
+  # ELF and PE have no universal format, so Linux gets one tarball per
+  # architecture (the cask picks); Windows on Arm runs the x64 build.
+  build-desktop:
+    name: Build ${{ matrix.name }}
+    needs: resolve-version
+    if: needs.resolve-version.outputs.app_changed == 'true'
+    strategy:
+      matrix:
+        include:
+          # 22.04 for its glibc (2.35), so the binary also runs on newer distros.
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: ubuntu-22.04-arm
+            name: linux-aarch64
+          - os: windows-latest
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Repo .cargo/config.toml caps jobs at 2 for laptops. The runner can take more.
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libfontconfig1-dev libxkbcommon-dev
+
+      - name: Build and package
+        env:
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+          # Windows: link the C runtime in, so TIDE.exe needs no VC++ redistributable.
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          set -euo pipefail
+          v="${NEXT#v}"
+          perl -i -pe "s/^version = \"\\d+\\.\\d+\\.\\d+\"/version = \"$v\"/" Cargo.toml
+          cargo build --release -p tide-app
+          mkdir dist
+          if [ "$RUNNER_OS" = Linux ]; then
+            cp crates/tide-app/assets/TIDE.png target/release/tide.png
+            tar -C target/release -czf "dist/TIDE-$v-${{ matrix.name }}.tar.gz" TIDE tide.png
+          fi
+
+      # Inno Setup 6.6+ for the wizard that follows Windows dark mode. Pinned and
+      # installed for this user only, so the runner's own copy doesn't matter.
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe -OutFile "$env:RUNNER_TEMP\innosetup.exe"
+          Start-Process -Wait -FilePath "$env:RUNNER_TEMP\innosetup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/CURRENTUSER',"/DIR=$env:RUNNER_TEMP\inno"
+          $v = $env:NEXT.TrimStart('v')
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=$v" "/DSourceDir=$pwd\target\release" "/DOutputDir=$pwd\dist" scripts\windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
   tag-and-release:
     name: Tag and publish
-    needs: [resolve-version, build]
+    needs: [resolve-version, build, build-desktop]
     runs-on: ubuntu-latest
     outputs:
       next: ${{ needs.resolve-version.outputs.next }}
@@ -225,6 +305,13 @@ jobs:
         with:
           name: release-macos-universal
           path: dist
+
+      - name: Download Linux and Windows builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-desktop-*
+          path: dist
+          merge-multiple: true
 
       # Installed copies only accept updates signed by the key they embed, so a
       # wrong secret must stop the release before anything is tagged.
@@ -293,13 +380,51 @@ jobs:
           fi
           if gh release view "$NEXT" >/dev/null 2>&1; then
             # shellcheck disable=SC2086 # UPDATE_ASSETS is a list of paths
-            gh release upload "$NEXT" "dist/$name" $UPDATE_ASSETS --clobber
+            gh release upload "$NEXT" "dist/$name" dist/TIDE-*-linux-*.tar.gz dist/TIDE-*-windows-x64-setup.exe $UPDATE_ASSETS --clobber
           else
             gh release create "$NEXT" \
               --title "$NEXT" \
               --target main \
               --notes "$notes" \
-              "dist/$name" $UPDATE_ASSETS
+              "dist/$name" dist/TIDE-*-linux-*.tar.gz dist/TIDE-*-windows-x64-setup.exe $UPDATE_ASSETS
+          fi
+
+  # `brew tap gametl/tide https://github.com/GameTL/tide-tidal-rust` clones the
+  # default branch, staging, so the cask for the new tarballs is committed
+  # there. A push made with GITHUB_TOKEN starts no other workflow.
+  update-cask:
+    name: Update Homebrew cask
+    needs: [resolve-version, tag-and-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+
+      - name: Download Linux builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-desktop-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Commit Casks/tide.rb
+        env:
+          NEXT: ${{ needs.resolve-version.outputs.next }}
+        run: |
+          set -euo pipefail
+          x64=$(sha256sum dist/TIDE-*-linux-x86_64.tar.gz | cut -d' ' -f1)
+          arm=$(sha256sum dist/TIDE-*-linux-aarch64.tar.gz | cut -d' ' -f1)
+          mkdir -p Casks
+          sh scripts/write-cask.sh "$NEXT" "$x64" "$arm" > Casks/tide.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/tide.rb
+          if git diff --cached --quiet; then
+            echo "Cask already at $NEXT"
+          else
+            git commit -m "chore(brew): cask for TIDE $NEXT"
+            git push origin HEAD:staging
           fi
 
   # Deploying from here would run on the PR's merge ref, which the github-pages
