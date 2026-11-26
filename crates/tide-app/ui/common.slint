@@ -809,6 +809,17 @@ export component EditableInput inherits TextInput {
 }
 
 // One key of a shortcut hint (⌘F in the search field, the sidebar keys, / in a filter).
+// The command modifier as shortcut hints spell it: ⌘ on macOS, Ctrl elsewhere
+// (where Slint's `@keys(Control + …)` is Ctrl too).
+export global Keys {
+    out property <bool> mac: Platform.os == OperatingSystemType.macos;
+    out property <string> mod: mac ? "⌘" : "Ctrl";
+    // A whole combination: "⌘⇧Z" on macOS, "Ctrl+Shift+Z" elsewhere.
+    pure public function combo(shift: bool, key: string) -> string {
+        mac ? "⌘" + (shift ? "⇧" : "") + key : "Ctrl+" + (shift ? "Shift+" : "") + key
+    }
+}
+
 export component Kbd inherits Rectangle {
     in property <string> glyph;
     width: max(20px, label.preferred-width + 10px);

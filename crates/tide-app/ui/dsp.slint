@@ -1,6 +1,6 @@
 // DSP page: the combined response, then the USR and SPK equalisers.
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Toggle, Icon, Slider, MenuPanel, MenuRow } from "common.slint";
+import { App, Theme, EditableInput, Toggle, Icon, Slider, MenuPanel, MenuRow, Keys } from "common.slint";
 
 component Card inherits Rectangle {
     border-radius: 12px;
@@ -1081,7 +1081,7 @@ export component DspView inherits Rectangle {
         MenuPanel {
             MenuRow {
                 label: "Undo";
-                hint: "⌘Z";
+                hint: Keys.combo(false, "Z");
                 icon: @image-url("icons/undo.svg");
                 has-icon: true;
                 enabled: App.dsp-can-undo;
@@ -1092,7 +1092,7 @@ export component DspView inherits Rectangle {
 
             MenuRow {
                 label: "Redo";
-                hint: "⌘⇧Z";
+                hint: Keys.combo(true, "Z");
                 icon: @image-url("icons/redo.svg");
                 has-icon: true;
                 enabled: App.dsp-can-redo;

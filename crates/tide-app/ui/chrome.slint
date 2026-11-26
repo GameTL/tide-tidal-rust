@@ -2,7 +2,7 @@
 import { TrackMenuButton } from "context-menu.slint";
 import { HoverTip } from "common.slint";
 import { ScrollView } from "std-widgets.slint";
-import { CreateButton, App, Theme, Kbd, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle, TideLoader } from "common.slint";
+import { CreateButton, App, Theme, Kbd, Keys, EditableInput, Icon, IconButton, CircleButton, DebugButton, Cover, CardArt, CardData, ExplicitBadge, ArtistLinks, Slider, DragArea, Toggle, TideLoader } from "common.slint";
 
 export component NavItem inherits Rectangle {
     // Icon only (the narrow sidebar).
@@ -1399,7 +1399,7 @@ export component SearchField inherits Rectangle {
         y: (parent.height - 20px) / 2;
         height: 20px;
         spacing: 4px;
-        Kbd { glyph: "⌘"; }
+        Kbd { glyph: Keys.mod; }
         Kbd { glyph: "F"; }
     }
 
@@ -1514,7 +1514,7 @@ export component HeaderTools inherits Rectangle {
 
                     Text {
                         x: parent.width - self.width - 10px;
-                        text: "⌘,";
+                        text: Keys.combo(false, ",");
                         color: Theme.text-secondary;
                         font-size: 13px;
                         vertical-alignment: center;
@@ -1549,8 +1549,9 @@ export component HeaderTools inherits Rectangle {
 export component TopBar inherits Rectangle {
     height: 64px;
     // Phone layout has no sidebar: the bar starts right of the traffic lights
-    // and the search moves into the pages (Explore and the results).
-    property <length> shift: App.phone-layout ? 60px : 0px;
+    // (macOS draws them inside the window) and the search moves into the pages
+    // (Explore and the results).
+    property <length> shift: App.phone-layout && Keys.mac ? 60px : 0px;
     DragArea { }
 
     // Back / forward

@@ -1,6 +1,6 @@
 // Settings page (⌘,).
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Toggle, Icon } from "common.slint";
+import { App, Theme, EditableInput, Toggle, Icon, Keys } from "common.slint";
 
 component Card inherits Rectangle {
     border-radius: 12px;
@@ -270,7 +270,7 @@ component LoginSteps inherits VerticalLayout {
     LoginStep {
         number: 3;
         title: App.pkce-manual ? "Copy the address of “Page not found”" : "Wait for “Page not found”";
-        detail: App.pkce-manual ? "Press ⌘L, then ⌘C." : "That page is expected. TIDE finishes by itself.";
+        detail: App.pkce-manual ? "Press \{Keys.combo(false, "L")}, then \{Keys.combo(false, "C")}." : "That page is expected. TIDE finishes by itself.";
         current: App.pkce-waiting;
         // What the last page looks like, so it is recognised.
         VerticalLayout {
@@ -584,7 +584,7 @@ export component SettingsView inherits Rectangle {
 
                     Row {
                         title: "Highlight shortcut letters";
-                        detail: "Show the key that opens each sidebar page in white. Hold ⌘ to see them when this is off.";
+                        detail: "Show the key that opens each sidebar page in white. Hold \{Keys.mod} to see them when this is off.";
                         Toggle {
                             x: parent.width - self.width;
                             on: App.show-key-letters;
