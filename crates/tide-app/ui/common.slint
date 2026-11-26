@@ -648,6 +648,35 @@ export global App {
     callback set-show-lyrics(bool);
     // Seek to the start of a line of `lyrics`.
     callback seek-lyric(int);
+    // The Queue panel of Now Playing (mutually exclusive with Lyrics).
+    in-out property <bool> show-queue: false;
+    // Upcoming tracks in play order (after the track currently playing).
+    in property <[TrackData]> np-queue;
+    // Jump to row `index` of `np-queue`, keeping the rest of the queue intact.
+    callback play-queue-index(int);
+    // Drop every upcoming track after the one currently playing.
+    callback clear-queue();
+    // Lazily load cover artwork for visible rows [first, first + count) of `np-queue`.
+    callback np-queue-visible(int, int);
+    // Toggle Now Playing's Queue panel in-place (shared by the top pill and player bar).
+    public function toggle-np-queue() {
+        if (show-queue) {
+            show-queue = false;
+        } else {
+            show-queue = true;
+            show-lyrics = false;
+        }
+    }
+    // Toggle Now Playing's Lyrics panel (switching off Queue if it is open).
+    public function toggle-np-lyrics() {
+        if (show-queue) {
+            show-queue = false;
+            show-lyrics = true;
+        } else {
+            show-lyrics = !show-lyrics;
+        }
+        set-show-lyrics(show-lyrics);
+    }
 
     // The context menu (see context-menu.slint). One per window.
     in-out property <bool> menu-open;
