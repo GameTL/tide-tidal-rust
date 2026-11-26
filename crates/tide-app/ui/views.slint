@@ -3127,6 +3127,14 @@ component QueueColumn inherits Rectangle {
     property <length> header-h: App.np-context != "" ? 56px : 36px;
     property <length> row-h: 58px;
     property <length> list-pad: 4px;
+    // Match LyricsColumn's soft edge fade (0.16 of height) so scrolled rows
+    // dissolve smoothly at both edges without hard-clipping. At scroll 0 the
+    // top stays crisp under the header; at the bottom the last track clears.
+    property <length> fade-band: min(list.height * 0.16, 72px);
+    property <length> scrolled: max(0px, -list.content-y);
+    property <length> remaining: max(0px, list.content-height - list.height + list.content-y);
+    property <length> top-fade: min(root.scrolled * 1.5, root.fade-band);
+    property <length> bottom-fade: min(root.remaining * 1.5, root.fade-band);
     property <int> first: max(0, floor((-list.content-y - root.list-pad) / root.row-h));
     property <int> visible-rows: max(1, ceil(max(1px, list.height) / root.row-h) + 2);
     property <int> queue-len: App.np-queue.length;
@@ -3202,28 +3210,37 @@ component QueueColumn inherits Rectangle {
         }
     }
 
-    list := Flickable {
+    // Bounded vertical edge-fade mask (vendor/i-slint-renderer-skia/fade.rs)
+    // so scrolled rows softly dissolve into the backdrop at both edges.
+    Rectangle {
+        x: 0px;
         y: root.header-h;
         width: parent.width;
         height: max(0px, parent.height - root.header-h);
-        content-width: parent.width;
-        content-height: App.np-queue.length * root.row-h + 2 * root.list-pad;
-        interactive: root.interactive && App.np-queue.length > 0;
+        background: @conic-gradient(at root.top-fade root.bottom-fade, #46414401 0deg, #46414401 360deg);
 
-        for i in root.visible-rows: Rectangle {
-            x: 0px;
-            y: root.list-pad + (root.first + i) * root.row-h;
-            width: max(0px, root.width - 8px);
-            height: root.row-h;
-            background: transparent;
-            visible: root.first + i < App.np-queue.length;
-            if root.first + i < App.np-queue.length: QueueRow {
-                width: parent.width;
-                height: parent.height;
-                track: App.np-queue[root.first + i];
-                interactive: root.interactive;
-                show-divider: root.first + i + 1 < App.np-queue.length;
-                play => { App.play-queue-index(root.first + i); }
+        list := Flickable {
+            width: 100%;
+            height: 100%;
+            content-width: parent.width;
+            content-height: App.np-queue.length * root.row-h + 2 * root.list-pad;
+            interactive: root.interactive && App.np-queue.length > 0;
+
+            for i in root.visible-rows: Rectangle {
+                x: 0px;
+                y: root.list-pad + (root.first + i) * root.row-h;
+                width: max(0px, root.width - 8px);
+                height: root.row-h;
+                background: transparent;
+                visible: root.first + i < App.np-queue.length;
+                if root.first + i < App.np-queue.length: QueueRow {
+                    width: parent.width;
+                    height: parent.height;
+                    track: App.np-queue[root.first + i];
+                    interactive: root.interactive;
+                    show-divider: root.first + i + 1 < App.np-queue.length;
+                    play => { App.play-queue-index(root.first + i); }
+                }
             }
         }
     }

@@ -222,10 +222,19 @@ fn now_playing_arrangements_render() {
         app.set_show_lyrics(true);
         app.set_show_now_playing(true);
         let lyrics = shoot(&ui, &format!("np-wide-lyrics-{g}"));
-        // Wide, queue: art left, the frosted queue card right.
+        // Wide, queue: art left, borderless queue right.
         app.set_show_queue(true);
         app.set_show_lyrics(false);
         let queue = shoot(&ui, &format!("np-wide-queue-{g}"));
+        // Scroll the queue mid-row (-85px) so bright album covers straddle both
+        // the top (y≈215) and bottom (y≈725) list boundaries, verifying smooth
+        // edge fade with zero hard cut-off.
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: LogicalPosition::new(980., 440.),
+            delta_x: 0.,
+            delta_y: -85.,
+        });
+        let queue_scrolled = shoot(&ui, &format!("np-wide-queue-scrolled-{g}"));
         // Wide, no panel: the art centred.
         app.set_show_queue(false);
         app.set_show_lyrics(false);
@@ -238,6 +247,29 @@ fn now_playing_arrangements_render() {
         // header; x=1200 clears the centred artwork's 60px drop shadow).
         assert_eq!(at(&queue, 1200., 120.), at(&centred, 1200., 120.));
         assert_ne!(at(&queue, 785., 245.), at(&centred, 785., 245.));
+        // Compare cover column (x=785) against the adjacent backdrop gap (x=745)
+        // in the same scrolled frame: both edges dissolve into the backdrop while
+        // the middle cover stays crisp.
+        let diff = |a: (u8, u8, u8), b: (u8, u8, u8)| -> i32 {
+            (a.0 as i32 - b.0 as i32).abs()
+                + (a.1 as i32 - b.1 as i32).abs()
+                + (a.2 as i32 - b.2 as i32).abs()
+        };
+        let top_edge_diff = diff(at(&queue_scrolled, 785., 216.), at(&queue_scrolled, 745., 216.));
+        let bot_edge_diff = diff(at(&queue_scrolled, 785., 724.), at(&queue_scrolled, 745., 724.));
+        let mid_cover_diff = diff(at(&queue_scrolled, 785., 450.), at(&queue_scrolled, 745., 450.));
+        assert!(
+            top_edge_diff < 22,
+            "scrolled queue top edge hard-clipped ({g}: diff={top_edge_diff} vs mid={mid_cover_diff})"
+        );
+        assert!(
+            bot_edge_diff < 22,
+            "scrolled queue bottom edge hard-clipped ({g}: diff={bot_edge_diff} vs mid={mid_cover_diff})"
+        );
+        assert!(
+            mid_cover_diff > 60,
+            "scrolled queue middle cover not visible ({g}: diff={mid_cover_diff})"
+        );
 
         // Medium: the bar is compact, the title moves under the art.
         resize(&ui, 840., 720.);
