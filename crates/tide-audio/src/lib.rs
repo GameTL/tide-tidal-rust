@@ -1353,12 +1353,22 @@ impl AudioPlayer {
             glitches: Glitches::default(),
         });
 
-        let (stream, output) = build_stream(&shared, None, false)?;
-        shared
-            .device_rate
-            .store(output.sample_rate, Ordering::Relaxed);
-        *shared.output.lock().unwrap() = output;
-        settle_depth(&shared, 0, false);
+        // No output device (a headless box, a VM, sound not set up yet) is not
+        // fatal: TIDE starts silent and opens one when a track plays.
+        let stream = match build_stream(&shared, None, false) {
+            Ok((stream, output)) => {
+                shared
+                    .device_rate
+                    .store(output.sample_rate, Ordering::Relaxed);
+                *shared.output.lock().unwrap() = output;
+                settle_depth(&shared, 0, false);
+                Some(stream)
+            }
+            Err(e) => {
+                tracing::warn!("No audio output yet ({e}); trying again when a track plays");
+                None
+            }
+        };
 
         let decoder_shared = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -1367,7 +1377,7 @@ impl AudioPlayer {
             .map_err(AudioError::Io)?;
 
         Ok(Self {
-            stream: Mutex::new(Some(stream)),
+            stream: Mutex::new(stream),
             shared,
         })
     }
@@ -1525,6 +1535,9 @@ impl AudioPlayer {
         self.shared.released.store(false, Ordering::Relaxed);
         let rate = self.preferred_output_rate(source.sample_rate);
         let bits = self.wanted_depth(source.bits_per_sample);
+        if self.stream.lock().unwrap().is_none() {
+            self.rebuild_stream(None, bits, false);
+        }
         if self.shared.device_rate.load(Ordering::Relaxed) != rate && self.can_match(rate) {
             self.rebuild_stream(Some(rate), bits, false);
         } else {
