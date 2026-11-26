@@ -1319,12 +1319,15 @@ export component UpdateToast inherits Rectangle {
 // one is active, also one that appears after the shortcut.
 export component SearchField inherits Rectangle {
     in property <bool> active: true;
+    in property <bool> glass: false;
     out property <bool> focused: input.has-focus;
     out property <bool> hovered: search-ta.has-hover;
     callback activity();
     height: 39px;
     border-radius: 19.5px;
-    background: Theme.pill;
+    background: root.glass
+        ? (input.has-focus || search-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff28 360deg) : @conic-gradient(#474c5301 0deg, #ffffff18 360deg))
+        : Theme.pill;
     border-width: input.has-focus ? 1px : 0px;
     border-color: #5a5a5a;
 
@@ -1419,6 +1422,7 @@ export component SearchField inherits Rectangle {
 // Shared by the page header and full-window video player.
 export component HeaderTools inherits Rectangle {
     in property <bool> active: true;
+    in property <bool> glass: false;
     // Off where there is no room for the search field (narrow Now Playing,
     // whose width is then just the debug and profile buttons: 101px).
     in property <bool> search: true;
@@ -1431,6 +1435,7 @@ export component HeaderTools inherits Rectangle {
     field := SearchField {
         visible: root.search;
         active: root.active && root.search;
+        glass: root.glass;
         x: parent.width - 101px - self.width;
         y: (parent.height - self.height) / 2;
         width: parent.width - 101px;
@@ -1442,6 +1447,7 @@ export component HeaderTools inherits Rectangle {
         x: parent.width - 56px - self.width;
         y: (parent.height - self.height) / 2;
         enabled: root.active;
+        glass: root.glass;
     }
 
     // Profile
@@ -1451,7 +1457,9 @@ export component HeaderTools inherits Rectangle {
         width: 35px;
         height: 35px;
         border-radius: 17.5px;
-        background: pta.has-hover ? #333333 : #2a2a2a;
+        background: root.glass
+            ? (pta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff30 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
+            : pta.has-hover ? #333333 : #2a2a2a;
         pta := TouchArea {
             enabled: root.active;
             mouse-cursor: pointer;
@@ -1552,6 +1560,7 @@ export component TopBar inherits Rectangle {
     // (macOS draws them inside the window) and the search moves into the pages
     // (Explore and the results).
     property <length> shift: App.phone-layout && Keys.mac ? 60px : 0px;
+    property <bool> glass: App.glass && !(App.bar-covered && (App.show-now-playing || App.video-open));
     DragArea { }
 
     // Back / forward
@@ -1561,7 +1570,7 @@ export component TopBar inherits Rectangle {
         width: 76px;
         height: 39px;
         border-radius: 19.5px;
-        background: Theme.pill;
+        background: root.glass ? @conic-gradient(#474c5301 0deg, #ffffff18 360deg) : Theme.pill;
         // Chevron size, weight, spacing and colours measured from the official client.
         HorizontalLayout {
             alignment: center;
@@ -1631,6 +1640,7 @@ export component TopBar inherits Rectangle {
         x: parent.width - self.width;
         search: !App.phone-layout;
         active: !App.video-open && !App.show-now-playing;
+        glass: root.glass;
     }
 }
 
