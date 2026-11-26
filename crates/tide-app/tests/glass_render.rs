@@ -266,4 +266,20 @@ fn pages_show_through_the_player_bar_as_glass() {
         luma(search_rim) > luma(search_px) + 5.,
         "Now Playing Search pill has no glass rim ({search_rim:?} vs {search_px:?})"
     );
+
+    // Toggling Liquid Glass off -> on while Now Playing is already open:
+    // off uses matching translucent overlay surfaces (never opaque black),
+    // and back on restores full Liquid Glass on Search, Debug and Profile.
+    app.set_glass(false);
+    let np_plain = shoot(&ui, "np-repro-plain");
+    assert_ne!(at(&np_plain, 1180., menu + 20.), (30, 30, 30), "Now Playing Search fell back to opaque black");
+    assert_ne!(at(&np_plain, 1409., menu + 18.), (42, 42, 42), "Now Playing Profile fell back to opaque black");
+    app.set_glass(true);
+    let np_toggled = shoot(&ui, "np-repro-toggled-on");
+    let toggled_px = at(&np_toggled, 1180., menu + 20.);
+    let toggled_rim = at(&np_toggled, 1180., menu + 12.75);
+    assert!(
+        luma(toggled_rim) > luma(toggled_px) + 5.,
+        "Now Playing Search did not restore Liquid Glass after toggle ({toggled_rim:?} vs {toggled_px:?})"
+    );
 }

@@ -1052,15 +1052,18 @@ export component MinimizeButton inherits Rectangle {
 export component DebugButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> glass: false;
+    in property <bool> overlay: false;
     out property <bool> hovered: ta.has-hover;
     width: 35px;
     height: 35px;
     border-radius: 17.5px;
     background: root.glass
         ? (App.debug-open || ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff30 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
+        : root.overlay
+        ? (App.debug-open || ta.has-hover ? #ffffff28 : #ffffff14)
         : App.debug-open || ta.has-hover ? #333333 : #2a2a2a;
-    border-width: App.debug-open || App.debug-active ? 1px : 0px;
-    border-color: #f5b942;
+    border-width: App.debug-open || App.debug-active ? 1px : (root.overlay && !root.glass ? 1px : 0px);
+    border-color: App.debug-open || App.debug-active ? #f5b942 : #ffffff1c;
     accessible-role: button;
     accessible-label: "Debug";
     accessible-action-default => {

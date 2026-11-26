@@ -1320,6 +1320,7 @@ export component UpdateToast inherits Rectangle {
 export component SearchField inherits Rectangle {
     in property <bool> active: true;
     in property <bool> glass: false;
+    in property <bool> overlay: false;
     out property <bool> focused: input.has-focus;
     out property <bool> hovered: search-ta.has-hover;
     callback activity();
@@ -1327,9 +1328,11 @@ export component SearchField inherits Rectangle {
     border-radius: 19.5px;
     background: root.glass
         ? (input.has-focus || search-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff28 360deg) : @conic-gradient(#474c5301 0deg, #ffffff18 360deg))
+        : root.overlay
+        ? (input.has-focus || search-ta.has-hover ? #ffffff24 : #ffffff14)
         : Theme.pill;
-    border-width: input.has-focus ? 1px : 0px;
-    border-color: #5a5a5a;
+    border-width: input.has-focus ? 1px : (root.overlay && !root.glass ? 1px : 0px);
+    border-color: input.has-focus ? (root.overlay ? #ffffff66 : #5a5a5a) : #ffffff1c;
 
     // Focus ring sits just outside the pill.
     if input.has-focus: Rectangle {
@@ -1352,7 +1355,7 @@ export component SearchField inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: @image-url("icons/search.svg");
         size: 15px;
-        tint: Theme.text-secondary;
+        tint: root.overlay ? #ffffffa6 : Theme.text-secondary;
     }
 
     if input.text == "": Text {
@@ -1360,7 +1363,7 @@ export component SearchField inherits Rectangle {
         y: 0px;
         height: parent.height;
         text: "Search";
-        color: Theme.text-secondary;
+        color: root.overlay ? #ffffffa6 : Theme.text-secondary;
         font-size: 15px;
         vertical-alignment: center;
     }
@@ -1402,8 +1405,8 @@ export component SearchField inherits Rectangle {
         y: (parent.height - 20px) / 2;
         height: 20px;
         spacing: 4px;
-        Kbd { glyph: "⌘"; glass: root.glass; }
-        Kbd { glyph: "F"; glass: root.glass; }
+        Kbd { glyph: "⌘"; glass: root.glass || root.overlay; }
+        Kbd { glyph: "F"; glass: root.glass || root.overlay; }
     }
 
     if input.text != "": IconButton {
@@ -1423,6 +1426,9 @@ export component SearchField inherits Rectangle {
 export component HeaderTools inherits Rectangle {
     in property <bool> active: true;
     in property <bool> glass: false;
+    // Translucent frosted fallback over Now Playing / video backdrops when
+    // Liquid Glass is off or while the header fades in.
+    in property <bool> overlay: false;
     // Off where there is no room for the search field (narrow Now Playing,
     // whose width is then just the debug and profile buttons: 101px).
     in property <bool> search: true;
@@ -1436,6 +1442,7 @@ export component HeaderTools inherits Rectangle {
         visible: root.search;
         active: root.active && root.search;
         glass: root.glass;
+        overlay: root.overlay;
         x: parent.width - 101px - self.width;
         y: (parent.height - self.height) / 2;
         width: parent.width - 101px;
@@ -1448,6 +1455,7 @@ export component HeaderTools inherits Rectangle {
         y: (parent.height - self.height) / 2;
         enabled: root.active;
         glass: root.glass;
+        overlay: root.overlay;
     }
 
     // Profile
@@ -1459,7 +1467,11 @@ export component HeaderTools inherits Rectangle {
         border-radius: 17.5px;
         background: root.glass
             ? (pta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff30 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
+            : root.overlay
+            ? (pta.has-hover ? #ffffff28 : #ffffff14)
             : pta.has-hover ? #333333 : #2a2a2a;
+        border-width: root.overlay && !root.glass ? 1px : 0px;
+        border-color: #ffffff1c;
         pta := TouchArea {
             enabled: root.active;
             mouse-cursor: pointer;

@@ -218,6 +218,7 @@ export component VideoView inherits Rectangle {
         search: root.width >= 720px;
         active: App.video-open;
         glass: App.glass && root.controls-opacity >= 1;
+        overlay: true;
         opacity: root.controls-opacity;
         // Opacity hides idle controls; keep the input focusable so the search
         // shortcut (or hovering a tool) can wake them again.
