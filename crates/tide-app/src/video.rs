@@ -292,6 +292,7 @@ impl Ui {
         app.set_np_explicit(false);
         app.set_np_favorite(favorite);
         app.set_np_cover(Image::default());
+        self.animate_art(super::artwork::Slot::Now, None);
         app.set_playing(false);
         app.set_buffering(true);
         app.set_playing_card_kind("video".into());

@@ -690,6 +690,18 @@ export component SettingsView inherits Rectangle {
                         }
                     }
 
+                    if Keys.mac: Row {
+                        title: "Animated Artwork";
+                        detail: "Albums with a moving cover play it in Now Playing, the player bar and on album pages, and on album tiles under the pointer. Off, every cover stays still.";
+                        Toggle {
+                            x: parent.width - self.width;
+                            on: App.animated-artwork;
+                            toggled(v) => {
+                                App.set-animated-artwork(v);
+                            }
+                        }
+                    }
+
                     Row {
                         title: "Fancy Animation";
                         detail: "Sliding back / forward page transitions, with a bigger graphics cache and an extra window buffer. Off, TIDE uses as little memory as it can and still animates at your display's refresh rate.";

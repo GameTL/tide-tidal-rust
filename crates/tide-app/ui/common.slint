@@ -49,6 +49,8 @@ export struct CardData {
     fresh: bool,
     /// Tracks shown as cards: the E badge after the title.
     explicit: bool,
+    /// An album's animated cover id (empty: none).
+    video-cover: string,
 }
 
 export struct SectionData {
@@ -464,6 +466,17 @@ export global App {
     in property <bool> np-artist-followed: false;
     in property <image> np-cover;
     in property <image> np-cover-large;
+    // Animated covers (Settings): the latest frame of each loop playing,
+    // empty while none plays. The tile's is the album under the pointer,
+    // named by `hover-motion-key` ("kind:id").
+    in property <bool> animated-artwork: true;
+    callback set-animated-artwork(bool);
+    in property <image> np-motion;
+    in property <image> page-motion;
+    in property <image> hover-motion;
+    in property <string> hover-motion-key;
+    // A tile's pointer arrived (its animated cover id) or left (empty).
+    callback hover-art(string, string);
     in property <color> np-tint: #3a3a3a;
     // The cover reduced to a soft wash of its colours: Now Playing's backdrop
     // when the interface is glass.
@@ -1336,7 +1349,8 @@ export component CardArt inherits Rectangle {
     if card.kind != "tracks" && card.kind != "folder": Cover {
         width: 100%;
         height: 100%;
-        source: card.image;
+        // The key test first: other tiles never read the per-frame image.
+        source: App.hover-motion-key == card.kind + ":" + card.id && App.hover-motion.width > 0 ? App.hover-motion : card.image;
         radius: root.radius;
         round: card.kind == "artist";
         // Shown until the portrait arrives, and for artists that have none.

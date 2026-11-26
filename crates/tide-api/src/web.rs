@@ -57,6 +57,9 @@ pub struct Card {
     /// A playlist anyone can open from the creator's profile.
     #[serde(default)]
     pub is_public: bool,
+    /// An album's animated cover (`videoCover` id), when it has one.
+    #[serde(default)]
+    pub video_cover: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +196,14 @@ pub struct StreamInfo {
     pub quality: String,
     pub bit_depth: u32,
     pub sample_rate: u32,
+}
+
+/// An album's animated cover: a short silent loop, square (80, 160, 320, 640, 1280).
+pub fn video_cover_url(uuid: &str, size: u32) -> String {
+    format!(
+        "https://resources.tidal.com/videos/{}/{size}x{size}.mp4",
+        uuid.replace('-', "/")
+    )
 }
 
 /// Cheap, cloneable snapshot of the credentials needed to call the API.
@@ -521,6 +532,7 @@ pub fn parse_track(v: &Value) -> Option<TrackItem> {
         explicit: v.get("explicit").and_then(Value::as_bool).unwrap_or(false),
         date_added: None,
         bpm: v.get("bpm").and_then(Value::as_u64).map(|b| b as u32),
+        video_cover: Some(s(&album, "videoCover")).filter(|x| !x.is_empty()),
     })
 }
 
@@ -629,6 +641,7 @@ pub(crate) fn parse_card(kind: &str, d: &Value, me: u64) -> Option<Card> {
                 image_url: (!cover.is_empty()).then(|| image_url(&cover, 320)),
                 released: s(d, "releaseDate"),
                 by: artist_names(d),
+                video_cover: Some(s(d, "videoCover")).filter(|x| !x.is_empty()),
                 ..Default::default()
             }
         }
@@ -1761,6 +1774,19 @@ mod tests {
             parse_card("PLAYLIST", &empty, 1).unwrap().updated,
             "2020-01-01T00:00:00.000+0000"
         );
+    }
+
+    #[test]
+    fn albums_carry_their_animated_cover() {
+        let album = serde_json::json!({"id": 9, "title": "A", "videoCover": "ab-cd"});
+        let card = parse_card("ALBUM", &album, 1).unwrap();
+        assert_eq!(card.video_cover.as_deref(), Some("ab-cd"));
+        assert_eq!(
+            video_cover_url("ab-cd", 640),
+            "https://resources.tidal.com/videos/ab/cd/640x640.mp4"
+        );
+        let track = serde_json::json!({"id": 1, "title": "T", "album": {"id": 9, "videoCover": null}});
+        assert_eq!(parse_track(&track).unwrap().video_cover, None);
     }
 
     #[test]

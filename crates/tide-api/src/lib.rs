@@ -84,6 +84,9 @@ pub struct TrackItem {
     pub date_added: Option<String>,
     #[serde(default)]
     pub bpm: Option<u32>,
+    /// The album's animated cover (`videoCover` id), when it has one.
+    #[serde(default)]
+    pub video_cover: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +348,7 @@ impl TidalService {
                 album_id,
                 duration_secs: track.duration as u32,
                 cover_url,
+                video_cover: track.album.as_ref().and_then(|a| a.video_cover.clone()),
                 audio_quality: format!("{:?}", track.audio_quality),
                 ..Default::default()
             });
@@ -405,6 +409,7 @@ impl TidalService {
             album_id,
             duration_secs: track.duration as u32,
             cover_url,
+            video_cover: track.album.as_ref().and_then(|a| a.video_cover.clone()),
             audio_quality: format!("{:?}", track.audio_quality),
             ..Default::default()
         })
@@ -467,6 +472,7 @@ impl TidalService {
                     album_id,
                     duration_secs: track.duration as u32,
                     cover_url,
+                    video_cover: track.album.as_ref().and_then(|a| a.video_cover.clone()),
                     audio_quality: track
                         .audio_quality
                         .unwrap_or_else(|| "LOSSLESS".to_string()),

@@ -216,6 +216,11 @@ component GridItem inherits FreshItem {
     // A grey panel behind the whole card on hover, as on track rows (grid pages).
     in property <bool> hover-panel: false;
     property <bool> lit: body.has-hover || spotlight;
+    changed lit => {
+        if (card.video-cover != "") {
+            App.hover-art(card.kind + ":" + card.id, root.lit ? card.video-cover : "");
+        }
+    }
     // ↑ ↓ moved the pick here: scroll it into the pane.
     changed spotlight => {
         if (spotlight) {
@@ -1611,7 +1616,7 @@ export component TracksView inherits Rectangle {
             y: y-title;
             width: cover-size;
             height: cover-size;
-            source: App.page-cover;
+            source: App.page-motion.width > 0 ? App.page-motion : App.page-cover;
             radius: 4px;
         }
         if !stack-head: Text {
@@ -3173,7 +3178,7 @@ export component NowPlayingView inherits Rectangle {
                 Cover {
                     width: 100%;
                     height: 100%;
-                    source: App.np-cover-large.width > 0 ? App.np-cover-large : App.np-cover;
+                    source: App.np-motion.width > 0 ? App.np-motion : App.np-cover-large.width > 0 ? App.np-cover-large : App.np-cover;
                     radius: (4px - 2px * root.expansion) / max(root.grow, 0.001);
                 }
             }

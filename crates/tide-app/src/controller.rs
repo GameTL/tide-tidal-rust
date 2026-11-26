@@ -84,6 +84,10 @@ pub struct Settings {
     pub window: Option<crate::window_state::WindowState>,
     /// An update the listener chose to skip; only Check for Updates… offers it again.
     pub skipped_version: String,
+    /// Albums with an animated cover play it (Now Playing, the player bar,
+    /// album pages, album tiles under the pointer).
+    #[serde(default = "default_true")]
+    pub animated_artwork: bool,
 }
 
 fn default_true() -> bool {
@@ -109,6 +113,7 @@ impl Default for Settings {
             #[cfg(target_os = "macos")]
             window: None,
             skipped_version: String::new(),
+            animated_artwork: true,
         }
     }
 }
@@ -1316,6 +1321,7 @@ pub struct Ui {
     nav: RefCell<Nav>,
     clipboard: RefCell<Option<arboard::Clipboard>>,
     video: RefCell<video::VideoState>,
+    art: RefCell<artwork::ArtState>,
     dsp: RefCell<dsp::DspState>,
     mem: RefCell<MemTracker>,
 }
@@ -1343,6 +1349,9 @@ const MEM_COLORS: [(u8, u8, u8); 5] = [
 
 #[path = "video.rs"]
 mod video;
+
+#[path = "artwork.rs"]
+mod artwork;
 
 #[path = "dsp.rs"]
 mod dsp;
@@ -2018,6 +2027,7 @@ fn card_row(c: &Card) -> CardData {
         detail: video_length(c.duration).into(),
         fresh: false,
         explicit: false,
+        video_cover: c.video_cover.as_deref().unwrap_or_default().into(),
     }
 }
 
@@ -2318,6 +2328,7 @@ fn card_from_row(card: &CardData) -> Card {
         image_url: (!card.image_url.is_empty()).then(|| card.image_url.to_string()),
         by: card.by.to_string(),
         is_public: card.is_public,
+        video_cover: (!card.video_cover.is_empty()).then(|| card.video_cover.to_string()),
         ..Default::default()
     }
 }
@@ -2637,6 +2648,7 @@ impl Ui {
             nav: RefCell::default(),
             clipboard: RefCell::default(),
             video: RefCell::default(),
+            art: RefCell::default(),
             dsp: RefCell::default(),
             mem: RefCell::default(),
         });
@@ -3208,6 +3220,9 @@ impl Ui {
             .update_settings(|s| s.keep_most_played = on));
         bind!(on_set_fancy_animation, |ui, on| ui.set_fancy_animation(on));
         bind!(on_set_liquid_glass, |ui, on| ui.set_liquid_glass(on));
+        bind!(on_set_animated_artwork, |ui, on| ui
+            .set_animated_artwork(on));
+        bind!(on_hover_art, |ui, key, uuid| ui.hover_art(&key, &uuid));
         bind!(on_set_show_lyrics, |ui, on| {
             ui.update_settings(|s| s.show_lyrics = on);
             ui.app().set_show_lyrics(on);
@@ -3872,6 +3887,7 @@ impl Ui {
         app.set_keep_most_played(settings.keep_most_played);
         app.set_fancy_animation(fancy_animation_override().unwrap_or(settings.fancy_animation));
         app.set_show_lyrics(settings.show_lyrics);
+        app.set_animated_artwork(settings.animated_artwork);
         app.set_liquid_glass(crate::platform::glass_wanted());
         app.set_glass_available(crate::platform::glass_available());
         app.set_rate_matching(settings.rate_matching);
@@ -5408,6 +5424,8 @@ impl Ui {
         app.set_show_now_playing(false);
         app.set_page_has_cover(false);
         app.set_page_cover(Image::default());
+        self.animate_art(artwork::Slot::Page, None);
+        self.hover_art(&app.get_hover_motion_key(), "");
         app.set_page_subtitle("".into());
         app.set_page_artist(CardData::default());
         app.set_page_artists(link_model(Vec::new()));
@@ -5743,6 +5761,9 @@ impl Ui {
         }
         if card.kind == "album" && !card.quality.is_empty() {
             app.set_page_quality(card.quality.as_str().into());
+        }
+        if card.video_cover.is_some() {
+            self.animate_art(artwork::Slot::Page, card.video_cover.as_deref());
         }
         if let Some(url) = &card.image_url {
             let url = if card.kind == "artist" {
@@ -7673,6 +7694,7 @@ impl Ui {
         app.set_elapsed("0:00".into());
         app.set_progress(0.0);
         app.set_loaded(0.0);
+        self.animate_art(artwork::Slot::Now, track.video_cover.as_deref());
         let cover = track.cover_url.as_deref().map(|u| sized_cover(u, 640));
         let cached_cover = cover
             .as_deref()
@@ -8660,6 +8682,7 @@ impl Ui {
         let app = self.app();
         app.set_logged_in(false);
         app.set_has_track(false);
+        self.animate_art(artwork::Slot::Now, None);
         app.set_duration_secs(0);
         app.set_progress(0.0);
         app.set_elapsed("0:00".into());

@@ -19,7 +19,7 @@ i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 
 [workspace.package]
-version = "1.2.3"
+version = "1.2.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Tinapat Game Limsila <limsila.limsila@gmail.com>"]
