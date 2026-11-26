@@ -41,6 +41,9 @@ pub mod glass;
 /// TIDE patch: perspective tilt for a rectangle's children.
 mod tilt;
 
+/// TIDE patch: vertical edge-fade alpha mask for a rectangle's children.
+mod fade;
+
 /// TIDE patch: memory controls for the GPU side of the renderer. Upstream
 /// leaves Skia's GPU resource cache at its default budget (256 MB) and never
 /// trims it, so textures for artwork, layers and video frames that were on

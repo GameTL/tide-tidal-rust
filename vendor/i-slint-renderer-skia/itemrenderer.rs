@@ -40,6 +40,8 @@ pub struct SkiaItemRenderer<'a> {
     surface: Option<&'a dyn crate::Surface>,
     state_stack: Vec<RenderState>,
     current_state: RenderState,
+    /// TIDE patch: active bounded vertical edge-fade layers keyed by `state_stack` depth.
+    fade_masks: Vec<(usize, crate::fade::Active)>,
     image_cache: &'a ItemCache<Option<skia_safe::Image>>,
     layer_cache: &'a ItemCache<Option<(PhysicalPoint, skia_safe::Image)>>,
     path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
@@ -68,6 +70,7 @@ impl<'a> SkiaItemRenderer<'a> {
                 alpha: 1.0,
                 transform: i_slint_core::lengths::ItemTransform::identity(),
             },
+            fade_masks: Vec::new(),
             image_cache,
             layer_cache,
             path_cache,
@@ -546,6 +549,14 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         // TIDE patch: a rectangle whose background is the glass marker shows
         // what is behind it through glass (glass.rs).
         let background = rect.background();
+        // TIDE patch: the fade marker draws nothing and masks its children's
+        // top and bottom edges smoothly into transparency (fade.rs).
+        if let Some((top, bottom)) = crate::fade::bands(&background, self.scale_factor.get()) {
+            if let Some(active) = crate::fade::begin(self.canvas, to_skia_rect(&geometry), top, bottom) {
+                self.fade_masks.push((self.state_stack.len(), active));
+            }
+            return;
+        }
         // TIDE patch: the tilt marker draws nothing and turns its children
         // in perspective (tilt.rs). The item's save/restore scopes it.
         if let Some(angles) = crate::tilt::angles(&background) {
@@ -590,6 +601,17 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
 
         // TIDE patch: the glass marker as a rounded rectangle's background.
         let background = rect.background();
+        // TIDE patch: the fade marker (fade.rs), as in `draw_rectangle`.
+        if let Some((top, bottom)) = crate::fade::bands(&background, self.scale_factor.get()) {
+            let rect = skia_safe::Rect::from_wh(
+                layout.brush_size.width_length().get(),
+                layout.brush_size.height_length().get(),
+            );
+            if let Some(active) = crate::fade::begin(self.canvas, rect, top, bottom) {
+                self.fade_masks.push((self.state_stack.len(), active));
+            }
+            return;
+        }
         // TIDE patch: the tilt marker (tilt.rs), as in `draw_rectangle`. A
         // border would be drawn flat; the tilt is for the children.
         if let Some(angles) = crate::tilt::angles(&background) {
@@ -907,6 +929,12 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
     }
 
     fn restore_state(&mut self) {
+        // TIDE patch: finish any edge-fade mask opened by this item before popping its state.
+        let depth = self.state_stack.len();
+        while self.fade_masks.last().is_some_and(|(d, _)| *d >= depth) {
+            let (_, active) = self.fade_masks.pop().unwrap();
+            crate::fade::end(self.canvas, active);
+        }
         self.current_state = self.state_stack.pop().unwrap();
         self.canvas.restore();
     }
