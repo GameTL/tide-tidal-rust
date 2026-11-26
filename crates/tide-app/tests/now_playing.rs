@@ -266,10 +266,10 @@ fn lyrics_toggle_seek_and_sync() {
 
     // The window draws its menu bar here: the content starts at y 40 and is
     // 860 high. The lyric column spans x 755..1315, y 104..740; the sung
-    // line rests 38% of the way down; the Lyrics pill is left of the
-    // search field.
+    // line rests 38% of the way down; the [ Lyrics | Queue ] pill sits left of
+    // the search field (group width 173px: 3px pad + 68px Lyrics + 68px Queue).
     let top = 40.;
-    let (pill_x, pill_y) = (1440. - 407. - 101. + 34., top + 32.);
+    let (pill_x, pill_y) = (1440. - 407. - 173. + 3. + 34., top + 32.);
     let (line_x, anchor) = (790., top + 64. + 636. * 0.38);
     click(win, line_x, anchor);
     assert_eq!(*seeks.borrow(), [8], "the sung line sits at the anchor and seeks");
@@ -301,4 +301,142 @@ fn lyrics_toggle_seek_and_sync() {
     advance(win, 700);
     click(win, line_x, anchor);
     assert_eq!(*seeks.borrow().last().unwrap(), 8, "Sync lyrics returns to the sung line");
+}
+
+#[test]
+fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().unwrap();
+    let app = ui.global::<App>();
+    let win = ui.window();
+    ui.show().unwrap();
+    win.dispatch_event(WindowEvent::Resized { size: LogicalSize::new(1440., 900.) });
+    app.set_logged_in(true);
+    app.set_has_track(true);
+    app.set_current_id("now".into());
+    app.set_np_title("Current Track".into());
+    app.set_np_artist("Current Artist".into());
+    app.set_np_context("My OG / Nostalgia Style".into());
+    app.set_lyrics(ModelRc::new(VecModel::from(vec![LyricLine {
+        text: "A line".into(),
+        time: 0,
+    }])));
+    app.set_lyrics_synced(true);
+    app.set_np_queue(ModelRc::new(VecModel::from(
+        (0..20)
+            .map(|i| TrackData {
+                id: format!("q-{i}").into(),
+                title: format!("Queued Track {i}").into(),
+                artist: format!("Artist {i}").into(),
+                album: format!("Album {i}").into(),
+                duration: "3:45".into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+
+    let navs = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    app.on_navigate({
+        let navs = navs.clone();
+        move |k| navs.borrow_mut().push(k.to_string())
+    });
+    let played = Rc::new(std::cell::RefCell::new(Vec::<i32>::new()));
+    app.on_play_queue_index({
+        let played = played.clone();
+        move |i| played.borrow_mut().push(i)
+    });
+    let menus = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    app.on_request_track_menu({
+        let menus = menus.clone();
+        move |id, _, _| menus.borrow_mut().push(id.to_string())
+    });
+    let cleared = Rc::new(Cell::new(0));
+    app.on_clear_queue({
+        let weak = ui.as_weak();
+        let cleared = cleared.clone();
+        move || {
+            cleared.set(cleared.get() + 1);
+            weak.unwrap().global::<App>().set_np_queue(ModelRc::default());
+        }
+    });
+    let art_windows = Rc::new(std::cell::RefCell::new(Vec::<(i32, i32)>::new()));
+    app.on_np_queue_visible({
+        let art_windows = art_windows.clone();
+        move |first, count| art_windows.borrow_mut().push((first, count))
+    });
+
+    app.set_show_lyrics(true);
+    app.set_show_now_playing(true);
+    advance(win, 700);
+
+    let top = 40.;
+    let group_x = 1440. - 407. - 173.;
+    let (lyrics_x, queue_x, pill_y) = (group_x + 3. + 34., group_x + 3. + 68. + 34., top + 32.);
+
+    // Switch from Lyrics to Queue via the top segmented pill.
+    click(win, queue_x, pill_y);
+    assert!(app.get_show_queue());
+    assert!(!app.get_show_lyrics());
+    advance(win, 700);
+    assert!(
+        art_windows.borrow().iter().any(|&(_, count)| count > 0),
+        "opening Queue requests cover artwork for visible rows"
+    );
+
+    // QueueColumn sits at x 755..1315, y top+72..; header is 66px (with context),
+    // list padding 6px, rows 58px high.
+    let col_x = 755.;
+    let col_w = 560.;
+    let col_top = top + 64. + 8.;
+    let header_h = 66.;
+    let first_row_y = col_top + header_h + 6. + 29.;
+
+    // Left-clicking row 1 jumps to index 1.
+    click(win, col_x + 160., first_row_y + 58.);
+    assert_eq!(*played.borrow(), [1]);
+
+    // Clicking the More button on row 0 opens that track's context menu.
+    click(win, col_x + col_w - 8. - 22., first_row_y);
+    assert_eq!(*menus.borrow(), ["q-0"]);
+
+    // Right-clicking row 2 opens its context menu too.
+    let pos = LogicalPosition::new(col_x + 160., first_row_y + 58. * 2.);
+    win.dispatch_event(WindowEvent::PointerMoved { position: pos });
+    win.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Right });
+    win.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Right });
+    assert_eq!(*menus.borrow(), ["q-0", "q-2"]);
+
+    // Clicking Clear clears upcoming tracks without closing Now Playing.
+    click(win, col_x + col_w - 40., col_top + header_h / 2.);
+    assert_eq!(cleared.get(), 1);
+    assert!(app.get_show_now_playing());
+    assert!(app.get_show_queue());
+
+    // Clicking the Lyrics segment switches back to Lyrics and releases queue art.
+    click(win, lyrics_x, pill_y);
+    assert!(!app.get_show_queue());
+    assert!(app.get_show_lyrics());
+    advance(win, 700);
+    assert_eq!(
+        art_windows.borrow().last().copied(),
+        Some((0, 0)),
+        "leaving Queue drops decoded queue covers"
+    );
+
+    // Clicking the overlay player bar's Queue button toggles Queue in-place
+    // instead of navigating away to the Queue page.
+    let bar_y = 900. - app.get_player_height() + 48.;
+    let queue_btn_x = 1440. - 20. - 86. - 12. - 8. - 16. - 5. * 34. - 4. * 8. + 17.;
+    // Find the player bar's queue button (first icon of the right control cluster).
+    let mut toggled = false;
+    for dx in (-40..=120).step_by(8) {
+        click(win, queue_btn_x + dx as f32, bar_y);
+        if app.get_show_queue() {
+            toggled = true;
+            break;
+        }
+    }
+    assert!(toggled, "overlay player bar Queue icon toggles Queue in-place");
+    assert!(navs.borrow().is_empty(), "Queue icon in Now Playing must not navigate away");
+    assert!(!app.get_show_lyrics());
 }
