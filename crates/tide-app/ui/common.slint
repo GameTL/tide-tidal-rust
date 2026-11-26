@@ -650,8 +650,6 @@ export global App {
     in property <[TrackData]> np-queue;
     // Jump to row `index` of `np-queue`, keeping the rest of the queue intact.
     callback play-queue-index(int);
-    // Drop every upcoming track after the one currently playing.
-    callback clear-queue();
     // Lazily load cover artwork for visible rows [first, first + count) of `np-queue`.
     callback np-queue-visible(int, int);
     // Toggle Now Playing's Queue panel in-place (shared by the top pill and player bar).

@@ -304,7 +304,7 @@ fn lyrics_toggle_seek_and_sync() {
 }
 
 #[test]
-fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
+fn queue_panel_toggle_play_menu_and_player_bar_button() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = MainWindow::new().unwrap();
     let app = ui.global::<App>();
@@ -350,15 +350,6 @@ fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
         let menus = menus.clone();
         move |id, _, _| menus.borrow_mut().push(id.to_string())
     });
-    let cleared = Rc::new(Cell::new(0));
-    app.on_clear_queue({
-        let weak = ui.as_weak();
-        let cleared = cleared.clone();
-        move || {
-            cleared.set(cleared.get() + 1);
-            weak.unwrap().global::<App>().set_np_queue(ModelRc::default());
-        }
-    });
     let art_windows = Rc::new(std::cell::RefCell::new(Vec::<(i32, i32)>::new()));
     app.on_np_queue_visible({
         let art_windows = art_windows.clone();
@@ -383,13 +374,13 @@ fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
         "opening Queue requests cover artwork for visible rows"
     );
 
-    // QueueColumn sits at x 755..1315, y top+72..; header is 66px (with context),
-    // list padding 6px, rows 58px high.
+    // QueueColumn aligns with the artwork's top edge (on-y ~118.8px + 40px menu
+    // bar = ~158.8px), with a 56px context header, 4px pad, and 58px rows.
     let col_x = 755.;
     let col_w = 560.;
-    let col_top = top + 64. + 8.;
-    let header_h = 66.;
-    let first_row_y = col_top + header_h + 6. + 29.;
+    let col_top = top + 118.8;
+    let header_h = 56.;
+    let first_row_y = col_top + header_h + 4. + 29.;
 
     // Left-clicking row 1 jumps to index 1.
     click(win, col_x + 160., first_row_y + 58.);
@@ -406,12 +397,6 @@ fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
     win.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Right });
     assert_eq!(*menus.borrow(), ["q-0", "q-2"]);
 
-    // Clicking Clear clears upcoming tracks without closing Now Playing.
-    click(win, col_x + col_w - 40., col_top + header_h / 2.);
-    assert_eq!(cleared.get(), 1);
-    assert!(app.get_show_now_playing());
-    assert!(app.get_show_queue());
-
     // Clicking the Lyrics segment switches back to Lyrics and releases queue art.
     click(win, lyrics_x, pill_y);
     assert!(!app.get_show_queue());
@@ -427,7 +412,6 @@ fn queue_panel_toggle_play_menu_clear_and_player_bar_button() {
     // instead of navigating away to the Queue page.
     let bar_y = 900. - app.get_player_height() + 48.;
     let queue_btn_x = 1440. - 20. - 86. - 12. - 8. - 16. - 5. * 34. - 4. * 8. + 17.;
-    // Find the player bar's queue button (first icon of the right control cluster).
     let mut toggled = false;
     for dx in (-40..=120).step_by(8) {
         click(win, queue_btn_x + dx as f32, bar_y);

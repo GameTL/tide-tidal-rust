@@ -426,41 +426,24 @@ mod tests {
     }
 
     #[test]
-    fn clear_upcoming_drops_future_tracks_and_keeps_history_when_unshuffled() {
+    fn upcoming_tracks_follow_play_order_after_current_position() {
         let track = |id: &str| TrackItem {
             id: id.into(),
             ..Default::default()
         };
-        let mut state = State {
+        let state = State {
             queue: ["A", "B", "C", "D"].map(track).to_vec(),
             order: vec![3, 1, 0, 2],
             pos: 1,
             shuffle: true,
-            prefetched_for: Some(7),
             ..Default::default()
         };
-        let upcoming_before: Vec<_> = state
+        let upcoming: Vec<_> = state
             .upcoming_tracks()
             .into_iter()
             .map(|t| t.id)
             .collect();
-        assert_eq!(upcoming_before, ["A", "C"]);
-
-        assert!(state.clear_upcoming());
-        assert_eq!(state.prefetched_for, None);
-        assert!(state.upcoming_tracks().is_empty());
-        let kept_in_play_order: Vec<_> = state
-            .order
-            .iter()
-            .map(|&i| state.queue[i].id.as_str())
-            .collect();
-        assert_eq!(kept_in_play_order, ["D", "B"]);
-        assert_eq!(state.queue[state.order[state.pos]].id, "B");
-        // Compacting the backing queue prevents unshuffle from resurrecting A or C.
-        let backing_ids: Vec<_> = state.queue.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(backing_ids, ["B", "D"]);
-        // Clearing again when nothing is up next is a no-op.
-        assert!(!state.clear_upcoming());
+        assert_eq!(upcoming, ["A", "C"]);
     }
 
     #[test]
@@ -1354,35 +1337,6 @@ impl State {
             .skip(self.pos.saturating_add(1))
             .filter_map(|&i| self.queue.get(i).cloned())
             .collect()
-    }
-
-    /// Drop every upcoming track after the current one, compacting the backing
-    /// queue so turning shuffle off cannot resurrect cleared tracks.
-    fn clear_upcoming(&mut self) -> bool {
-        if self.order.is_empty() || self.pos + 1 >= self.order.len() {
-            return false;
-        }
-        self.order.truncate(self.pos + 1);
-        let mut kept = vec![false; self.queue.len()];
-        for &idx in &self.order {
-            if let Some(slot) = kept.get_mut(idx) {
-                *slot = true;
-            }
-        }
-        let mut remap = vec![0usize; self.queue.len()];
-        let mut new_queue = Vec::with_capacity(self.order.len());
-        for (old_idx, track) in self.queue.drain(..).enumerate() {
-            if kept[old_idx] {
-                remap[old_idx] = new_queue.len();
-                new_queue.push(track);
-            }
-        }
-        self.queue = new_queue;
-        for idx in &mut self.order {
-            *idx = remap[*idx];
-        }
-        self.prefetched_for = None;
-        true
     }
 }
 
@@ -3291,7 +3245,6 @@ impl Ui {
         });
         bind!(on_seek_lyric, |ui, row| ui.seek_lyric(row));
         bind!(on_play_queue_index, |ui, index| ui.play_queue_index(index));
-        bind!(on_clear_queue, |ui| ui.clear_upcoming());
         bind!(on_np_queue_visible, |ui, first, count| ui
             .np_queue_visible(first.max(0) as usize, count.max(0) as usize));
         bind!(on_pkce_finish, |ui, url| ui
@@ -7525,23 +7478,6 @@ impl Ui {
         }
         self.persist_cursor();
         self.start_current();
-        self.refresh_queue_page();
-    }
-
-    fn clear_upcoming(self: &Rc<Self>) {
-        {
-            let mut revision = self.ctx.next_revision.lock().unwrap();
-            *revision = revision.wrapping_add(1);
-            self.ctx.player.cancel_upcoming();
-        }
-        if !self.state.borrow().loading_track {
-            self.sync_gapless_transition();
-        }
-        if !self.state.borrow_mut().clear_upcoming() {
-            return;
-        }
-        self.persist_queue();
-        self.refresh_np_queue();
         self.refresh_queue_page();
     }
 

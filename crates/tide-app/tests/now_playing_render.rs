@@ -234,8 +234,10 @@ fn now_playing_arrangements_render() {
         // is the gap between art and column, i.e. background.
         assert_ne!(at(&lyrics, 720., 420.), at(&centred, 720., 420.));
         assert_ne!(at(&queue, 720., 420.), at(&centred, 720., 420.));
-        // Queue card sits in the right column and visibly separates from the backdrop.
-        assert_ne!(at(&queue, 1000., 120.), at(&centred, 1000., 120.));
+        // Queue sits borderless aligned with the artwork (not high under the
+        // header; x=1200 clears the centred artwork's 60px drop shadow).
+        assert_eq!(at(&queue, 1200., 120.), at(&centred, 1200., 120.));
+        assert_ne!(at(&queue, 785., 245.), at(&centred, 785., 245.));
 
         // Medium: the bar is compact, the title moves under the art.
         resize(&ui, 840., 720.);
@@ -289,16 +291,39 @@ fn now_playing_arrangements_render() {
     app.set_show_now_playing(false);
     settle();
 
-    // Mid-transition frame: switching Lyrics -> Queue with glass on.
+    // Mid-transition frames: Centred -> Queue (must not overlap art) and Lyrics -> Queue.
     app.set_glass(true);
     resize(&ui, 1440., 900.);
     app.set_show_queue(false);
-    app.set_show_lyrics(true);
+    app.set_show_lyrics(false);
     app.set_show_now_playing(true);
     settle();
     app.set_show_queue(true);
+    for (step, name) in [(3, "np-centred-to-queue-mid1"), (4, "np-centred-to-queue-mid2")] {
+        for _ in 0..step {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            slint::platform::update_timers_and_animations();
+        }
+        let frame = ui.window().take_snapshot().unwrap();
+        if let Some(dir) = std::env::var_os("TIDE_GLASS_SHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            image::save_buffer(
+                dir.join(format!("{name}.png")),
+                frame.as_bytes(),
+                frame.width(),
+                frame.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+    settle();
+    app.set_show_queue(false);
+    app.set_show_lyrics(true);
+    settle();
+    app.set_show_queue(true);
     app.set_show_lyrics(false);
-    for _ in 0..4 {
+    for _ in 0..3 {
         std::thread::sleep(std::time::Duration::from_millis(30));
         slint::platform::update_timers_and_animations();
     }

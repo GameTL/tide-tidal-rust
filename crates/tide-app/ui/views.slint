@@ -3013,7 +3013,7 @@ component QueueRow inherits Rectangle {
     }
 
     Cover {
-        x: 10px;
+        x: 8px;
         y: 8px;
         width: 42px;
         height: 42px;
@@ -3022,7 +3022,7 @@ component QueueRow inherits Rectangle {
     }
 
     Rectangle {
-        x: 10px;
+        x: 8px;
         y: 8px;
         width: 42px;
         height: 42px;
@@ -3039,8 +3039,8 @@ component QueueRow inherits Rectangle {
     }
 
     VerticalLayout {
-        x: 64px;
-        width: max(0px, parent.width - 64px - root.right-w);
+        x: 62px;
+        width: max(0px, parent.width - 62px - root.right-w);
         height: 100%;
         alignment: center;
         spacing: 2px;
@@ -3110,30 +3110,28 @@ component QueueRow inherits Rectangle {
     }
 
     if root.show-divider: Rectangle {
-        x: 64px;
+        x: 62px;
         y: parent.height - 1px;
-        width: max(0px, parent.width - 74px);
+        width: max(0px, parent.width - 70px);
         height: 1px;
         background: #ffffff14;
     }
 }
 
-// Upcoming tracks beside the artwork in Now Playing. Sits over a sibling glass
-// card when `glass` is on, so the glass backdrop stays outside this opacity group.
+// Upcoming tracks beside the artwork in Now Playing: borderless like Lyrics,
+// floating directly over the backdrop wash.
 component QueueColumn inherits Rectangle {
     in property <float> reveal: 1;
-    in property <bool> glass: false;
     in property <bool> interactive: true;
 
-    property <length> header-h: App.np-context != "" ? 66px : 52px;
+    property <length> header-h: App.np-context != "" ? 56px : 36px;
     property <length> row-h: 58px;
-    property <length> list-pad: 6px;
+    property <length> list-pad: 4px;
     property <int> first: max(0, floor((-list.content-y - root.list-pad) / root.row-h));
     property <int> visible-rows: max(1, ceil(max(1px, list.height) / root.row-h) + 2);
     property <int> queue-len: App.np-queue.length;
     property <string> current-track: App.current-id;
 
-    border-radius: 20px;
     clip: true;
     opacity: root.reveal;
     cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
@@ -3160,33 +3158,25 @@ component QueueColumn inherits Rectangle {
         App.np-queue-visible(root.first, root.visible-rows);
     }
 
-    // Plain surface when Liquid Glass is off.
-    if !root.glass: Rectangle {
-        border-radius: 20px;
-        background: #00000052;
-        border-width: 1px;
-        border-color: #ffffff18;
-    }
-
-    // Header: Continue Playing, source context, and Clear upcoming.
+    // Header: Continue Playing and clickable source context.
     Rectangle {
         y: 0px;
         width: parent.width;
         height: root.header-h;
         Text {
-            x: 20px;
-            y: App.np-context != "" ? 13px : 16px;
-            width: max(0px, parent.width - 108px);
+            x: 8px;
+            y: 0px;
+            width: max(0px, parent.width - 16px);
             text: "Continue Playing";
             color: white;
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 700;
             overflow: elide;
         }
         if App.np-context != "": Rectangle {
-            x: 20px;
-            y: 37px;
-            width: max(0px, parent.width - 108px);
+            x: 8px;
+            y: 25px;
+            width: max(0px, parent.width - 16px);
             height: 20px;
             ctx-ta := TouchArea {
                 enabled: root.interactive;
@@ -3198,41 +3188,17 @@ component QueueColumn inherits Rectangle {
                 height: 100%;
                 text: "From " + App.np-context;
                 color: ctx-ta.has-hover ? #ffffffd9 : #ffffff94;
-                font-size: 12.5px;
+                font-size: 13px;
                 overflow: elide;
                 vertical-alignment: center;
             }
         }
-        if App.np-queue.length > 0: Rectangle {
-            x: parent.width - self.width - 16px;
-            y: (root.header-h - self.height) / 2;
-            width: clear-label.preferred-width + 24px;
-            height: 28px;
-            border-radius: 14px;
-            background: root.glass && root.reveal >= 1
-                ? (clear-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff33 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
-                : clear-ta.has-hover ? #ffffff2e : #ffffff18;
-            accessible-role: button;
-            accessible-label: "Clear queue";
-            accessible-action-default => { App.clear-queue(); }
-            clear-ta := TouchArea {
-                enabled: root.interactive;
-                mouse-cursor: pointer;
-                clicked => { App.clear-queue(); }
-            }
-            clear-label := Text {
-                text: "Clear";
-                color: clear-ta.has-hover ? #ff9c9c : #ff7a7a;
-                font-size: 12.5px;
-                font-weight: 600;
-            }
-        }
         Rectangle {
-            x: 20px;
+            x: 8px;
             y: parent.height - 1px;
-            width: max(0px, parent.width - 40px);
+            width: max(0px, parent.width - 16px);
             height: 1px;
-            background: #ffffff1a;
+            background: #ffffff1c;
         }
     }
 
@@ -3245,9 +3211,9 @@ component QueueColumn inherits Rectangle {
         interactive: root.interactive && App.np-queue.length > 0;
 
         for i in root.visible-rows: Rectangle {
-            x: 8px;
+            x: 0px;
             y: root.list-pad + (root.first + i) * root.row-h;
-            width: max(0px, root.width - 16px);
+            width: max(0px, root.width - 8px);
             height: root.row-h;
             background: transparent;
             visible: root.first + i < App.np-queue.length;
@@ -3263,11 +3229,11 @@ component QueueColumn inherits Rectangle {
     }
 
     if list.content-height > list.height && list.height > 20px: Rectangle {
-        property <length> track-h: list.height - 16px;
+        property <length> track-h: list.height - 12px;
         property <length> thumb-h: clamp(self.track-h * (list.height / max(1px, list.content-height)), 28px, self.track-h);
         property <float> frac: clamp(-list.content-y / max(1px, list.content-height - list.height), 0, 1);
-        x: parent.width - 7px;
-        y: root.header-h + 8px + (self.track-h - self.thumb-h) * self.frac;
+        x: parent.width - 4px;
+        y: root.header-h + 6px + (self.track-h - self.thumb-h) * self.frac;
         width: 3px;
         height: self.thumb-h;
         border-radius: 1.5px;
@@ -3275,9 +3241,9 @@ component QueueColumn inherits Rectangle {
     }
 
     if App.np-queue.length == 0: VerticalLayout {
-        x: 24px;
+        x: 16px;
         y: root.header-h;
-        width: max(0px, parent.width - 48px);
+        width: max(0px, parent.width - 32px);
         height: max(0px, parent.height - root.header-h);
         alignment: center;
         spacing: 8px;
@@ -3492,15 +3458,18 @@ export component NowPlayingView inherits Rectangle {
     property <length> yaw: root.pu * 8px;
     property <length> pitch: root.pv * 8px;
 
-    // Queue panel frame (shared by the sibling glass card and QueueColumn).
-    property <length> queue-w: root.narrow ? max(0px, root.width - 2 * root.pad) : root.column-w;
-    property <length> queue-h: root.narrow
-        ? max(0px, root.narrow-meta-on - 12px - (root.top + 4px))
-        : max(0px, root.height - App.player-height - 64px - (root.top + 8px));
-    property <length> queue-x: (root.narrow ? root.pad : root.pair-x + root.side-size + root.gap)
-        + (root.narrow ? 0px : 36px * (1 - root.que));
-    property <length> queue-y: (root.narrow ? root.top + 4px : root.top + 8px)
-        + (root.narrow ? 24px * (1 - root.que) : 0px);
+    // Right-column clip box and Queue vertical placement.
+    // Anchoring `col-x` to the artwork's live right edge (`dest-x + art + gap`)
+    // and delaying `panel-fade` until the artwork starts clearing keeps both
+    // Lyrics and Queue strictly outside the artwork on every animation frame.
+    property <float> panel-t: clamp((root.panel - (root.narrow ? 0.35 : 0.2)) / (root.narrow ? 0.65 : 0.8), 0, 1);
+    property <float> panel-fade: root.panel-t * root.panel-t * (3 - 2 * root.panel-t);
+    property <length> col-x: root.narrow ? root.pad : root.dest-x + root.art + root.gap;
+    property <length> queue-y: root.narrow ? root.top + 12px : max(root.top + 16px, root.on-y);
+    property <length> queue-bottom: root.narrow
+        ? root.narrow-meta-on - 12px
+        : min(root.height - App.player-height - 64px, root.on-y + root.on-size + root.meta-h);
+    property <length> queue-h: max(0px, root.queue-bottom - root.queue-y);
 
     Rectangle {
         x: root.slot-x + (root.dest-x - root.slot-x) * root.expansion;
@@ -3547,37 +3516,34 @@ export component NowPlayingView inherits Rectangle {
         reveal: root.expansion;
     }
 
-    if root.presenting && root.lyr > 0: LyricsColumn {
-        x: root.narrow ? root.pad : root.pair-x + root.side-size + root.gap + (root.que > 0 ? -24px : 48px) * (1 - root.lyr);
-        y: root.top;
-        width: root.narrow ? root.width - 2 * root.pad : root.column-w;
-        height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
-        font-size: clamp(self.width * 0.045, 18px, 30px);
-        reveal: root.expansion * root.lyr;
-        glass: root.glass;
-        interactive: App.show-now-playing && root.lyrics-on;
-    }
+    // Clipped right column so sliding between Lyrics and Queue (or opening
+    // from centred art) can never overlap the artwork.
+    if root.presenting && (root.lyr > 0 || root.que > 0): Rectangle {
+        x: root.col-x;
+        y: 0px;
+        width: root.narrow ? max(0px, root.width - 2 * root.pad) : max(0px, root.width - root.col-x);
+        height: root.height;
+        clip: true;
 
-    // Floating Liquid Glass card behind QueueColumn: leaf rectangle so
-    // `opacity` feeds glass::draw directly with no offscreen save_layer.
-    if root.glass && root.presenting && root.que > 0: Rectangle {
-        x: root.queue-x;
-        y: root.queue-y;
-        width: root.queue-w;
-        height: root.queue-h;
-        border-radius: 20px;
-        opacity: root.expansion * root.que;
-        background: @conic-gradient(#474c5301 0deg, #ffffff14 360deg);
-    }
+        if root.lyr > 0: LyricsColumn {
+            x: (root.que > 0 ? -36px : 40px) * (1 - root.lyr);
+            y: root.top;
+            width: root.narrow ? parent.width : root.column-w;
+            height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
+            font-size: clamp(self.width * 0.045, 18px, 30px);
+            reveal: root.expansion * root.panel-fade * root.lyr;
+            glass: root.glass;
+            interactive: App.show-now-playing && root.lyrics-on;
+        }
 
-    if root.presenting && root.que > 0: QueueColumn {
-        x: root.queue-x;
-        y: root.queue-y;
-        width: root.queue-w;
-        height: root.queue-h;
-        reveal: root.expansion * root.que;
-        glass: root.glass;
-        interactive: App.show-now-playing && root.queue-on;
+        if root.que > 0: QueueColumn {
+            x: 44px * (1 - root.que);
+            y: root.queue-y;
+            width: root.narrow ? parent.width : root.column-w;
+            height: root.queue-h;
+            reveal: root.expansion * root.panel-fade * root.que;
+            interactive: App.show-now-playing && root.queue-on;
+        }
     }
 
     // [ Lyrics | Queue ] | Search, Debug, Profile, using the same tools as the
