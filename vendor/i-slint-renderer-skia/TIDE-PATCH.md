@@ -78,16 +78,20 @@ release and re-apply them, or drop the patch if upstream has fixed them.
    - Unit tests in `tilt.rs` (`cargo test -p i-slint-renderer-skia tilt`);
      the app's `tests/now_playing_render.rs` draws the tilted art.
 8. `fade.rs` (new), `lib.rs` (`mod fade`) and `itemrenderer.rs`
-   (`draw_rectangle`, `restore_state`) – a rectangle can softly fade its
-   children along its top and bottom edges instead of hard-clipping them (Now
-   Playing's Queue list). Slint 1.18.1 has no alpha-mask layer item, so the
-   rectangle asks with a marker brush as its `background`:
-   `@conic-gradient(at <top> <bottom>, #46414401 0deg, #46414401 360deg)`.
-   The gradient's centre carries the top and bottom fade band heights in
-   logical lengths. When both bands are zero, nothing is allocated; otherwise
-   children draw into a `save_layer` bounded to the rectangle itself and
-   `restore_state` applies a smoothstep vertical linear gradient with
-   `BlendMode::DstIn` before compositing. Other renderers draw the all but
-   transparent gradient and clip children normally.
+   (`draw_rectangle`, `draw_border_rectangle`, `draw_text`, `restore_state`) –
+   a rectangle can softly fade its children along its vertical or horizontal
+   edges instead of hard-clipping them (Now Playing's Lyrics/Queue lists
+   vertically and their sliding column container horizontally). Slint 1.18.1
+   has no alpha-mask layer item, so the rectangle asks with a marker brush as
+   its `background`:
+   - `@conic-gradient(at <top> <bottom>, #46414401 0deg, #46414401 360deg)` (vertical)
+   - `@conic-gradient(at <left> <right>, #46414801 0deg, #46414801 360deg)` (horizontal)
+   The gradient's centre carries the two fade band sizes in logical lengths.
+   When both bands are zero, nothing is allocated; otherwise children draw into
+   a `save_layer` bounded to the rectangle itself and `restore_state` applies a
+   smoothstep linear gradient with `BlendMode::DstIn` before compositing. Text
+   drawn inside an active fade mask skips integer-pixel origin snapping so
+   subpixel-positioned glyphs glide smoothly at 120 Hz. Other renderers draw
+   the all but transparent gradient and clip children normally.
    - Unit tests in `fade.rs` (`cargo test -p i-slint-renderer-skia fade`);
-     the app's `tests/now_playing_render.rs` verifies scrolled queue edge fades.
+     the app's `tests/now_playing_render.rs` verifies scrolled queue and side edge fades.

@@ -550,9 +550,11 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         // what is behind it through glass (glass.rs).
         let background = rect.background();
         // TIDE patch: the fade marker draws nothing and masks its children's
-        // top and bottom edges smoothly into transparency (fade.rs).
-        if let Some((top, bottom)) = crate::fade::bands(&background, self.scale_factor.get()) {
-            if let Some(active) = crate::fade::begin(self.canvas, to_skia_rect(&geometry), top, bottom) {
+        // vertical or horizontal edges smoothly into transparency (fade.rs).
+        if let Some((axis, start, end)) = crate::fade::spec(&background, self.scale_factor.get()) {
+            if let Some(active) =
+                crate::fade::begin(self.canvas, to_skia_rect(&geometry), axis, start, end)
+            {
                 self.fade_masks.push((self.state_stack.len(), active));
             }
             return;
@@ -602,12 +604,12 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         // TIDE patch: the glass marker as a rounded rectangle's background.
         let background = rect.background();
         // TIDE patch: the fade marker (fade.rs), as in `draw_rectangle`.
-        if let Some((top, bottom)) = crate::fade::bands(&background, self.scale_factor.get()) {
+        if let Some((axis, start, end)) = crate::fade::spec(&background, self.scale_factor.get()) {
             let rect = skia_safe::Rect::from_wh(
                 layout.brush_size.width_length().get(),
                 layout.brush_size.height_length().get(),
             );
-            if let Some(active) = crate::fade::begin(self.canvas, rect, top, bottom) {
+            if let Some(active) = crate::fade::begin(self.canvas, rect, axis, start, end) {
                 self.fade_masks.push((self.state_stack.len(), active));
             }
             return;
@@ -692,7 +694,10 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        let restore = self.save_canvas_and_pixel_align_origin();
+        // TIDE patch: skip integer-pixel origin snapping inside fade-masked
+        // scrolling lists so rolling lyrics and scrolled rows glide smoothly
+        // with subpixel glyph positioning at 120 Hz.
+        let restore = self.fade_masks.is_empty() && self.save_canvas_and_pixel_align_origin();
         sharedparley::draw_text(self, text, Some(self_rc), size, Some(self.text_layout_cache));
         if restore {
             self.canvas.restore();
