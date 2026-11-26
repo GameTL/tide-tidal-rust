@@ -168,13 +168,6 @@ h2 {
   background: #e6e6e6;
 }
 
-.apple {
-  width: 15px;
-  height: 15px;
-  fill: currentColor;
-  margin-top: -2px;
-}
-
 .text-link {
   display: inline-flex;
   align-items: center;
@@ -242,7 +235,6 @@ h2 {
 .hero-inner > h1 { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.15s both; }
 .hero-inner > .hero-sub { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.25s both; }
 .hero-inner > .hero-ctas,
-.hero-inner > .hero-install,
 .hero-inner > .hero-meta { animation: rise-in 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) 0.35s both; }
 
 @keyframes logo-in {
@@ -777,44 +769,87 @@ h2 {
 
 .platform {
   padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .platform p {
-  margin: 10px 0 0;
+  margin: 0;
   font-size: 14px;
+}
+
+.platform p.small,
+.dl-foot {
+  font-size: 13px;
+}
+
+.platform .install-cmd {
+  width: 100%;
+}
+
+.dl-foot {
+  margin: 20px 0 0;
+  text-wrap: pretty;
+}
+
+.text-link.inline {
+  display: inline;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* the one download button (DownloadButton.astro) */
+
+.dl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.dl-os {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+}
+
+.dl-os[hidden] {
+  display: none;
+}
+
+.dl-extra {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 560px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dl-extra .install-cmd {
+  width: 100%;
+}
+
+.os-icon {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  margin-top: -2px;
+}
+
+.platform code {
+  overflow-wrap: anywhere;
 }
 
 .platform.dim .platform-head > span:first-child {
   color: var(--muted);
-}
-
-.releases {
-  margin-top: 12px;
-}
-
-.release-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 20px;
-  font-size: 14px;
-}
-
-.release-row + .release-row {
-  border-top: 1px solid var(--line);
-}
-
-.release-ver {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.release-ver code {
-  font-size: 14px;
-  color: var(--text);
 }
 
 /* install */
@@ -862,71 +897,6 @@ h2 {
 
 .install-copy:hover {
   background: var(--tile-2);
-}
-
-.hero-install {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  margin: 28px auto 0;
-  max-width: 100%;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.install-ways {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-@media (max-width: 720px) {
-  .install-ways { grid-template-columns: 1fr; }
-}
-
-.install-way {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 14px;
-  padding: 20px;
-}
-
-.install-way p {
-  margin: 0;
-  font-size: 14px;
-}
-
-.install-way .install-cmd {
-  width: 100%;
-}
-
-.install-way p.small {
-  font-size: 13px;
-}
-
-.steps {
-  margin: -4px 0 0;
-  padding-left: 20px;
-  display: grid;
-  gap: 6px;
-  font-size: 13.5px;
-  color: #d4d4d4;
-}
-
-.why-unsigned {
-  margin: 0 0 28px;
-  max-width: 680px;
-  font-size: 14px;
-  color: var(--muted);
-  text-wrap: pretty;
-}
-
-.why-unsigned strong {
-  color: var(--text);
 }
 
 /* closing CTA */
