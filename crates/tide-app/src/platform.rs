@@ -264,7 +264,10 @@ fn drawing_stopped() {
     IDLE_TRIM.with(|t| {
         t.start(
             slint::TimerMode::SingleShot,
-            std::time::Duration::from_secs(1),
+            // Wait 5 s before dropping the third Metal drawable so pauses
+            // between synced lyric lines or trackpad scrolls do not reconfigure
+            // the swapchain on the first frame of every roll.
+            std::time::Duration::from_secs(5),
             || {
                 if !LEAN.load(Relaxed) || !THIRD_DRAWABLE.swap(false, Relaxed) {
                     return;
@@ -1584,10 +1587,11 @@ fn scroll_phase(winit_phase: slint::winit_030::winit::event::TouchPhase) -> Scro
     }
 }
 
-/// Turns two-finger horizontal scrolling into back / forward swipes, the way
-/// AppKit's own page swiping behaves: the gesture is claimed only when it
-/// starts out sideways, it then follows the fingers until they lift, and the
-/// coast that follows is swallowed.
+/// Turns two-finger horizontal scrolling into back / forward (or Now Playing
+/// Lyrics ↔ Queue) swipes, the way AppKit's own page swiping behaves: once a
+/// gesture starts vertically it locks to vertical scrolling so diagonal noise
+/// never hijacks it; a clearly sideways gesture follows the fingers 1:1 until
+/// they lift, and its momentum coast is swallowed.
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 enum SwipeTracker {
@@ -1595,7 +1599,9 @@ enum SwipeTracker {
     Idle,
     /// Fingers are down; not yet clear which way the gesture goes.
     Deciding { dx: f32, dy: f32 },
-    /// This gesture drives a page transition.
+    /// Locked to vertical scrolling for the rest of this gesture.
+    Vertical,
+    /// This gesture drives a live horizontal swipe.
     Swiping,
     /// The swipe is over; its momentum must not scroll the page.
     Coasting,
@@ -1603,8 +1609,10 @@ enum SwipeTracker {
 
 #[cfg(target_os = "macos")]
 impl SwipeTracker {
-    /// Movement before the gesture's direction is judged, in logical pixels.
-    const SLOP: f32 = 8.0;
+    /// Horizontal travel required before claiming a swipe, in logical pixels.
+    const H_SLOP: f32 = 10.0;
+    /// Vertical travel required to lock out horizontal swiping for this gesture.
+    const V_LOCK: f32 = 4.0;
 
     /// True when the event belongs to a swipe and must not scroll anything.
     fn handle(&mut self, phase: ScrollPhase, dx: f32, dy: f32) -> bool {
@@ -1613,6 +1621,7 @@ impl SwipeTracker {
         match phase {
             ScrollPhase::Began => {
                 *self = Self::Deciding { dx: 0.0, dy: 0.0 };
+                with_ui(|ui| ui.set_np_scroll_touching(true));
                 false
             }
             ScrollPhase::Changed => match self {
@@ -1623,32 +1632,44 @@ impl SwipeTracker {
                     *sum_x += dx;
                     *sum_y += dy;
                     let (x, y) = (*sum_x, *sum_y);
-                    if x.abs() + y.abs() < Self::SLOP {
+                    // Vertical intent locks immediately so trackpad scrolling
+                    // never stalls or gets stolen by slight sideways drift.
+                    if y.abs() >= Self::V_LOCK && y.abs() >= x.abs() {
+                        *self = Self::Vertical;
                         return false;
                     }
-                    // Mostly sideways: inside Now Playing this switches between
-                    // Lyrics and Queue; elsewhere it steps through page history
+                    // Clear horizontal intent: inside Now Playing this tracks
+                    // Lyrics ↔ Queue 1:1; elsewhere it steps through history
                     // when macOS "Swipe between pages" is enabled.
-                    let sideways = x.abs() > 2.0 * y.abs();
-                    if sideways
-                        && with_ui(|ui| ui.swipe_begin(x > 0.0, swipe_between_pages()))
+                    let sideways = x.abs() >= Self::H_SLOP && x.abs() > 2.5 * y.abs();
+                    if sideways {
+                        if with_ui(|ui| ui.swipe_begin(x > 0.0, swipe_between_pages()))
                             == Some(true)
-                    {
-                        with_ui(|ui| ui.swipe_move(x));
-                        *self = Self::Swiping;
-                        true
-                    } else {
-                        *self = Self::Idle;
-                        false
+                        {
+                            with_ui(|ui| {
+                                ui.set_np_scroll_touching(false);
+                                ui.swipe_move(x);
+                            });
+                            *self = Self::Swiping;
+                            return true;
+                        }
+                        *self = Self::Vertical;
+                        return false;
                     }
+                    // While still deciding on tiny movement (< H_SLOP) with
+                    // mostly horizontal motion, swallow tiny jitter so it does
+                    // not nudge the vertical list before swipe locks.
+                    x.abs() > y.abs() && y.abs() < Self::V_LOCK
                 }
                 Self::Swiping => {
                     with_ui(|ui| ui.swipe_move(dx));
                     true
                 }
+                Self::Vertical => false,
                 _ => false,
             },
             ScrollPhase::Ended(cancelled) => {
+                with_ui(|ui| ui.set_np_scroll_touching(false));
                 let swiping = matches!(self, Self::Swiping);
                 if swiping {
                     with_ui(|ui| ui.swipe_end(cancelled));
