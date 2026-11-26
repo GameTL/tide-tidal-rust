@@ -889,6 +889,7 @@ impl Ui {
             artist: card.subtitle.to_string(),
             file_path: path,
             duration: Duration::from_secs(app.get_duration_secs().max(0) as u64),
+            loudness: None,
         };
         let start = Duration::from_secs_f64((at - offset).max(0.0));
         self.spawn(move |ctx| async move {

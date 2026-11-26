@@ -1,7 +1,7 @@
 //! Signal path: what happens to the audio between the file and the output
 //! device, and whether the result is bit-perfect.
 
-use tide_audio::{FormatInfo, OutputInfo, OutputKind};
+use tide_audio::{FormatInfo, Loudness, Normalization, OutputInfo, OutputKind, TARGET_LUFS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Quality {
@@ -56,6 +56,15 @@ pub struct SignalPath {
     pub note: String,
 }
 
+/// Volume normalisation and crossfade, as the player runs them.
+pub struct Leveling {
+    pub normalization: Normalization,
+    /// The audible track's loudness measurements.
+    pub loudness: Option<Loudness>,
+    /// 0 when tracks follow gaplessly.
+    pub crossfade_secs: u32,
+}
+
 pub fn khz(rate: u32) -> String {
     format!("{} kHz", rate as f32 / 1000.0)
 }
@@ -72,6 +81,7 @@ pub fn output_format(output: &OutputInfo) -> String {
 /// `volume` is TIDE's own (software) volume, 0.0..=1.0. `dsp` describes the
 /// equalisers in the path, when any is changing the samples. `upsampling` is
 /// the multiple the listener's upsampler (DSP page) raises this track by.
+#[allow(clippy::too_many_arguments)]
 pub fn signal_path(
     format: FormatInfo,
     output: &OutputInfo,
@@ -80,6 +90,7 @@ pub fn signal_path(
     released: bool,
     dsp: Option<&str>,
     upsampling: Option<u32>,
+    leveling: &Leveling,
 ) -> SignalPath {
     let lossy_source = format.bits_per_sample == 0;
     let upsampling = upsampling.filter(|_| output.sample_rate > format.sample_rate);
@@ -135,6 +146,39 @@ pub fn signal_path(
                 khz(output.sample_rate)
             ),
             quality: Quality::Enhanced,
+        });
+    }
+    // The decoder levels each track, then blends it into the next.
+    let album = leveling.normalization == Normalization::Album;
+    let normalized = leveling.normalization != Normalization::Off;
+    if normalized {
+        stages.push(match leveling.loudness {
+            Some(loudness) => Stage {
+                kind: "process",
+                title: "Volume normalisation".into(),
+                detail: format!(
+                    "{} {:.1} LUFS · {:+.1} dB",
+                    if album { "Album" } else { "Track" },
+                    loudness.lufs(album),
+                    loudness.gain_db(album)
+                ),
+                quality: Quality::High,
+            },
+            None => Stage {
+                kind: "process",
+                title: "Volume normalisation".into(),
+                detail: "No loudness data · unchanged".into(),
+                quality: Quality::Lossless,
+            },
+        });
+    }
+    let crossfade = leveling.crossfade_secs > 0;
+    if crossfade {
+        stages.push(Stage {
+            kind: "process",
+            title: "Crossfade".into(),
+            detail: format!("{} s into the next track", leveling.crossfade_secs),
+            quality: Quality::High,
         });
     }
     if let Some(detail) = dsp {
@@ -234,6 +278,13 @@ pub fn signal_path(
             format.bits_per_sample,
             khz(output.sample_rate)
         )
+    } else if normalized && leveling.loudness.is_some() {
+        format!(
+            "Volume normalisation brings every {} to {TARGET_LUFS} LUFS, so the samples are scaled and the output is not bit-perfect.",
+            if album { "album" } else { "track" }
+        )
+    } else if crossfade {
+        "Crossfade blends the end of each track into the next, so the output is not bit-perfect where tracks meet.".to_string()
     } else if attenuated {
         "Volume below 100% changes the samples. Set TIDE to 100% and use the device's own volume for bit-perfect output.".to_string()
     } else if quality == Quality::High {
@@ -251,6 +302,74 @@ pub fn signal_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The path without normalisation or crossfade.
+    fn signal_path(
+        format: FormatInfo,
+        output: &OutputInfo,
+        volume: f32,
+        rate_matching: bool,
+        released: bool,
+        dsp: Option<&str>,
+        upsampling: Option<u32>,
+    ) -> SignalPath {
+        super::signal_path(
+            format,
+            output,
+            volume,
+            rate_matching,
+            released,
+            dsp,
+            upsampling,
+            &Leveling {
+                normalization: Normalization::Off,
+                loudness: None,
+                crossfade_secs: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn normalisation_and_crossfade_show_as_stages_with_the_loudness() {
+        let loudness = Loudness {
+            track_gain_db: -10.0,
+            track_peak: 0.99,
+            album_gain_db: -9.0,
+            album_peak: 0.99,
+        };
+        let path = |normalization, loudness, crossfade_secs| {
+            super::signal_path(
+                HIRES,
+                &out(OutputKind::Usb, 96_000),
+                1.0,
+                true,
+                false,
+                None,
+                None,
+                &Leveling {
+                    normalization,
+                    loudness,
+                    crossfade_secs,
+                },
+            )
+        };
+        let track = path(Normalization::Track, Some(loudness), 0);
+        assert_eq!(track.quality, Quality::High);
+        assert_eq!(track.stages[1].title, "Volume normalisation");
+        assert_eq!(track.stages[1].detail, "Track -8.0 LUFS · -6.0 dB");
+        assert!(track.note.contains("every track to -14 LUFS"));
+        let album = path(Normalization::Album, Some(loudness), 6);
+        assert_eq!(album.stages[1].detail, "Album -9.0 LUFS · -5.0 dB");
+        assert_eq!(album.stages[2].title, "Crossfade");
+        assert_eq!(album.stages[2].detail, "6 s into the next track");
+        // No measurements: nothing is scaled, so the path stays bit-perfect.
+        let unmeasured = path(Normalization::Track, None, 0);
+        assert_eq!(unmeasured.quality, Quality::HiRes);
+        assert_eq!(unmeasured.stages[1].detail, "No loudness data · unchanged");
+        let fading = path(Normalization::Off, None, 3);
+        assert_eq!(fading.quality, Quality::High);
+        assert!(fading.note.starts_with("Crossfade blends"));
+    }
 
     fn out(kind: OutputKind, rate: u32) -> OutputInfo {
         OutputInfo {

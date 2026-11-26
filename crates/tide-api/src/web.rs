@@ -196,6 +196,9 @@ pub struct StreamInfo {
     pub quality: String,
     pub bit_depth: u32,
     pub sample_rate: u32,
+    /// ReplayGain (dB) and peak amplitude of the track and of its album:
+    /// `[track gain, track peak, album gain, album peak]`, when TIDAL measured them.
+    pub replay_gain: Option<[f32; 4]>,
 }
 
 /// An album's animated cover: a short silent loop, square (80, 160, 320, 640, 1280).
@@ -1734,15 +1737,36 @@ impl ApiHandle {
                     .get("sampleRate")
                     .and_then(Value::as_u64)
                     .unwrap_or(44_100) as u32,
+                replay_gain: replay_gain(&v),
             });
         }
         Err(last_err)
     }
 }
 
+fn replay_gain(v: &Value) -> Option<[f32; 4]> {
+    let f = |key| v.get(key).and_then(Value::as_f64).map(|x| x as f32);
+    Some([
+        f("trackReplayGain")?,
+        f("trackPeakAmplitude")?,
+        f("albumReplayGain").unwrap_or(0.0),
+        f("albumPeakAmplitude").unwrap_or(0.0),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_info_carries_replay_gain() {
+        let v = serde_json::json!({
+            "trackReplayGain": -9.5, "trackPeakAmplitude": 0.98,
+            "albumReplayGain": -8.25, "albumPeakAmplitude": 1.0,
+        });
+        assert_eq!(replay_gain(&v), Some([-9.5, 0.98, -8.25, 1.0]));
+        assert_eq!(replay_gain(&serde_json::json!({})), None);
+    }
 
     #[test]
     fn iso_dates_become_comparable_seconds() {

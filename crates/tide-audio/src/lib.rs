@@ -4,6 +4,8 @@
 //! device rate. Track boundaries are marked by sample index so that the output
 //! callback switches "current track" exactly when the first sample of the next
 //! track is played, which is what makes gapless transitions sample-accurate.
+//! With crossfade on, the decoder holds back the last seconds of a track and
+//! blends them with the opening of the next before they enter the queue.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -96,6 +98,91 @@ pub struct TrackQueueItem {
     pub artist: String,
     pub file_path: PathBuf,
     pub duration: Duration,
+    /// TIDAL's loudness measurements, when known.
+    pub loudness: Option<Loudness>,
+}
+
+/// Loudness every track is brought to when normalisation is on (TIDAL's own level).
+pub const TARGET_LUFS: f32 = -14.0;
+/// TIDAL's ReplayGain values are relative to −18 LUFS (ReplayGain 2.0): a
+/// typical loud master at −8 LUFS comes with about −10 dB.
+const REFERENCE_LUFS: f32 = -18.0;
+
+/// A track's ReplayGain (dB) and peak amplitude (1.0 = full scale), and its album's.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Loudness {
+    pub track_gain_db: f32,
+    pub track_peak: f32,
+    pub album_gain_db: f32,
+    pub album_peak: f32,
+}
+
+impl Loudness {
+    /// Gain and peak of the album, or of the track (also when the album's are unknown).
+    fn pick(&self, album: bool) -> (f32, f32) {
+        if album && self.album_peak > 0.0 {
+            (self.album_gain_db, self.album_peak)
+        } else {
+            (self.track_gain_db, self.track_peak)
+        }
+    }
+
+    /// Integrated loudness in LUFS.
+    pub fn lufs(&self, album: bool) -> f32 {
+        REFERENCE_LUFS - self.pick(album).0
+    }
+
+    /// Gain in dB that brings it to [`TARGET_LUFS`], held down where the peak would clip.
+    pub fn gain_db(&self, album: bool) -> f32 {
+        let (gain, peak) = self.pick(album);
+        let headroom = if peak > 0.0 {
+            -20.0 * peak.log10()
+        } else {
+            f32::INFINITY
+        };
+        (gain + TARGET_LUFS - REFERENCE_LUFS).min(headroom)
+    }
+}
+
+/// Volume normalisation: off, or following each track's or each album's loudness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Normalization {
+    Off = 0,
+    Track = 1,
+    Album = 2,
+}
+
+impl Normalization {
+    fn from_u32(n: u32) -> Self {
+        match n {
+            1 => Self::Track,
+            2 => Self::Album,
+            _ => Self::Off,
+        }
+    }
+
+    /// Linear gain for a track with these measurements (1.0 when off or unknown).
+    fn gain(self, loudness: Option<Loudness>) -> f32 {
+        match (self, loudness) {
+            (Self::Off, _) | (_, None) => 1.0,
+            (mode, Some(l)) => 10f32.powf(l.gain_db(mode == Self::Album) / 20.0),
+        }
+    }
+}
+
+/// Blend `incoming` into `out`, which holds the outgoing track's last
+/// seconds (interleaved stereo): an equal-power fade, so the level holds
+/// steady through the middle. Missing incoming samples count as silence.
+fn crossfade(out: &mut [f32], incoming: &[f32]) {
+    let frames = out.len() / 2;
+    for (f, pair) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let t = (f as f32 + 0.5) / frames as f32 * std::f32::consts::FRAC_PI_2;
+        let (fade_out, fade_in) = (t.cos(), t.sin());
+        for (c, sample) in pair.iter_mut().enumerate() {
+            let next = incoming.get(f * 2 + c).copied().unwrap_or(0.0);
+            *sample = *sample * fade_out + next * fade_in;
+        }
+    }
 }
 
 /// Source format of the track that is currently audible.
@@ -346,6 +433,12 @@ struct AudioSource {
     /// File the reader has open, and a replacement already tried at the same path.
     identity: Option<(u64, u64)>,
     tried_identity: Option<(u64, u64)>,
+    /// Decoded end of the track held back from the queue, to crossfade into the next.
+    tail: VecDeque<f32>,
+    /// Finished samples (a crossfade, a held-back ending) still to go into the queue.
+    ready: VecDeque<f32>,
+    /// The decoder reached the end of the file.
+    ended: bool,
 }
 
 impl AudioSource {
@@ -409,6 +502,9 @@ impl AudioSource {
             starved: false,
             identity,
             tried_identity: None,
+            tail: VecDeque::new(),
+            ready: VecDeque::new(),
+            ended: false,
         })
     }
 
@@ -672,6 +768,9 @@ impl AudioSource {
     }
 
     fn seek(&mut self, to: Duration) -> Result<(), AudioError> {
+        self.tail.clear();
+        self.ready.clear();
+        self.ended = false;
         if self.growing {
             let complete = self.item.file_path.with_extension("audio");
             let reopen_path = if complete.exists() {
@@ -791,7 +890,47 @@ struct Shared {
     /// change when `eq_version` moves.
     eq: Mutex<Vec<EqProfile>>,
     eq_version: AtomicU64,
+    /// [`Normalization`] as a number.
+    normalize: AtomicU32,
+    /// Seconds each track blends into the next; 0 for off (plain gapless).
+    crossfade_secs: AtomicU32,
     glitches: Glitches,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Shared {
+            buffer: RtMutex::new(Buffer {
+                samples: VecDeque::with_capacity(48_000 * 4),
+                pushed: 0,
+                consumed: 0,
+                switch_at: NONE,
+                end_at: NONE,
+                current: None,
+                upcoming: None,
+            }),
+            source: Mutex::new(None),
+            queue: Mutex::new(VecDeque::new()),
+            playing: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            volume: AtomicU32::new(1000),
+            frames_played: AtomicU64::new(0),
+            serial: AtomicU64::new(0),
+            device_rate: AtomicU32::new(48_000),
+            rate_matching: AtomicBool::new(true),
+            restore_sample_rate: AtomicBool::new(true),
+            upsample: AtomicU32::new(0),
+            depth: AtomicU32::new(0),
+            output: Mutex::new(OutputInfo::default()),
+            original: Mutex::new(None),
+            released: AtomicBool::new(false),
+            eq: Mutex::new(Vec::new()),
+            eq_version: AtomicU64::new(0),
+            normalize: AtomicU32::new(0),
+            crossfade_secs: AtomicU32::new(0),
+            glitches: Glitches::default(),
+        }
+    }
 }
 
 /// What the output callback saw go wrong. Written from the real-time thread
@@ -1246,6 +1385,55 @@ fn settle_depth(shared: &Shared, want: u32, force: bool) {
     output.supported_depths = now.depths;
 }
 
+/// Most samples moved from a source's finished audio into the queue at once.
+const READY_CHUNK: usize = 16_384;
+
+fn scale(samples: &mut [f32], gain: f32) {
+    if gain != 1.0 {
+        samples.iter_mut().for_each(|s| *s *= gain);
+    }
+}
+
+/// `src` has ended with its last seconds held back: open the next queued
+/// track and fade one into the other. Returns the next track, its opening
+/// (blend included) waiting in `ready`. With no next track, the held ending
+/// plays out as it is.
+fn blend_into_next(
+    shared: &Shared,
+    src: &mut AudioSource,
+    device_rate: u32,
+    normalize: Normalization,
+) -> Option<AudioSource> {
+    let item = shared.queue.lock().unwrap().pop_front();
+    let opened = item.and_then(|item| {
+        AudioSource::open(item)
+            .inspect_err(|e| tracing::error!("Failed to open next audio source: {e}"))
+            .ok()
+    });
+    let Some(mut next) = opened else {
+        src.ready.extend(src.tail.drain(..));
+        return None;
+    };
+    let mut tail: Vec<f32> = src.tail.drain(..).collect();
+    let mut incoming = Vec::with_capacity(tail.len() + 16_384);
+    while incoming.len() < tail.len() && !next.ended && !next.starved {
+        next.ended = !next
+            .read_stereo(device_rate, &mut incoming)
+            .unwrap_or(false);
+    }
+    scale(&mut incoming, normalize.gain(next.item.loudness));
+    crossfade(&mut tail, &incoming);
+    let blended = tail.len().min(incoming.len());
+    tracing::info!(
+        title = %next.item.title,
+        secs = tail.len() as f32 / 2.0 / device_rate.max(1) as f32,
+        "Crossfading into the next track"
+    );
+    next.ready.extend(tail);
+    next.ready.extend(&incoming[blended..]);
+    Some(next)
+}
+
 fn decoder_loop(shared: Arc<Shared>) {
     let mut chunk = Vec::with_capacity(16_384);
     let mut glitches = GlitchReporter::new();
@@ -1283,34 +1471,73 @@ fn decoder_loop(shared: Arc<Shared>) {
         }
 
         chunk.clear();
-        let more = match source
-            .as_mut()
-            .expect("checked above")
-            .read_stereo(device_rate, &mut chunk)
-        {
-            Ok(more) => more,
-            Err(e) => {
-                let at = source.as_ref().expect("checked above");
-                tracing::error!(
-                    title = %at.item.title,
-                    position = ?at.position(),
-                    duration = ?at.item.duration,
-                    growing = at.growing,
-                    "Decode error: {e}"
-                );
-                false
+        let normalize = Normalization::from_u32(shared.normalize.load(Ordering::Relaxed));
+        let fade_secs = shared.crossfade_secs.load(Ordering::Relaxed);
+        let src = source.as_mut().expect("checked above");
+        let mut next = None;
+        if !src.ready.is_empty() {
+            // Finished audio goes into the queue at the usual pace: growing
+            // it by seconds at once would reallocate while the output waits.
+            let n = src.ready.len().min(READY_CHUNK);
+            chunk.extend(src.ready.drain(..n));
+        } else if !src.ended {
+            src.ended = match src.read_stereo(device_rate, &mut chunk) {
+                Ok(more) => !more,
+                Err(e) => {
+                    tracing::error!(
+                        title = %src.item.title,
+                        position = ?src.position(),
+                        duration = ?src.item.duration,
+                        growing = src.growing,
+                        "Decode error: {e}"
+                    );
+                    true
+                }
+            };
+            scale(&mut chunk, normalize.gain(src.item.loudness));
+            // Crossfade: the last seconds of the track wait outside the queue
+            // until the next track's opening can be blended into them.
+            let fade = fade_secs as usize * device_rate as usize * 2;
+            let near_end = !src.item.duration.is_zero()
+                && src.position() + Duration::from_secs(u64::from(fade_secs) + 3)
+                    >= src.item.duration;
+            if fade > 0 && !src.growing && (near_end || !src.tail.is_empty()) {
+                src.tail.extend(chunk.drain(..));
+                if !src.ended {
+                    let excess = src.tail.len().saturating_sub(fade);
+                    chunk.extend(src.tail.drain(..excess));
+                }
+            } else if !src.tail.is_empty() {
+                // Crossfade was turned off meanwhile: what was held plays out as it is.
+                src.ready.extend(src.tail.drain(..));
+                src.ready.extend(chunk.drain(..));
             }
-        };
-        let starved = more && chunk.is_empty() && source.as_ref().is_some_and(|s| s.starved);
+            if src.ended && !src.tail.is_empty() {
+                next = blend_into_next(&shared, src, device_rate, normalize);
+            }
+        }
+        let starved = !src.ended && chunk.is_empty() && src.starved;
+        let finished = next.is_none() && src.ended && src.ready.is_empty();
         let mut buf = shared.buffer.lock();
         buf.pushed += chunk.len() as u64;
         buf.samples.extend(chunk.drain(..));
-        if !more && shared.queue.lock().unwrap().is_empty() {
+        if let Some(next) = &next {
+            // The blend, in `next.ready`, is the next track's first audible sound.
+            buf.switch_at = buf.pushed;
+            buf.end_at = NONE;
+            buf.upcoming = Some(Playing {
+                item: next.item.clone(),
+                format: next.format(),
+            });
+        }
+        if finished && shared.queue.lock().unwrap().is_empty() {
             buf.end_at = buf.pushed;
         }
         drop(buf);
-        if !more {
-            // Closing the file is not for the sample-queue lock.
+        // Closing the file is not for the sample-queue lock.
+        if next.is_some() {
+            *source = next;
+        } else if finished {
             *source = None;
         }
         drop(source);
@@ -1323,35 +1550,7 @@ fn decoder_loop(shared: Arc<Shared>) {
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, AudioError> {
-        let shared = Arc::new(Shared {
-            buffer: RtMutex::new(Buffer {
-                samples: VecDeque::with_capacity(48_000 * 4),
-                pushed: 0,
-                consumed: 0,
-                switch_at: NONE,
-                end_at: NONE,
-                current: None,
-                upcoming: None,
-            }),
-            source: Mutex::new(None),
-            queue: Mutex::new(VecDeque::new()),
-            playing: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            volume: AtomicU32::new(1000),
-            frames_played: AtomicU64::new(0),
-            serial: AtomicU64::new(0),
-            device_rate: AtomicU32::new(48_000),
-            rate_matching: AtomicBool::new(true),
-            restore_sample_rate: AtomicBool::new(true),
-            upsample: AtomicU32::new(0),
-            depth: AtomicU32::new(0),
-            output: Mutex::new(OutputInfo::default()),
-            original: Mutex::new(None),
-            released: AtomicBool::new(false),
-            eq: Mutex::new(Vec::new()),
-            eq_version: AtomicU64::new(0),
-            glitches: Glitches::default(),
-        });
+        let shared = Arc::new(Shared::new());
 
         // No output device (a headless box, a VM, sound not set up yet) is not
         // fatal: TIDE starts silent and opens one when a track plays.
@@ -1967,6 +2166,31 @@ impl AudioPlayer {
             .any(EqProfile::alters_audio)
     }
 
+    /// Level tracks by their loudness from here on (heard within the ~1.5 s already decoded).
+    pub fn set_normalization(&self, mode: Normalization) {
+        self.shared.normalize.store(mode as u32, Ordering::Relaxed);
+    }
+
+    pub fn normalization(&self) -> Normalization {
+        Normalization::from_u32(self.shared.normalize.load(Ordering::Relaxed))
+    }
+
+    /// Blend each track's last `secs` seconds into the next one's opening; 0 for gapless.
+    pub fn set_crossfade(&self, secs: u32) {
+        self.shared
+            .crossfade_secs
+            .store(secs.min(12), Ordering::Relaxed);
+    }
+
+    pub fn crossfade(&self) -> u32 {
+        self.shared.crossfade_secs.load(Ordering::Relaxed)
+    }
+
+    /// Loudness measurements of the track that is audible right now.
+    pub fn loudness(&self) -> Option<Loudness> {
+        self.shared.buffer.lock().current.as_ref()?.item.loudness
+    }
+
     pub fn set_volume(&self, volume: f32) {
         self.shared
             .volume
@@ -2022,7 +2246,147 @@ mod tests {
             artist: "test".into(),
             file_path: path.to_path_buf(),
             duration: Duration::from_secs_f32(secs),
+            loudness: None,
         }
+    }
+
+    #[test]
+    fn loudness_comes_from_replay_gain_and_never_clips() {
+        // A loud master: −8 LUFS, peaking just under full scale.
+        let loud = Loudness {
+            track_gain_db: -10.0,
+            track_peak: 0.99,
+            album_gain_db: -9.0,
+            album_peak: 0.99,
+        };
+        assert_eq!(loud.lufs(false), -8.0);
+        assert_eq!(loud.lufs(true), -9.0);
+        assert_eq!(loud.gain_db(false), -6.0);
+        assert_eq!(loud.gain_db(true), -5.0);
+        let linear = Normalization::Track.gain(Some(loud));
+        assert!((linear - 0.501).abs() < 0.001, "{linear}");
+        // A quiet one would want +6 dB, but its peak leaves room for only ~+3.5 dB.
+        let quiet = Loudness {
+            track_gain_db: 2.0,
+            track_peak: 0.67,
+            ..Default::default()
+        };
+        assert!((quiet.gain_db(false) - 3.48).abs() < 0.01);
+        assert!((Normalization::Track.gain(Some(quiet)) * 0.67 - 1.0).abs() < 0.001);
+        // Unknown album values fall back to the track's; off or unmeasured leaves it alone.
+        assert_eq!(quiet.gain_db(true), quiet.gain_db(false));
+        assert_eq!(Normalization::Off.gain(Some(loud)), 1.0);
+        assert_eq!(Normalization::Album.gain(None), 1.0);
+    }
+
+    #[test]
+    fn crossfade_hands_the_level_from_one_track_to_the_other() {
+        let frames = 1000;
+        let mut out = vec![1.0f32; frames * 2];
+        let incoming = vec![0.5f32; frames * 2];
+        crossfade(&mut out, &incoming);
+        // Starts as the outgoing track, ends as the incoming one.
+        assert!((out[0] - 1.0).abs() < 0.01 && (out[1] - 1.0).abs() < 0.01);
+        assert!((out[frames * 2 - 1] - 0.5).abs() < 0.01);
+        // Equal power: the gains' squares add up to one all the way through.
+        let mid = frames; // frame frames/2, left channel
+        let t = (frames as f32 / 2.0 + 0.5) / frames as f32 * std::f32::consts::FRAC_PI_2;
+        assert!((out[mid] - (t.cos() + 0.5 * t.sin())).abs() < 1e-5);
+        // A next track shorter than the fade: the rest fades out over silence.
+        let mut out = vec![1.0f32; 8];
+        crossfade(&mut out, &[1.0, 1.0]);
+        assert!(out[6] < 0.25 && out[7] < 0.25);
+    }
+
+    /// Run the decoder thread over `items`, consuming as fast as it queues.
+    /// Returns every queued sample and where each track became audible.
+    fn decode_all(shared: Arc<Shared>, items: Vec<TrackQueueItem>) -> (Vec<f32>, Vec<u64>) {
+        shared.device_rate.store(44_100, Ordering::Relaxed);
+        shared.queue.lock().unwrap().extend(items);
+        let decoder = Arc::clone(&shared);
+        std::thread::spawn(move || decoder_loop(decoder));
+        let (mut all, mut switches) = (Vec::new(), Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let mut buf = shared.buffer.lock();
+            let n = buf.samples.len();
+            all.extend(buf.samples.drain(..));
+            buf.consumed += n as u64;
+            if buf.consumed >= buf.switch_at {
+                switches.push(buf.switch_at);
+                buf.switch_at = NONE;
+            }
+            if buf.consumed >= buf.end_at {
+                return (all, switches);
+            }
+            drop(buf);
+            assert!(Instant::now() < deadline, "the decoder never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn crossfade_overlaps_the_tracks_and_switches_where_the_blend_starts() {
+        let a = std::env::temp_dir().join("tidal_audio_xfade_a.wav");
+        let b = std::env::temp_dir().join("tidal_audio_xfade_b.wav");
+        write_wav(&a, 44_100, 6.0);
+        write_wav(&b, 44_100, 5.0);
+        // Exactly half as loud: the applied gain is the ReplayGain plus 4 dB (−18 to −14 LUFS).
+        let half = Loudness {
+            track_gain_db: 20.0 * 0.5f32.log10() - 4.0,
+            track_peak: 0.25,
+            ..Default::default()
+        };
+        let shared = Arc::new(Shared::new());
+        shared.crossfade_secs.store(2, Ordering::Relaxed);
+        shared
+            .normalize
+            .store(Normalization::Track as u32, Ordering::Relaxed);
+        let (out, switches) = decode_all(
+            shared,
+            vec![
+                item(&a, 6.0),
+                TrackQueueItem {
+                    loudness: Some(half),
+                    ..item(&b, 5.0)
+                },
+            ],
+        );
+        let frames = out.len() as i64 / 2;
+        // 6 s + 5 s with 2 s of them overlapping.
+        assert!((frames - 9 * 44_100).abs() <= 4, "{frames} frames");
+        assert_eq!(switches.len(), 2);
+        assert_eq!(switches[0], 0);
+        assert!(
+            (switches[1] as i64 / 2 - 4 * 44_100).abs() <= 4,
+            "{switches:?}"
+        );
+        // The first track at full level, the second at half (normalised), the blend in between.
+        let peak = |from: f32, to: f32| {
+            out[(from * 88_200.0) as usize..(to * 88_200.0) as usize]
+                .iter()
+                .fold(0f32, |m, s| m.max(s.abs()))
+        };
+        let full = 8000.0 / 32768.0;
+        assert!((peak(1.0, 3.0) - full).abs() < 0.01);
+        assert!((peak(7.0, 9.0) - full / 2.0).abs() < 0.01);
+        assert!(peak(4.9, 5.1) > full / 2.0);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn without_crossfade_tracks_follow_back_to_back() {
+        let a = std::env::temp_dir().join("tidal_audio_gapless_a.wav");
+        write_wav(&a, 44_100, 2.0);
+        let (out, switches) =
+            decode_all(Arc::new(Shared::new()), vec![item(&a, 2.0), item(&a, 2.0)]);
+        assert!((out.len() as i64 / 2 - 4 * 44_100).abs() <= 4);
+        assert!(
+            (switches[1] as i64 / 2 - 2 * 44_100).abs() <= 4,
+            "{switches:?}"
+        );
+        let _ = std::fs::remove_file(&a);
     }
 
     #[test]

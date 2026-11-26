@@ -19,7 +19,7 @@ use tide_api::{
     Section,
     TidalService, TrackItem,
 };
-use tide_audio::{AudioPlayer, TrackQueueItem};
+use tide_audio::{AudioPlayer, Loudness, Normalization, TrackQueueItem};
 use tide_cache::{AudioCache, ImageCache, MetadataCache, PlaybackCursor, SavedPlayback};
 use tide_macos::{MacMediaControls, MediaControlEvent};
 
@@ -64,6 +64,13 @@ pub struct Settings {
     /// Hand the device back its original sample rate on pause and quit.
     #[serde(default = "default_true")]
     pub restore_sample_rate: bool,
+    /// Blend each track into the next over `crossfade_secs` (1–12) instead of gapless.
+    pub crossfade: bool,
+    pub crossfade_secs: u32,
+    /// Play every track at the same loudness, from TIDAL's ReplayGain values.
+    pub normalize_volume: bool,
+    /// Level whole albums instead of single tracks, keeping an album's own dynamics.
+    pub normalize_album: bool,
     /// Collection grid artwork size: 0 smallest … 4 largest (3 is the original size).
     pub grid_size: i32,
     /// Whole-interface zoom, independent of display DPI.
@@ -105,6 +112,10 @@ impl Default for Settings {
             keep_most_played: true,
             rate_matching: true,
             restore_sample_rate: true,
+            crossfade: false,
+            crossfade_secs: 6,
+            normalize_volume: false,
+            normalize_album: false,
             grid_size: 3,
             zoom_percent: 100,
             fancy_animation: false,
@@ -126,7 +137,25 @@ impl Settings {
             .unwrap_or_default();
         settings.grid_size = settings.grid_size.clamp(0, 4);
         settings.zoom_percent = crate::zoom::normalize(settings.zoom_percent);
+        settings.crossfade_secs = settings.crossfade_secs.clamp(1, 12);
         settings
+    }
+
+    /// Crossfade length the player runs; 0 is plain gapless.
+    pub fn crossfade_secs(&self) -> u32 {
+        if self.crossfade {
+            self.crossfade_secs
+        } else {
+            0
+        }
+    }
+
+    pub fn normalization(&self) -> Normalization {
+        match (self.normalize_volume, self.normalize_album) {
+            (false, _) => Normalization::Off,
+            (true, false) => Normalization::Track,
+            (true, true) => Normalization::Album,
+        }
     }
 }
 
@@ -927,6 +956,8 @@ impl Ctx {
         let player = AudioPlayer::new()?;
         player.set_rate_matching(settings.rate_matching);
         player.set_restore_sample_rate(settings.restore_sample_rate);
+        player.set_crossfade(settings.crossfade_secs());
+        player.set_normalization(settings.normalization());
         Ok(Arc::new(Self {
             settings: RwLock::new(settings),
             pkce: tokio::sync::Mutex::new(None),
@@ -955,6 +986,42 @@ impl Ctx {
 
     fn audio_quality_key(&self) -> String {
         self.settings.read().unwrap().quality.to_uppercase()
+    }
+
+    /// TIDAL's loudness measurements for a track, as remembered from its stream lookup.
+    fn known_loudness(&self, track_id: &str) -> Option<Option<Loudness>> {
+        let json = self.meta.get_json(&format!("loudness:{track_id}"))?;
+        serde_json::from_str(&json).ok()
+    }
+
+    fn remember_loudness(&self, track_id: &str, gain: Option<[f32; 4]>) -> Option<Loudness> {
+        let loudness = gain.map(|[track_gain_db, track_peak, album_gain_db, album_peak]| {
+            Loudness {
+                track_gain_db,
+                track_peak,
+                album_gain_db,
+                album_peak,
+            }
+        });
+        let json = serde_json::to_string(&loudness).unwrap_or_default();
+        let _ = self.meta.put_json(&format!("loudness:{track_id}"), &json);
+        loudness
+    }
+
+    /// Loudness for a track about to play. A cached track was never looked up:
+    /// with normalisation on, ask TIDAL once (it is remembered afterwards).
+    async fn loudness(&self, track_id: &str) -> Option<Loudness> {
+        if let Some(known) = self.known_loudness(track_id) {
+            return known;
+        }
+        if self.player.normalization() == Normalization::Off {
+            return None;
+        }
+        let api = self.api()?;
+        let quality = self.settings.read().unwrap().quality.clone();
+        let lookup = tokio::time::timeout(Duration::from_secs(2), api.stream(track_id, &quality));
+        let stream = lookup.await.ok()?.ok()?;
+        self.remember_loudness(track_id, stream.replay_gain)
     }
 
     /// Local file for a track: straight from the SSD cache, else stream-and-save.
@@ -1008,6 +1075,7 @@ impl Ctx {
             .await
             .map_err(|e| e.to_string())?;
         let api_ms = t_api.elapsed().as_millis();
+        self.remember_loudness(track_id, stream.replay_gain);
         tracing::info!(
             track_id,
             quality = %stream.quality,
@@ -3216,6 +3284,22 @@ impl Ui {
                 on_ui(|ui| ui.present_signal());
             });
         });
+        bind!(on_set_crossfade, |ui, on| {
+            ui.update_settings(|s| s.crossfade = on);
+            ui.apply_playback_settings();
+        });
+        bind!(on_set_crossfade_secs, |ui, secs| {
+            ui.update_settings(|s| s.crossfade_secs = secs.clamp(1, 12) as u32);
+            ui.apply_playback_settings();
+        });
+        bind!(on_set_normalize_volume, |ui, on| {
+            ui.update_settings(|s| s.normalize_volume = on);
+            ui.apply_playback_settings();
+        });
+        bind!(on_set_normalize_album, |ui, on| {
+            ui.update_settings(|s| s.normalize_album = on);
+            ui.apply_playback_settings();
+        });
         bind!(on_set_keep_most_played, |ui, on| ui
             .update_settings(|s| s.keep_most_played = on));
         bind!(on_set_fancy_animation, |ui, on| ui.set_fancy_animation(on));
@@ -3892,6 +3976,10 @@ impl Ui {
         app.set_glass_available(crate::platform::glass_available());
         app.set_rate_matching(settings.rate_matching);
         app.set_restore_sample_rate(settings.restore_sample_rate);
+        app.set_crossfade(settings.crossfade);
+        app.set_crossfade_secs(settings.crossfade_secs as i32);
+        app.set_normalize_volume(settings.normalize_volume);
+        app.set_normalize_album(settings.normalize_album);
         app.set_grid_size(settings.grid_size.clamp(0, 4));
         app.set_cache_max(format!("{}", settings.cache_max_gb).into());
         let (tracks, bytes) = self.ctx.audio.usage();
@@ -3913,6 +4001,19 @@ impl Ui {
             )
             .into(),
         );
+    }
+
+    /// Hand crossfade and volume normalisation to the player and show them.
+    fn apply_playback_settings(&self) {
+        let settings = self.ctx.settings.read().unwrap().clone();
+        let app = self.app();
+        app.set_crossfade(settings.crossfade);
+        app.set_crossfade_secs(settings.crossfade_secs as i32);
+        app.set_normalize_volume(settings.normalize_volume);
+        app.set_normalize_album(settings.normalize_album);
+        self.ctx.player.set_crossfade(settings.crossfade_secs());
+        self.ctx.player.set_normalization(settings.normalization());
+        self.present_signal();
     }
 
     fn update_settings(&self, change: impl FnOnce(&mut Settings)) {
@@ -7800,6 +7901,11 @@ impl Ui {
             player.is_released(),
             self.dsp_signal_detail().as_deref(),
             player.upsampling(),
+            &crate::signal::Leveling {
+                normalization: player.normalization(),
+                loudness: player.loudness(),
+                crossfade_secs: player.crossfade(),
+            },
         );
         let mut stages = path.stages;
         let mut note = path.note;
@@ -7905,6 +8011,10 @@ impl Ui {
                     }
                     let start_at =
                         Duration::from_millis(ctx.desired_elapsed_ms.load(Ordering::Relaxed));
+                    let loudness = ctx.loudness(&track.id).await;
+                    if ctx.play_gen.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
                     let file_path = ctx
                         .audio
                         .get_playable(&track.id, &quality)
@@ -7915,6 +8025,7 @@ impl Ui {
                         artist: track.artist.clone(),
                         file_path,
                         duration: Duration::from_secs(track.duration_secs as u64),
+                        loudness,
                     };
                     let player_ctx = ctx.clone();
                     let t_play = std::time::Instant::now();
@@ -8120,6 +8231,7 @@ impl Ui {
             artist: track.artist.clone(),
             file_path: path,
             duration: Duration::from_secs(track.duration_secs as u64),
+            loudness: self.ctx.known_loudness(&track.id).flatten(),
         };
         self.spawn(move |ctx| async move {
             let play = tokio::task::spawn_blocking(move || ctx.player.play_track_at(item, to))
@@ -8404,6 +8516,7 @@ impl Ui {
         self.spawn(|ctx| async move {
             match ctx.resolve_audio_for(&track.id, false).await {
                 Ok(path) if ctx.play_gen.load(Ordering::SeqCst) == generation => {
+                    let loudness = ctx.loudness(&track.id).await;
                     let revision_guard = ctx.next_revision.lock().unwrap();
                     if *revision_guard != revision
                         || ctx.play_gen.load(Ordering::SeqCst) != generation
@@ -8417,6 +8530,7 @@ impl Ui {
                         artist: track.artist.clone(),
                         file_path: path,
                         duration: Duration::from_secs(track.duration_secs as u64),
+                        loudness,
                     });
                     drop(revision_guard);
                     let _ = ctx.meta.upsert_track(&track);

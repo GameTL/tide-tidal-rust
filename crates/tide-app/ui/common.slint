@@ -567,6 +567,15 @@ export global App {
     callback set-rate-matching(bool);
     in property <bool> restore-sample-rate: true;
     callback set-restore-sample-rate(bool);
+    // Crossfade (seconds 1–12) and volume normalisation (by track or by album).
+    in property <bool> crossfade: false;
+    callback set-crossfade(bool);
+    in property <int> crossfade-secs: 6;
+    callback set-crossfade-secs(int);
+    in property <bool> normalize-volume: false;
+    callback set-normalize-volume(bool);
+    in property <bool> normalize-album: false;
+    callback set-normalize-album(bool);
     pure public function signal-color(quality: string) -> color {
         return quality == "enhanced" ? Theme.enhanced : quality == "max" ? Theme.max : quality == "lossless" ? Theme.lossless : quality == "high" ? #4ade80 : quality == "low" ? #ffffff : #8c8c8c;
     }

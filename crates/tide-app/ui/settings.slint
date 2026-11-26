@@ -1,6 +1,6 @@
 // Settings page (⌘,).
 import { ScrollView } from "std-widgets.slint";
-import { App, Theme, EditableInput, Toggle, Icon, Keys } from "common.slint";
+import { App, Theme, EditableInput, Toggle, Icon, Keys, Slider } from "common.slint";
 
 component Card inherits Rectangle {
     border-radius: 12px;
@@ -544,6 +544,80 @@ export component SettingsView inherits Rectangle {
                                 Toggle {
                                     on: App.dsp-enabled;
                                     toggled(v) => { App.dsp-set-enabled(v); }
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Crossfade songs";
+                        detail: App.crossfade ? "Each track fades into the next over " + App.crossfade-secs + (App.crossfade-secs == 1 ? " second" : " seconds") + ", instead of following it gaplessly." : "Off: tracks follow each other gaplessly.";
+                        controls-width: 250px;
+                        HorizontalLayout {
+                            x: parent.width - self.width;
+                            width: 226px;
+                            spacing: 14px;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                // 1 to 12 seconds, in whole seconds.
+                                Slider {
+                                    value: (App.crossfade-secs - 1) / 11;
+                                    live: true;
+                                    opacity: App.crossfade ? 1 : 0.4;
+                                    changed(v) => {
+                                        if Math.round(v * 11) + 1 != App.crossfade-secs {
+                                            App.set-crossfade-secs(Math.round(v * 11) + 1);
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    Text { text: "1"; color: Theme.text-secondary; font-size: 11px; }
+                                    Text { text: App.crossfade-secs + " s"; color: Theme.text; font-size: 11px; horizontal-alignment: center; horizontal-stretch: 1; }
+                                    Text { text: "12"; color: Theme.text-secondary; font-size: 11px; }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Toggle {
+                                    on: App.crossfade;
+                                    toggled(v) => {
+                                        App.set-crossfade(v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row {
+                        title: "Normalise volume";
+                        detail: "Plays every " + (App.normalize-album ? "album" : "track") + " at the same loudness (-14 LUFS) from TIDAL's measurements, never louder than its peaks allow. Album keeps the differences between an album's songs. The playing track's LUFS shows in the signal path.";
+                        controls-width: 250px;
+                        HorizontalLayout {
+                            x: parent.width - self.width;
+                            width: self.preferred-width;
+                            height: 38px;
+                            spacing: 8px;
+                            SmallButton {
+                                text: "Track";
+                                primary: !App.normalize-album;
+                                clicked => { App.set-normalize-album(false); }
+                            }
+                            SmallButton {
+                                text: "Album";
+                                primary: App.normalize-album;
+                                clicked => { App.set-normalize-album(true); }
+                            }
+                            Rectangle {
+                                width: 1px;
+                                height: 26px;
+                                background: #3a3a3e;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Toggle {
+                                    on: App.normalize-volume;
+                                    toggled(v) => { App.set-normalize-volume(v); }
                                 }
                             }
                         }

@@ -439,6 +439,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 artist: track.artist.clone(),
                 file_path: audio_file,
                 duration: Duration::from_secs(track.duration_secs as u64),
+                loudness: None,
             };
 
             println!(
