@@ -104,16 +104,32 @@ fn upsampling_pills_offer_off_and_every_rate_of_the_output() {
             label: "Max".into(),
         },
     ])));
+    app.set_dsp_depth_options(slint::ModelRc::new(slint::VecModel::from(vec![
+        UpsampleOption {
+            tier: 24,
+            label: "24-bit".into(),
+        },
+        UpsampleOption {
+            tier: 64,
+            label: "Max".into(),
+        },
+    ])));
     let picked = Rc::new(RefCell::new(Vec::new()));
     app.on_dsp_set_upsample({
         let picked = picked.clone();
         move |tier| picked.borrow_mut().push(tier)
+    });
+    let depths = Rc::new(RefCell::new(Vec::new()));
+    app.on_dsp_set_depth({
+        let depths = depths.clone();
+        move |bits| depths.borrow_mut().push(bits)
     });
     for (width, height) in [(1440.0_f32, 2400.0_f32), (700.0, 2400.0)] {
         win.dispatch_event(WindowEvent::Resized {
             size: LogicalSize::new(width, height),
         });
         picked.borrow_mut().clear();
+        depths.borrow_mut().clear();
         let mut y = 400.0;
         while y < height {
             let mut x = 0.0;
@@ -137,6 +153,13 @@ fn upsampling_pills_offer_off_and_every_rate_of_the_output() {
                 picked.borrow().contains(&tier),
                 "tier {tier} is reachable at {width} wide: {:?}",
                 picked.borrow()
+            );
+        }
+        for bits in [0, 24, 64] {
+            assert!(
+                depths.borrow().contains(&bits),
+                "depth {bits} is reachable at {width} wide: {:?}",
+                depths.borrow()
             );
         }
     }

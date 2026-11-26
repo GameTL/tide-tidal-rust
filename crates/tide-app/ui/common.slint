@@ -571,6 +571,10 @@ export global App {
     in property <[UpsampleOption]> dsp-upsample-options;
     in property <string> dsp-upsample-note;
     callback dsp-set-upsample(int);
+    in property <int> dsp-depth: 0; // 0 each track's own, else 24 / 32 / 64 (the output's deepest)
+    in property <[UpsampleOption]> dsp-depth-options;
+    in property <string> dsp-depth-note;
+    callback dsp-set-depth(int);
     in property <bool> dsp-usr-on: false;
     in property <bool> dsp-spk-on: false;
     in property <float> dsp-range: 15; // editor spans ±this many dB

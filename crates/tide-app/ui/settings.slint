@@ -512,7 +512,7 @@ export component SettingsView inherits Rectangle {
 
                     Row {
                         title: "Match output sample rate";
-                        detail: "Switches the output device to each track's sample rate for bit-perfect playback. Never used for Bluetooth or AirPlay.";
+                        detail: "Switches the output device to each track's sample rate and bit depth for bit-perfect playback. Never used for Bluetooth or AirPlay.";
                         Toggle {
                             x: parent.width - self.width;
                             on: App.rate-matching;

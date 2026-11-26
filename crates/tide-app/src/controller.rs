@@ -23,7 +23,7 @@ use tide_audio::{AudioPlayer, TrackQueueItem};
 use tide_cache::{AudioCache, ImageCache, MetadataCache, PlaybackCursor, SavedPlayback};
 use tide_macos::{MacMediaControls, MediaControlEvent};
 
-use crate::signal::{khz, signal_path};
+use crate::signal::signal_path;
 use crate::{
     App, ArtistLink, CardData, CreditLine, LyricLine, MainWindow, MemPart, MemSample, SectionData,
     SignalStage, TrackData,
@@ -7751,7 +7751,7 @@ impl Ui {
                 "{} · {} · {}",
                 output.name,
                 output.kind.label(),
-                khz(output.sample_rate)
+                crate::signal::output_format(&output)
             )
             .into(),
         );
