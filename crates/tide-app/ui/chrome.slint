@@ -2590,16 +2590,21 @@ export component PlayerBar inherits Rectangle {
             HorizontalLayout {
                 // Tighter in the corners, down to a 320px window.
                 spacing: root.corners ? 2px : 8px;
-                // While a video is on screen this opens "Similar videos" instead.
+                // While a video is on screen this opens "Similar videos";
+                // inside Now Playing it toggles the Queue panel in-place.
                 IconButton {
                     accessible-role: button;
                     accessible-label: "Play queue";
                     icon: @image-url("icons/queue.svg");
                     size: 18px;
-                    tint: (App.video-open ? App.video-similar-open : App.nav-key == "queue") ? Theme.text : Theme.text-secondary;
+                    tint: (App.video-open ? App.video-similar-open
+                        : App.show-now-playing ? App.show-queue
+                        : App.nav-key == "queue") ? Theme.text : Theme.text-secondary;
                     clicked => {
                         if (App.video-open) {
                             App.video-similar-open = !App.video-similar-open;
+                        } else if (App.show-now-playing) {
+                            App.toggle-np-queue();
                         } else {
                             App.navigate("queue");
                         }

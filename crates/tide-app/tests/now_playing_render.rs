@@ -181,6 +181,36 @@ fn now_playing_arrangements_render() {
     app.set_lyrics_synced(true);
     app.set_lyric_index(6);
     app.set_lyrics_status("".into());
+    app.set_np_context("0_1 - My OG / Nostalgia Style".into());
+    app.set_np_queue(ModelRc::new(VecModel::from(
+        [
+            ("Not Today", "twenty one pilots", "Blurryface", "3:58"),
+            ("Love Runs Out", "OneRepublic", "Native (Gold Edition)", "3:44"),
+            ("Rolling In the Deep", "Adele", "21", "3:48"),
+            ("Hello", "Adele", "25", "4:55"),
+            ("Lonely Boy", "The Black Keys", "El Camino", "3:13"),
+            ("Lo/Hi", "The Black Keys", "Let's Rock", "2:57"),
+            ("Walk Across The Water", "The Black Keys", "\"Let's Rock\"", "3:55"),
+            ("Sooner or Later", "Mat Kearney", "Young Love", "3:36"),
+            ("Paris", "Magic Man", "Before the Waves", "3:34"),
+            ("Way Up", "Jaden", "Spider-Man: Into the Spider-Verse", "2:34"),
+            ("Shatter Me", "Lindsey Stirling", "Shatter Me", "4:40"),
+            ("Payphone", "Maroon 5", "Overexposed", "3:51"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (title, artist, album, dur))| TrackData {
+            id: format!("q-{i}").into(),
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            duration: dur.into(),
+            explicit: i % 4 == 0,
+            cover: cover(96),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>(),
+    )));
 
     for glass in [true, false] {
         let g = if glass { "glass" } else { "plain" };
@@ -188,20 +218,34 @@ fn now_playing_arrangements_render() {
 
         // Wide, lyrics: art left, the column right, the sung line lit.
         resize(&ui, 1440., 900.);
+        app.set_show_queue(false);
         app.set_show_lyrics(true);
         app.set_show_now_playing(true);
         let lyrics = shoot(&ui, &format!("np-wide-lyrics-{g}"));
-        // Wide, no lyrics: the art centred.
+        // Wide, queue: art left, the frosted queue card right.
+        app.set_show_queue(true);
+        app.set_show_lyrics(false);
+        let queue = shoot(&ui, &format!("np-wide-queue-{g}"));
+        // Wide, no panel: the art centred.
+        app.set_show_queue(false);
         app.set_show_lyrics(false);
         let centred = shoot(&ui, &format!("np-wide-centred-{g}"));
-        // Centre of the window is art without lyrics; with lyrics it is the
-        // gap between art and column, i.e. background.
+        // Centre of the window is art without a panel; with lyrics or queue it
+        // is the gap between art and column, i.e. background.
         assert_ne!(at(&lyrics, 720., 420.), at(&centred, 720., 420.));
+        assert_ne!(at(&queue, 720., 420.), at(&centred, 720., 420.));
+        // Queue card sits in the right column and visibly separates from the backdrop.
+        assert_ne!(at(&queue, 1000., 120.), at(&centred, 1000., 120.));
 
         // Medium: the bar is compact, the title moves under the art.
         resize(&ui, 840., 720.);
+        app.set_show_queue(false);
         app.set_show_lyrics(true);
         shoot(&ui, &format!("np-medium-lyrics-{g}"));
+        app.set_show_queue(true);
+        app.set_show_lyrics(false);
+        shoot(&ui, &format!("np-medium-queue-{g}"));
+        app.set_show_queue(false);
         app.set_show_lyrics(false);
         shoot(&ui, &format!("np-medium-centred-{g}"));
 
@@ -210,9 +254,27 @@ fn now_playing_arrangements_render() {
         shoot(&ui, &format!("np-narrow-{g}"));
         app.set_show_lyrics(true);
         shoot(&ui, &format!("np-narrow-lyrics-{g}"));
+        app.set_show_queue(true);
+        app.set_show_lyrics(false);
+        shoot(&ui, &format!("np-narrow-queue-{g}"));
+        app.set_show_queue(false);
         app.set_show_now_playing(false);
         settle();
     }
+
+    // Tight narrow (320px) + empty queue with glass on.
+    app.set_glass(true);
+    resize(&ui, 320., 560.);
+    app.set_show_lyrics(false);
+    app.set_show_queue(true);
+    app.set_show_now_playing(true);
+    shoot(&ui, "np-tight-queue-glass");
+    resize(&ui, 1440., 900.);
+    let saved_queue = app.get_np_queue();
+    app.set_np_queue(ModelRc::default());
+    shoot(&ui, "np-wide-queue-empty-glass");
+    app.set_np_queue(saved_queue);
+    app.set_show_queue(false);
 
     // The widths in between, glass on.
     app.set_glass(true);
@@ -224,6 +286,35 @@ fn now_playing_arrangements_render() {
         app.set_show_lyrics(false);
         shoot(&ui, &format!("np-sweep-{w}x{h}-centred"));
     }
+    app.set_show_now_playing(false);
+    settle();
+
+    // Mid-transition frame: switching Lyrics -> Queue with glass on.
+    app.set_glass(true);
+    resize(&ui, 1440., 900.);
+    app.set_show_queue(false);
+    app.set_show_lyrics(true);
+    app.set_show_now_playing(true);
+    settle();
+    app.set_show_queue(true);
+    app.set_show_lyrics(false);
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        slint::platform::update_timers_and_animations();
+    }
+    let cross = ui.window().take_snapshot().unwrap();
+    if let Some(dir) = std::env::var_os("TIDE_GLASS_SHOTS") {
+        let dir = std::path::PathBuf::from(dir);
+        image::save_buffer(
+            dir.join("np-lyrics-to-queue-mid.png"),
+            cross.as_bytes(),
+            cross.width(),
+            cross.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+    app.set_show_queue(false);
     app.set_show_now_playing(false);
     settle();
 

@@ -460,6 +460,44 @@ mod tests {
     }
 
     #[test]
+    fn clear_upcoming_drops_future_tracks_and_keeps_history_when_unshuffled() {
+        let track = |id: &str| TrackItem {
+            id: id.into(),
+            ..Default::default()
+        };
+        let mut state = State {
+            queue: ["A", "B", "C", "D"].map(track).to_vec(),
+            order: vec![3, 1, 0, 2],
+            pos: 1,
+            shuffle: true,
+            prefetched_for: Some(7),
+            ..Default::default()
+        };
+        let upcoming_before: Vec<_> = state
+            .upcoming_tracks()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(upcoming_before, ["A", "C"]);
+
+        assert!(state.clear_upcoming());
+        assert_eq!(state.prefetched_for, None);
+        assert!(state.upcoming_tracks().is_empty());
+        let kept_in_play_order: Vec<_> = state
+            .order
+            .iter()
+            .map(|&i| state.queue[i].id.as_str())
+            .collect();
+        assert_eq!(kept_in_play_order, ["D", "B"]);
+        assert_eq!(state.queue[state.order[state.pos]].id, "B");
+        // Compacting the backing queue prevents unshuffle from resurrecting A or C.
+        let backing_ids: Vec<_> = state.queue.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(backing_ids, ["B", "D"]);
+        // Clearing again when nothing is up next is a no-op.
+        assert!(!state.clear_upcoming());
+    }
+
+    #[test]
     fn last_quarter_of_the_track_preloads_the_next_song() {
         assert!(!in_prefetch_zone(0.0));
         assert!(!in_prefetch_zone(0.749));
@@ -1288,6 +1326,8 @@ struct State {
     page_tracks: Vec<TrackItem>,
     page_context: String,
     tracks_model: Option<Rc<VecModel<TrackData>>>,
+    /// Upcoming queue rows shown inside Now Playing.
+    np_queue_model: Option<Rc<VecModel<TrackData>>>,
     sidebar_cards: Vec<Card>,
     /// When TIDE last added to each playlist (id → Unix seconds), kept so
     /// "Add to playlist" can list the ones in use first.
@@ -1379,6 +1419,43 @@ impl State {
         }
         self.order.insert(self.pos + 1, insert_at);
         self.prefetched_for = None;
+    }
+
+    fn upcoming_tracks(&self) -> Vec<TrackItem> {
+        self.order
+            .iter()
+            .skip(self.pos.saturating_add(1))
+            .filter_map(|&i| self.queue.get(i).cloned())
+            .collect()
+    }
+
+    /// Drop every upcoming track after the current one, compacting the backing
+    /// queue so turning shuffle off cannot resurrect cleared tracks.
+    fn clear_upcoming(&mut self) -> bool {
+        if self.order.is_empty() || self.pos + 1 >= self.order.len() {
+            return false;
+        }
+        self.order.truncate(self.pos + 1);
+        let mut kept = vec![false; self.queue.len()];
+        for &idx in &self.order {
+            if let Some(slot) = kept.get_mut(idx) {
+                *slot = true;
+            }
+        }
+        let mut remap = vec![0usize; self.queue.len()];
+        let mut new_queue = Vec::with_capacity(self.order.len());
+        for (old_idx, track) in self.queue.drain(..).enumerate() {
+            if kept[old_idx] {
+                remap[old_idx] = new_queue.len();
+                new_queue.push(track);
+            }
+        }
+        self.queue = new_queue;
+        for idx in &mut self.order {
+            *idx = remap[*idx];
+        }
+        self.prefetched_for = None;
+        true
     }
 }
 
@@ -3312,6 +3389,10 @@ impl Ui {
             ui.app().set_show_lyrics(on);
         });
         bind!(on_seek_lyric, |ui, row| ui.seek_lyric(row));
+        bind!(on_play_queue_index, |ui, index| ui.play_queue_index(index));
+        bind!(on_clear_queue, |ui| ui.clear_upcoming());
+        bind!(on_np_queue_visible, |ui, first, count| ui
+            .np_queue_visible(first.max(0) as usize, count.max(0) as usize));
         bind!(on_pkce_finish, |ui, url| ui
             .pkce_finish(url.trim().to_string()));
         self.dsp_wire();
@@ -7504,6 +7585,85 @@ impl Ui {
         }
         self.state.borrow_mut().insert_next(track);
         self.persist_queue();
+        self.refresh_np_queue();
+        self.refresh_queue_page();
+    }
+
+    fn refresh_np_queue(self: &Rc<Self>) {
+        let (model, keep) = {
+            let mut st = self.state.borrow_mut();
+            let upcoming = st.upcoming_tracks();
+            let rows: Vec<TrackData> = upcoming
+                .iter()
+                .map(|t| track_row(t, st.fav_ids.contains(&t.id)))
+                .collect();
+            let model = Rc::new(VecModel::from(rows));
+            st.np_queue_model = Some(model.clone());
+            let keep = st.art_keep.get("np-queue").copied();
+            (model, keep)
+        };
+        self.app().set_np_queue(ModelRc::from(model.clone()));
+        if let Some((from, upto)) = keep
+            && upto > from
+        {
+            self.keep_track_covers("np-queue", &model, from, upto, 96);
+        } else if self.app().get_show_now_playing() && self.app().get_show_queue() {
+            self.np_queue_visible(0, 16);
+        }
+    }
+
+    fn np_queue_visible(self: &Rc<Self>, first: usize, count: usize) {
+        let Some(model) = self.state.borrow().np_queue_model.clone() else {
+            return;
+        };
+        if count == 0 {
+            self.keep_track_covers("np-queue", &model, 0, 0, 96);
+            return;
+        }
+        let len = model.row_count();
+        let start = first.saturating_sub(count);
+        let end = (first + count + count).min(len);
+        self.keep_track_covers("np-queue", &model, start, end, 96);
+    }
+
+    fn play_queue_index(self: &Rc<Self>, index: i32) {
+        let Ok(offset) = usize::try_from(index) else {
+            return;
+        };
+        let jumped = {
+            let mut st = self.state.borrow_mut();
+            let target = st.pos.saturating_add(1).saturating_add(offset);
+            if target < st.order.len() {
+                st.pos = target;
+                st.pending_seek = None;
+                st.prefetched_for = None;
+                true
+            } else {
+                false
+            }
+        };
+        if !jumped {
+            return;
+        }
+        self.persist_cursor();
+        self.start_current();
+        self.refresh_queue_page();
+    }
+
+    fn clear_upcoming(self: &Rc<Self>) {
+        {
+            let mut revision = self.ctx.next_revision.lock().unwrap();
+            *revision = revision.wrapping_add(1);
+            self.ctx.player.cancel_upcoming();
+        }
+        if !self.state.borrow().loading_track {
+            self.sync_gapless_transition();
+        }
+        if !self.state.borrow_mut().clear_upcoming() {
+            return;
+        }
+        self.persist_queue();
+        self.refresh_np_queue();
         self.refresh_queue_page();
     }
 
@@ -7829,6 +7989,7 @@ impl Ui {
         if app.get_show_now_playing() {
             self.load_lyrics();
         }
+        self.refresh_np_queue();
         self.ctx.with_media(|m| {
             let _ = m.set_metadata(
                 &track.title,
@@ -8328,6 +8489,7 @@ impl Ui {
             .ctx
             .meta
             .update_playback_order(&order, self.current_cursor());
+        self.refresh_np_queue();
         self.refresh_queue_page();
     }
 
@@ -8587,9 +8749,9 @@ impl Ui {
                 st.fav_ids.remove(id);
                 st.favorites.retain(|t| t.id != id);
             }
-            st.tracks_model.clone()
+            (st.tracks_model.clone(), st.np_queue_model.clone())
         };
-        if let Some(model) = model {
+        for model in [model.0, model.1].into_iter().flatten() {
             for i in 0..model.row_count() {
                 if let Some(mut row) = model.row_data(i).filter(|r| r.id == id) {
                     row.favorite = favorite;
@@ -8808,6 +8970,8 @@ impl Ui {
         self.detect_login_browser();
         app.set_sections(ModelRc::default());
         app.set_tracks(ModelRc::default());
+        app.set_np_queue(ModelRc::default());
+        app.set_show_queue(false);
         app.set_grid_cards(ModelRc::default());
         app.set_sidebar_playlists(ModelRc::default());
         self.spawn(|ctx| async move {

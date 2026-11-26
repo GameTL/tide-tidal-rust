@@ -2892,8 +2892,9 @@ component LyricsColumn inherits Rectangle {
     in property <float> reveal: 1;
     in property <length> font-size: 22px;
     in property <bool> glass: false;
+    in property <bool> interactive: true;
     clip: true;
-    accessible-role: list;
+    accessible-role: AccessibleRole.list;
     accessible-label: "Lyrics text";
 
     property <length> band: min(root.height * 0.16, 88px);
@@ -2947,7 +2948,7 @@ component LyricsColumn inherits Rectangle {
             for line[i] in App.lyrics: LyricRow {
                 text: line.text;
                 active: i == App.lyric-index;
-                synced: App.lyrics-synced && line.time >= 0;
+                synced: App.lyrics-synced && line.time >= 0 && root.interactive;
                 font-size: root.font-size;
                 fade: root.reveal * root.edge(self.y + self.height / 2);
                 current(y, h) => {
@@ -2982,6 +2983,330 @@ component LyricsColumn inherits Rectangle {
             color: white;
             font-size: 13px;
             font-weight: 600;
+        }
+    }
+}
+
+// One upcoming track in Now Playing's Queue column.
+component QueueRow inherits Rectangle {
+    in property <TrackData> track;
+    in property <bool> interactive: true;
+    in property <bool> show-divider: true;
+    callback play();
+
+    property <bool> hot: body.has-hover || more-ta.has-hover;
+    property <bool> show-time: root.width >= 320px && root.track.duration != "";
+    property <length> right-w: root.show-time ? 84px : 44px;
+
+    height: 58px;
+    border-radius: 10px;
+    background: root.hot ? #ffffff1a : transparent;
+    animate background { duration: 140ms; easing: ease-out; }
+
+    body := TouchArea {
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+        accessible-role: button;
+        accessible-label: root.track.title + (root.track.artist != "" ? " by " + root.track.artist : "");
+        accessible-action-default => { root.play(); }
+        clicked => { root.play(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-track-menu(root.track.id, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
+    Cover {
+        x: 10px;
+        y: 8px;
+        width: 42px;
+        height: 42px;
+        radius: 6px;
+        source: root.track.cover;
+    }
+
+    Rectangle {
+        x: 10px;
+        y: 8px;
+        width: 42px;
+        height: 42px;
+        border-radius: 6px;
+        background: root.hot ? #00000073 : transparent;
+        animate background { duration: 140ms; easing: ease-out; }
+        if root.hot: Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("icons/play.svg");
+            size: 16px;
+            tint: white;
+        }
+    }
+
+    VerticalLayout {
+        x: 64px;
+        width: max(0px, parent.width - 64px - root.right-w);
+        height: 100%;
+        alignment: center;
+        spacing: 2px;
+        HorizontalLayout {
+            alignment: start;
+            spacing: 6px;
+            Text {
+                text: root.track.title;
+                color: white;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            if root.track.explicit: VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                ExplicitBadge { }
+            }
+        }
+        Text {
+            text: root.track.album != "" ? root.track.artist + " — " + root.track.album : root.track.artist;
+            color: #ffffff9e;
+            font-size: 12.5px;
+            overflow: elide;
+        }
+    }
+
+    if root.show-time: Text {
+        x: parent.width - 80px;
+        width: 38px;
+        height: 100%;
+        text: root.track.duration;
+        color: #ffffff78;
+        font-size: 12px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: parent.width - 38px;
+        y: (parent.height - self.height) / 2;
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: more-ta.has-hover ? #ffffff22 : transparent;
+        animate background { duration: 120ms; easing: ease-out; }
+        accessible-role: button;
+        accessible-label: "Track options";
+        accessible-action-default => {
+            App.request-track-menu(root.track.id, self.absolute-position.x, self.absolute-position.y + self.height);
+        }
+        more-ta := TouchArea {
+            enabled: root.interactive;
+            mouse-cursor: pointer;
+            clicked => {
+                App.request-track-menu(root.track.id, self.absolute-position.x, self.absolute-position.y + self.height);
+            }
+        }
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("icons/more.svg");
+            size: 16px;
+            tint: more-ta.has-hover ? white : #ffffff80;
+        }
+    }
+
+    if root.show-divider: Rectangle {
+        x: 64px;
+        y: parent.height - 1px;
+        width: max(0px, parent.width - 74px);
+        height: 1px;
+        background: #ffffff14;
+    }
+}
+
+// Upcoming tracks beside the artwork in Now Playing. Sits over a sibling glass
+// card when `glass` is on, so the glass backdrop stays outside this opacity group.
+component QueueColumn inherits Rectangle {
+    in property <float> reveal: 1;
+    in property <bool> glass: false;
+    in property <bool> interactive: true;
+
+    property <length> header-h: App.np-context != "" ? 66px : 52px;
+    property <length> row-h: 58px;
+    property <length> list-pad: 6px;
+    property <int> first: max(0, floor((-list.content-y - root.list-pad) / root.row-h));
+    property <int> visible-rows: max(1, ceil(max(1px, list.height) / root.row-h) + 2);
+    property <int> queue-len: App.np-queue.length;
+    property <string> current-track: App.current-id;
+
+    border-radius: 20px;
+    clip: true;
+    opacity: root.reveal;
+    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
+    accessible-role: AccessibleRole.list;
+    accessible-label: "Play queue";
+
+    init => {
+        App.np-queue-visible(root.first, root.visible-rows);
+    }
+    changed first => {
+        App.np-queue-visible(root.first, root.visible-rows);
+    }
+    changed visible-rows => {
+        App.np-queue-visible(root.first, root.visible-rows);
+    }
+    changed current-track => {
+        list.content-y = 0px;
+        App.np-queue-visible(0, root.visible-rows);
+    }
+    changed queue-len => {
+        if (-list.content-y > max(0px, list.content-height - list.height)) {
+            list.content-y = -max(0px, list.content-height - list.height);
+        }
+        App.np-queue-visible(root.first, root.visible-rows);
+    }
+
+    // Plain surface when Liquid Glass is off.
+    if !root.glass: Rectangle {
+        border-radius: 20px;
+        background: #00000052;
+        border-width: 1px;
+        border-color: #ffffff18;
+    }
+
+    // Header: Continue Playing, source context, and Clear upcoming.
+    Rectangle {
+        y: 0px;
+        width: parent.width;
+        height: root.header-h;
+        Text {
+            x: 20px;
+            y: App.np-context != "" ? 13px : 16px;
+            width: max(0px, parent.width - 108px);
+            text: "Continue Playing";
+            color: white;
+            font-size: 16px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        if App.np-context != "": Rectangle {
+            x: 20px;
+            y: 37px;
+            width: max(0px, parent.width - 108px);
+            height: 20px;
+            ctx-ta := TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { App.open-now-playing-context(); }
+            }
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "From " + App.np-context;
+                color: ctx-ta.has-hover ? #ffffffd9 : #ffffff94;
+                font-size: 12.5px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        if App.np-queue.length > 0: Rectangle {
+            x: parent.width - self.width - 16px;
+            y: (root.header-h - self.height) / 2;
+            width: clear-label.preferred-width + 24px;
+            height: 28px;
+            border-radius: 14px;
+            background: root.glass && root.reveal >= 1
+                ? (clear-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff33 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
+                : clear-ta.has-hover ? #ffffff2e : #ffffff18;
+            accessible-role: button;
+            accessible-label: "Clear queue";
+            accessible-action-default => { App.clear-queue(); }
+            clear-ta := TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { App.clear-queue(); }
+            }
+            clear-label := Text {
+                text: "Clear";
+                color: clear-ta.has-hover ? #ff9c9c : #ff7a7a;
+                font-size: 12.5px;
+                font-weight: 600;
+            }
+        }
+        Rectangle {
+            x: 20px;
+            y: parent.height - 1px;
+            width: max(0px, parent.width - 40px);
+            height: 1px;
+            background: #ffffff1a;
+        }
+    }
+
+    list := Flickable {
+        y: root.header-h;
+        width: parent.width;
+        height: max(0px, parent.height - root.header-h);
+        content-width: parent.width;
+        content-height: App.np-queue.length * root.row-h + 2 * root.list-pad;
+        interactive: root.interactive && App.np-queue.length > 0;
+
+        for i in root.visible-rows: Rectangle {
+            x: 8px;
+            y: root.list-pad + (root.first + i) * root.row-h;
+            width: max(0px, root.width - 16px);
+            height: root.row-h;
+            background: transparent;
+            visible: root.first + i < App.np-queue.length;
+            if root.first + i < App.np-queue.length: QueueRow {
+                width: parent.width;
+                height: parent.height;
+                track: App.np-queue[root.first + i];
+                interactive: root.interactive;
+                show-divider: root.first + i + 1 < App.np-queue.length;
+                play => { App.play-queue-index(root.first + i); }
+            }
+        }
+    }
+
+    if list.content-height > list.height && list.height > 20px: Rectangle {
+        property <length> track-h: list.height - 16px;
+        property <length> thumb-h: clamp(self.track-h * (list.height / max(1px, list.content-height)), 28px, self.track-h);
+        property <float> frac: clamp(-list.content-y / max(1px, list.content-height - list.height), 0, 1);
+        x: parent.width - 7px;
+        y: root.header-h + 8px + (self.track-h - self.thumb-h) * self.frac;
+        width: 3px;
+        height: self.thumb-h;
+        border-radius: 1.5px;
+        background: #ffffff38;
+    }
+
+    if App.np-queue.length == 0: VerticalLayout {
+        x: 24px;
+        y: root.header-h;
+        width: max(0px, parent.width - 48px);
+        height: max(0px, parent.height - root.header-h);
+        alignment: center;
+        spacing: 8px;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: @image-url("icons/queue.svg");
+                size: 28px;
+                tint: #ffffff4d;
+            }
+        }
+        Text {
+            text: "Nothing up next";
+            color: #ffffffc0;
+            font-size: 15px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Use Play next on any track to queue it here.";
+            color: #ffffff70;
+            font-size: 13px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
         }
     }
 }
@@ -3058,7 +3383,6 @@ export component NowPlayingView inherits Rectangle {
     // doesn't invalidate the cached layers below.
     out property <bool> presenting: App.show-now-playing || root.expansion > 0;
     // Fully open, the view hides the page's player bar: it need not be glass.
-    init => { App.bar-covered = self.expansion >= 1; }
     changed expansion => { App.bar-covered = self.expansion >= 1; }
     // Fading a group needs an offscreen layer; Skia sizes it to the whole
     // window, several times a frame. While the view animates, each faded group
@@ -3091,19 +3415,32 @@ export component NowPlayingView inherits Rectangle {
 
     // ------------------------------------------------------------ layout
     // Three arrangements, after TIDAL's own: wide (art centred, or art left
-    // and lyrics right), and narrow, one column: art over the title, the
-    // transport below (the overlay player bar, compact), the lyrics taking
-    // the art's place with the art shrunk beside the title.
+    // with lyrics or queue right), and narrow, one column: art over the title,
+    // the transport below (the overlay player bar, compact), the active panel
+    // taking the art's place with the art shrunk beside the title.
     property <bool> narrow: root.width < 720px;
     // The overlay bar shows no title when compact: Now Playing does.
     property <bool> meta: App.compact-layout;
     property <length> meta-h: root.meta ? 68px : 0px;
-    // The lyrics are shown: wanted, and the track has some (or they load).
-    property <bool> lyrics-on: App.show-lyrics && App.lyrics-status == "";
-    // 0 without lyrics, 1 with; everything that moves between the two
-    // arrangements is a mix of both by this.
+    // Right-column panels: mutually exclusive Lyrics or Queue.
+    property <bool> lyrics-on: App.show-lyrics && !App.show-queue && App.lyrics-status == "";
+    property <bool> queue-on: App.show-queue;
+    property <bool> panel-on: root.lyrics-on || root.queue-on;
+    // 0 with artwork centred, 1 with a right column open; switching between
+    // Lyrics and Queue keeps the artwork steady while the columns cross-glide.
+    property <float> panel: root.panel-on ? 1 : 0;
+    animate panel { duration: 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
     property <float> lyr: root.lyrics-on ? 1 : 0;
-    animate lyr { duration: 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    animate lyr { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    property <float> que: root.queue-on ? 1 : 0;
+    animate que { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    // Reclaim decoded queue covers once the Queue panel has finished hiding.
+    property <bool> queue-live: root.presenting && root.que > 0;
+    changed queue-live => {
+        if (!root.queue-live) {
+            App.np-queue-visible(0, 0);
+        }
+    }
 
     property <length> top: 64px;
     property <length> bottom: root.height - App.player-height - (root.narrow ? 8px : 24px);
@@ -3123,7 +3460,7 @@ export component NowPlayingView inherits Rectangle {
     property <length> narrow-meta-off: root.narrow-y + root.narrow-size + 12px;
     property <length> narrow-meta-on: root.bottom - root.meta-h + (root.meta-h - root.thumb) / 2;
 
-    // The art at rest, without lyrics (off) and with them (on).
+    // The art at rest, without a panel (off) and with Lyrics or Queue (on).
     property <length> off-size: root.narrow ? root.narrow-size : root.centred-size;
     property <length> off-x: (root.width - root.off-size) / 2;
     property <length> off-y: root.narrow ? root.narrow-y : root.top + (root.room - root.off-size) / 2;
@@ -3134,11 +3471,11 @@ export component NowPlayingView inherits Rectangle {
     // Destination-size art, scaled down to the player slot. Animating width/height
     // or drop-shadow-blur rebuilds a ~1000px Skia blur every frame: the art is
     // laid out once at the larger of its two sizes and only scaled, by the
-    // expansion and by the lyrics transition alike.
+    // expansion and by the panel transition alike.
     property <length> base: max(1px, root.off-size, root.on-size);
-    property <length> art: root.off-size + (root.on-size - root.off-size) * root.lyr;
-    property <length> dest-x: root.off-x + (root.on-x - root.off-x) * root.lyr;
-    property <length> dest-y: root.off-y + (root.on-y - root.off-y) * root.lyr;
+    property <length> art: root.off-size + (root.on-size - root.off-size) * root.panel;
+    property <length> dest-x: root.off-x + (root.on-x - root.off-x) * root.panel;
+    property <length> dest-y: root.off-y + (root.on-y - root.off-y) * root.panel;
     // The artwork's place in the dock at rest: the player bar's, or the phone
     // layout's mini player.
     property <length> slot: App.art-slot-size;
@@ -3159,6 +3496,16 @@ export component NowPlayingView inherits Rectangle {
     // Degrees as lengths: the marker's centre carries them.
     property <length> yaw: root.pu * 8px;
     property <length> pitch: root.pv * 8px;
+
+    // Queue panel frame (shared by the sibling glass card and QueueColumn).
+    property <length> queue-w: root.narrow ? max(0px, root.width - 2 * root.pad) : root.column-w;
+    property <length> queue-h: root.narrow
+        ? max(0px, root.narrow-meta-on - 12px - (root.top + 4px))
+        : max(0px, root.height - App.player-height - 64px - (root.top + 8px));
+    property <length> queue-x: (root.narrow ? root.pad : root.pair-x + root.side-size + root.gap)
+        + (root.narrow ? 0px : 36px * (1 - root.que));
+    property <length> queue-y: (root.narrow ? root.top + 4px : root.top + 8px)
+        + (root.narrow ? 24px * (1 - root.que) : 0px);
 
     Rectangle {
         x: root.slot-x + (root.dest-x - root.slot-x) * root.expansion;
@@ -3196,70 +3543,193 @@ export component NowPlayingView inherits Rectangle {
     }
 
     if root.meta && root.presenting: NowPlayingMeta {
-        // Under the art; in the narrow arrangement with lyrics, beside the
+        // Under the art; in the narrow arrangement with a panel, beside the
         // thumbnail at the bottom.
-        x: root.narrow ? root.pad + (root.thumb + 14px) * root.lyr : root.dest-x;
-        y: root.narrow ? root.narrow-meta-off + (root.narrow-meta-on - root.narrow-meta-off) * root.lyr
+        x: root.narrow ? root.pad + (root.thumb + 14px) * root.panel : root.dest-x;
+        y: root.narrow ? root.narrow-meta-off + (root.narrow-meta-on - root.narrow-meta-off) * root.panel
             : root.dest-y + root.art + 14px;
         width: root.narrow ? root.width - root.pad - self.x : max(200px, root.art);
         reveal: root.expansion;
     }
 
     if root.presenting && root.lyr > 0: LyricsColumn {
-        x: root.narrow ? root.pad : root.pair-x + root.side-size + root.gap + 48px * (1 - root.lyr);
+        x: root.narrow ? root.pad : root.pair-x + root.side-size + root.gap + (root.que > 0 ? -24px : 48px) * (1 - root.lyr);
         y: root.top;
         width: root.narrow ? root.width - 2 * root.pad : root.column-w;
         height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
         font-size: clamp(self.width * 0.045, 18px, 30px);
         reveal: root.expansion * root.lyr;
         glass: root.glass;
+        interactive: App.show-now-playing && root.lyrics-on;
     }
 
-    // Lyrics | Search, Debug, Profile, using the same tools as the other views.
-    // Narrow: the search gives way; Minimize moves up beside Lyrics. At the
-    // narrowest windows the row tightens so Minimize stays clear of the
-    // traffic lights (the window's left 80px of the top row).
+    // Floating Liquid Glass card behind QueueColumn: leaf rectangle so
+    // `opacity` feeds glass::draw directly with no offscreen save_layer.
+    if root.glass && root.presenting && root.que > 0: Rectangle {
+        x: root.queue-x;
+        y: root.queue-y;
+        width: root.queue-w;
+        height: root.queue-h;
+        border-radius: 20px;
+        opacity: root.expansion * root.que;
+        background: @conic-gradient(#474c5301 0deg, #ffffff14 360deg);
+    }
+
+    if root.presenting && root.que > 0: QueueColumn {
+        x: root.queue-x;
+        y: root.queue-y;
+        width: root.queue-w;
+        height: root.queue-h;
+        reveal: root.expansion * root.que;
+        glass: root.glass;
+        interactive: App.show-now-playing && root.queue-on;
+    }
+
+    // [ Lyrics | Queue ] | Search, Debug, Profile, using the same tools as the
+    // other views. Narrow: the search gives way; Minimize moves up beside the
+    // segmented pill. Below 420px the segments tighten so Minimize stays clear
+    // of the traffic lights (the window's left 80px of the top row).
     property <bool> tight: root.narrow && root.width < 360px;
-    lyrics-group := Rectangle {
+    property <bool> compact-pill: root.narrow && root.width < 420px;
+    property <length> seg-w: root.compact-pill ? 46px : 68px;
+    property <length> pill-pad: 3px;
+    property <length> pill-w: root.seg-w * 2 + root.pill-pad * 2;
+    property <length> divider-gap: root.compact-pill ? 5px : 15px;
+    property <length> group-w: root.pill-w + root.divider-gap + 1px + (root.compact-pill ? 4px : 15px);
+    property <int> panel-mode: root.queue-on ? 2 : root.lyrics-on ? 1 : 0;
+    property <int> last-mode: 0;
+    property <float> thumb-slot: 0;
+    property <bool> thumb-glide: false;
+    animate thumb-slot { duration: root.thumb-glide ? 280ms : 0ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    property <float> thumb-alpha: root.panel-mode > 0 ? 1 : 0;
+    animate thumb-alpha { duration: 200ms; easing: ease-out; }
+    changed panel-mode => {
+        if (root.panel-mode > 0) {
+            root.thumb-glide = root.last-mode > 0 && root.last-mode != root.panel-mode;
+            root.thumb-slot = root.panel-mode == 2 ? 1 : 0;
+        }
+        root.last-mode = root.panel-mode;
+    }
+    init => {
+        App.bar-covered = self.expansion >= 1;
+        root.last-mode = root.panel-mode;
+        root.thumb-slot = root.panel-mode == 2 ? 1 : 0;
+    }
+
+    // Glass capsule behind the [ Lyrics | Queue ] toggle: leaf rectangle so
+    // its opacity feeds glass::draw directly during expansion.
+    if root.glass && root.presenting: Rectangle {
+        x: panel-group.x;
+        y: 14px;
+        width: root.pill-w;
+        height: 36px;
+        border-radius: 18px;
+        opacity: root.expansion;
+        background: @conic-gradient(#474c5301 0deg, #ffffff18 360deg);
+    }
+
+    panel-group := Rectangle {
         x: header.x - self.width;
         y: 0px;
-        width: root.tight ? 92px : 101px;
+        width: root.group-w;
         height: 64px;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
         visible: root.presenting;
         // Lit when the lyrics show; dim when the track has none.
         property <bool> none: App.lyrics-status != "";
+
+        // Segmented pill track (plain fallback when glass is off; glass track
+        // sits behind this group as a leaf rectangle).
         Rectangle {
             x: 0px;
-            y: 15px;
-            width: 68px;
-            height: 34px;
-            border-radius: 17px;
-            background: App.show-lyrics && !lyrics-group.none ? (pill-ta.has-hover ? #e6e6e6 : white)
-                : pill-ta.has-hover ? #ffffff2e : #ffffff14;
-            animate background { duration: 150ms; }
-            accessible-role: button;
-            accessible-label: "Lyrics";
-            accessible-checked: App.show-lyrics;
-            accessible-action-default => { root.toggle-lyrics(); }
-            pill-ta := TouchArea {
-                enabled: App.show-now-playing;
-                mouse-cursor: pointer;
-                clicked => { root.toggle-lyrics(); }
+            y: 14px;
+            width: root.pill-w;
+            height: 36px;
+            border-radius: 18px;
+            background: root.glass ? transparent : #ffffff14;
+            border-width: root.glass ? 0px : 1px;
+            border-color: #ffffff1c;
+
+            // Hover washes for inactive segments.
+            Rectangle {
+                x: root.pill-pad;
+                y: root.pill-pad;
+                width: root.seg-w;
+                height: 30px;
+                border-radius: 15px;
+                background: !root.lyrics-on && pill-ta.has-hover ? #ffffff1f : transparent;
+                animate background { duration: 150ms; }
             }
-            Text {
-                text: "Lyrics";
-                color: App.show-lyrics && !lyrics-group.none ? black : lyrics-group.none ? #ffffff59 : white;
-                font-size: 14px;
-                font-weight: 600;
+            Rectangle {
+                x: root.pill-pad + root.seg-w;
+                y: root.pill-pad;
+                width: root.seg-w;
+                height: 30px;
+                border-radius: 15px;
+                background: !root.queue-on && queue-ta.has-hover ? #ffffff1f : transparent;
+                animate background { duration: 150ms; }
+            }
+
+            // Sliding active pill thumb (glides between Lyrics and Queue).
+            Rectangle {
+                x: root.pill-pad + root.seg-w * root.thumb-slot;
+                y: root.pill-pad;
+                width: root.seg-w;
+                height: 30px;
+                border-radius: 15px;
+                background: ((root.queue-on && queue-ta.has-hover) || (root.lyrics-on && pill-ta.has-hover) ? #e6e6e6 : #ffffff).with-alpha(root.thumb-alpha);
+            }
+
+            // Lyrics segment.
+            Rectangle {
+                x: root.pill-pad;
+                y: root.pill-pad;
+                width: root.seg-w;
+                height: 30px;
+                accessible-role: button;
+                accessible-label: "Lyrics";
+                accessible-checked: root.lyrics-on;
+                accessible-action-default => { App.toggle-np-lyrics(); }
+                pill-ta := TouchArea {
+                    enabled: App.show-now-playing;
+                    mouse-cursor: pointer;
+                    clicked => { App.toggle-np-lyrics(); }
+                }
+                Text {
+                    text: "Lyrics";
+                    color: root.lyrics-on ? black : panel-group.none ? #ffffff59 : white;
+                    animate color { duration: 180ms; }
+                    font-size: root.compact-pill ? 12px : 13.5px;
+                    font-weight: 600;
+                }
+            }
+
+            // Queue segment.
+            Rectangle {
+                x: root.pill-pad + root.seg-w;
+                y: root.pill-pad;
+                width: root.seg-w;
+                height: 30px;
+                accessible-role: button;
+                accessible-label: "Queue";
+                accessible-checked: root.queue-on;
+                accessible-action-default => { App.toggle-np-queue(); }
+                queue-ta := TouchArea {
+                    enabled: App.show-now-playing;
+                    mouse-cursor: pointer;
+                    clicked => { App.toggle-np-queue(); }
+                }
+                Text {
+                    text: "Queue";
+                    color: root.queue-on ? black : white;
+                    animate color { duration: 180ms; }
+                    font-size: root.compact-pill ? 12px : 13.5px;
+                    font-weight: 600;
+                }
             }
         }
-        Rectangle { x: root.tight ? 77px : 84px; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
-    }
-    function toggle-lyrics() {
-        App.show-lyrics = !App.show-lyrics;
-        App.set-show-lyrics(App.show-lyrics);
+        Rectangle { x: root.pill-w + root.divider-gap; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
     }
     header := HeaderTools {
         x: parent.width - self.width;
@@ -3272,9 +3742,9 @@ export component NowPlayingView inherits Rectangle {
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
     }
     MinimizeButton {
-        x: root.narrow ? max(80px, lyrics-group.x - (root.tight ? 6px : 8px) - self.width) : root.width - self.width - 32px;
+        x: root.narrow ? max(80px, panel-group.x - (root.tight ? 6px : 8px) - self.width) : root.width - self.width - 32px;
         y: root.narrow ? 14px : root.height - App.player-height - 52px;
-        width: root.narrow ? (root.tight ? 40px : 44px) : 96px;
+        width: root.narrow ? (root.tight ? 34px : 44px) : 96px;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
         visible: root.presenting;
