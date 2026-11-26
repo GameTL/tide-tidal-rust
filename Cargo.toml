@@ -14,6 +14,9 @@ exclude = ["vendor"]
 # capped and trimmed. See vendor/i-slint-renderer-skia/TIDE-PATCH.md.
 [patch.crates-io]
 i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
+# The window backend, with one fix for monitors that report 0 Hz (Wine, some
+# virtual displays). See vendor/i-slint-backend-winit/TIDE-PATCH.md.
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 
 [workspace.package]
 version = "1.2.2"
