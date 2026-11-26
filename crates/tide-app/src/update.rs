@@ -335,6 +335,13 @@ fn bundle_of(exe: &Path) -> Option<PathBuf> {
     is_bundle.then(|| bundle.to_path_buf())
 }
 
+/// Off Unix there is no app bundle to replace, so nothing counts as writable.
+#[cfg(not(unix))]
+fn writable(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {

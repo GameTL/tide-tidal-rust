@@ -1,7 +1,8 @@
 # TIDE
 
-A native TIDAL desktop app for macOS, written in pure Rust (Slint UI,
-Symphonia decoding, CoreAudio output). No Electron, no WebView.
+A native TIDAL desktop app for macOS, Linux and Windows, written in pure Rust
+(Slint UI, Symphonia decoding, CoreAudio output on macOS). No Electron, no
+WebView.
 
 **[Website](https://gametl.github.io/tide-tidal-rust/)** ·
 **[Download](https://github.com/GameTL/tide-tidal-rust/releases/latest)** ·
@@ -24,6 +25,30 @@ without a security prompt.
 Or [download the dmg](https://github.com/GameTL/tide-tidal-rust/releases/latest).
 TIDE isn't signed through Apple's paid Developer Program, so on first launch
 click Done, then System Settings › Privacy & Security › **Open Anyway**.
+
+### Linux (Ubuntu, Bazzite)
+
+With [Homebrew](https://brew.sh), on x86-64 or Arm and Ubuntu 22.04 or later:
+
+```sh
+brew tap gametl/tide https://github.com/GameTL/tide-tidal-rust
+brew install --cask tide
+```
+
+Start it with `tide` or from the app menu; `brew upgrade --cask tide` gets new
+releases. Sound goes through the system's default ALSA device (PipeWire and
+PulseAudio both provide one).
+
+### Windows 10 and 11
+
+[Download the installer](https://gametl.github.io/tide-tidal-rust/#download)
+(`TIDE-<version>-windows-x64-setup.exe`) and run it. It installs for your user
+without an admin prompt, adds TIDE to the Start menu, and uninstalls from
+Settings › Apps. Windows on Arm runs it too. TIDE isn't code-signed, so
+SmartScreen asks once: click **More info**, then **Run anyway**.
+
+Sample-rate switching, the Liquid Glass player bar, media keys, music videos
+and in-app updates are macOS-only for now.
 
 ## Features
 
@@ -97,7 +122,8 @@ synthetic covers and alternate between the artwork grid and settings.
 For the desktop client's Nationale font, extract the `Fonts` folder from the
 [TIDAL press kit](https://tidal.com/press) into `crates/tide-app/fonts`, or
 set `TIDAL_FONT_DIR` to its absolute path before building. Builds without
-these optional local files use Helvetica Neue.
+these optional local files use the system font (Helvetica Neue on macOS,
+Segoe UI on Windows, the fontconfig default on Linux).
 
 ## Layout
 
@@ -115,5 +141,7 @@ local data are handled.
 
 ## Releasing
 
-Merge a release PR (`staging` → `main`). That publishes a universal macOS dmg
-and refreshes the download page.
+Merge a release PR (`staging` → `main`). That publishes a universal macOS dmg,
+Linux x86_64 and arm64 tarballs and a Windows x64 installer, commits the Homebrew
+cask (`Casks/tide.rb`) for the tarballs to `staging`, and refreshes the download
+page.

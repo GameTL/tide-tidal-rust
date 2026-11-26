@@ -1,0 +1,63 @@
+---
+// The one download button: it offers the build for the visitor's system.
+// Without JavaScript (or on a phone) it shows the macOS download; the script
+// below swaps in Windows or Linux when the browser says that is where it runs
+// and the newest release carries that build.
+import InstallCommand from './InstallCommand.astro';
+import { brewCommand, latestMacDmg, latestWindows, latestLinuxTarball } from '../data/links';
+
+interface Props {
+  // The hero also offers the macOS Terminal installer under the button.
+  extras?: boolean;
+}
+const { extras = false } = Astro.props;
+---
+<div class="dl" data-dl>
+  <div class="dl-os" data-os="mac">
+    <a class="btn-primary" href={latestMacDmg}>
+      <svg class="os-icon" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M12.5 8.2c0-2.1 1.7-3.1 1.8-3.2-1-1.4-2.5-1.6-3-1.7-1.3-.1-2.5.8-3.1.8-.7 0-1.7-.7-2.8-.7-1.4 0-2.8.9-3.5 2.2-1.5 2.6-.4 6.4 1.1 8.5.7 1 1.6 2.2 2.7 2.1 1.1-.1 1.5-.7 2.8-.7s1.7.7 2.8.6c1.2-.1 1.9-1 2.6-2 .8-1.2 1.1-2.3 1.1-2.4-.1 0-2.2-.9-2.2-3.5zM10.3 2.6c.6-.7 1-1.7.9-2.6-.9 0-1.9.6-2.5 1.3-.6.6-1.1 1.6-.9 2.5 1 .1 1.9-.5 2.5-1.2z"></path>
+      </svg>
+      Download for macOS
+    </a>
+    {extras && (
+      <div class="dl-extra">
+        <span>or install from Terminal, no security prompt:</span>
+        <InstallCommand />
+      </div>
+    )}
+  </div>
+
+  {latestWindows && (
+    <div class="dl-os" data-os="windows" hidden>
+      <a class="btn-primary" href={latestWindows}>
+        <svg class="os-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M0 2.3 6.5 1.4v6.2H0zM7.3 1.3 16 0v7.6H7.3zM0 8.4h6.5v6.2L0 13.7zM7.3 8.4H16V16l-8.7-1.2z"></path>
+        </svg>
+        Download for Windows
+      </a>
+    </div>
+  )}
+
+  {latestLinuxTarball && (
+    <div class="dl-os" data-os="linux" hidden>
+      <div class="dl-extra">
+        <span>Install on Linux with Homebrew:</span>
+        <InstallCommand command={brewCommand} />
+      </div>
+    </div>
+  )}
+
+  <a class="text-link dl-other" href="#download">Other platforms</a>
+</div>
+
+<script>
+  // Which download fits this browser. Phones and unknown systems keep macOS.
+  const ua = navigator.userAgent;
+  const os = /Windows/.test(ua) ? 'windows' : /Linux/.test(ua) && !/Android/.test(ua) ? 'linux' : 'mac';
+  document.querySelectorAll<HTMLElement>('[data-dl]').forEach((dl) => {
+    const pick = dl.querySelector<HTMLElement>(`[data-os="${os}"]`);
+    if (!pick) return;
+    dl.querySelectorAll<HTMLElement>('[data-os]').forEach((el) => (el.hidden = el !== pick));
+  });
+</script>

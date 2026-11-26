@@ -19,6 +19,7 @@ ${site.name} is an unofficial, independent project. It is not affiliated with, e
 
 - Website: ${home}
 - Download (macOS universal, Apple Silicon and Intel): ${site.downloadUrl}
+- Windows 10 and 11, and Linux (Homebrew): ${home}#download
 - Source code: ${site.github}
 - ${version}
 

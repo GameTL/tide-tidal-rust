@@ -6,10 +6,10 @@ import { github, latestMacDmg } from './links';
 
 export const site = {
   name: 'TIDE',
-  title: 'TIDE: native TIDAL desktop app for macOS, written in Rust',
+  title: 'TIDE: native TIDAL desktop app for macOS, Windows and Linux, written in Rust',
   tagline: 'The native player for your TIDAL subscription.',
   description:
-    'TIDE is a fast, native TIDAL desktop app for macOS, written in pure Rust. Instant loading, bit-perfect playback without exclusive mode, a parametric EQ (DSP) with AutoEq profiles, and a music video quality selector. Free and open source.',
+    'TIDE is a fast, native TIDAL desktop app for macOS, Windows and Linux, written in pure Rust. Instant loading, bit-perfect playback without exclusive mode, a parametric EQ (DSP) with AutoEq profiles, and a music video quality selector. Free and open source.',
   // Other names people search for; also emitted as alternateName in JSON-LD.
   alternateNames: ['TIDE for TIDAL', 'TIDE TIDAL Rust', 'tide-tidal-rust'],
   keywords: [
@@ -22,6 +22,8 @@ export const site = {
     'TIDAL desktop app for macOS',
     'macOS desktop app',
     'TIDAL for macOS',
+    'TIDAL for Windows',
+    'TIDAL for Linux',
     'native TIDAL client',
     'Rust TIDAL client',
     'Rust implementation',
@@ -48,7 +50,7 @@ export const site = {
   // the Pages workflow after each deploy so Bing, DuckDuckGo and Yandex recrawl.
   indexNowKey: '8a260b7f4d363c5becd742606d9ed0f9',
   downloadUrl: latestMacDmg,
-  ogImage: { path: 'og.png', width: 1200, height: 630, alt: 'TIDE, a native TIDAL desktop app for macOS' },
+  ogImage: { path: 'og.png', width: 1200, height: 630, alt: 'TIDE, a native TIDAL desktop app' },
 } as const;
 
 export const features = [
@@ -63,6 +65,7 @@ export const features = [
   'Gapless playback, synced lyrics, playlists, mixes and artist pages',
   'Local cache: played music starts without touching the network',
   'macOS media keys and Now Playing integration',
+  'Runs on macOS, Windows 10 and 11, and Linux',
   'No telemetry, analytics, crash reports or update checks',
   'Native UI in pure Rust, GPU-rendered at the display’s refresh rate; no Electron or WebView',
 ];
@@ -72,7 +75,7 @@ export type Faq = { q: string; a: string };
 export const faqs: Faq[] = [
   {
     q: 'What is TIDE?',
-    a: 'TIDE is a free, open-source desktop app for macOS that plays TIDAL, written in pure Rust. It plays your TIDAL library bit-perfect, adds a parametric EQ, and replaces the Electron-based official app with a native one.',
+    a: 'TIDE is a free, open-source desktop app for macOS, Windows and Linux that plays TIDAL, written in pure Rust. It plays your TIDAL library bit-perfect, adds a parametric EQ, and replaces the Electron-based official app with a native one.',
   },
   {
     q: 'Is TIDE an official TIDAL app?',
@@ -92,11 +95,11 @@ export const faqs: Faq[] = [
   },
   {
     q: 'Does TIDE collect data or use telemetry?',
-    a: 'No. Login tokens, cache and play counts stay on your Mac. TIDE only connects to TIDAL for music and artwork, and to GitHub for AutoEq profiles when you ask for one. There are no analytics, crash reports or update checks.',
+    a: 'No. Login tokens, cache and play counts stay on your computer. TIDE only connects to TIDAL for music and artwork, and to GitHub for AutoEq profiles when you ask for one. There are no analytics, crash reports or update checks.',
   },
   {
     q: 'Which platforms does TIDE support?',
-    a: 'macOS, as a universal binary for Apple Silicon and Intel Macs. Linux and Windows builds are planned.',
+    a: 'macOS (Apple Silicon and Intel), Windows 10 and 11, and Linux (x86-64 and Arm, installed with Homebrew). Bit-perfect sample-rate switching, media keys, music videos and in-app updates are macOS-only for now.',
   },
   {
     q: 'Why does macOS say “Apple could not verify TIDE”?',

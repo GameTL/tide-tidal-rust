@@ -2280,8 +2280,6 @@ dependencies = [
 [[package]]
 name = "i-slint-backend-winit"
 version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae4fcf1b19e9cb109984d2af87d2b9485388c619265bff71dd523133888bee2"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -5781,7 +5779,7 @@ dependencies = [
 
 [[package]]
 name = "tide-api"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5796,7 +5794,7 @@ dependencies = [
 
 [[package]]
 name = "tide-app"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5826,11 +5824,12 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "winresource",
 ]
 
 [[package]]
 name = "tide-audio"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5844,7 +5843,7 @@ dependencies = [
 
 [[package]]
 name = "tide-cache"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5860,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "tide-macos"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -7183,6 +7182,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

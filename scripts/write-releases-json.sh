@@ -27,6 +27,8 @@ jq -n --arg generated "$generated" --slurpfile raw "$tmp" '
        + [$a[] | select(.name | test("macos-universal\\.dmg$"; "i"))]
        + [$a[] | select(.name | test("macos-universal\\.zip$"; "i"))])
     | .[0].browser_download_url? // null;
+  def asset_url(re):
+    [(.assets // [])[] | select(.name | test(re; "i"))][0].browser_download_url? // null;
   {
     generatedAt: $generated,
     releases: (
@@ -37,8 +39,9 @@ jq -n --arg generated "$generated" --slurpfile raw "$tmp" '
           tag: .tag_name,
           publishedAt: .published_at,
           macUniversalUrl: mac_url,
-          linuxUrl: null,
-          windowsUrl: null
+          linuxUrl: asset_url("linux-x86_64\\.tar\\.gz$"),
+          linuxArmUrl: asset_url("linux-aarch64\\.tar\\.gz$"),
+          windowsUrl: asset_url("windows-x64-setup\\.exe$")
         })
     )
   }

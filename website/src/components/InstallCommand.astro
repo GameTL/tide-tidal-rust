@@ -2,14 +2,16 @@
 import { installCommand } from '../data/links';
 
 interface Props {
+  command?: string;
+  label?: string;
   class?: string;
 }
 
-const { class: className } = Astro.props;
+const { command = installCommand, label = 'Copy install command', class: className } = Astro.props;
 ---
 <div class:list={['install-cmd', className]}>
-  <code><span class="install-prompt" aria-hidden="true">$</span>{installCommand}</code>
-  <button type="button" class="install-copy" data-copy={installCommand} aria-label="Copy install command">
+  <code><span class="install-prompt" aria-hidden="true">$</span>{command}</code>
+  <button type="button" class="install-copy" data-copy={command} aria-label={label}>
     Copy
   </button>
 </div>

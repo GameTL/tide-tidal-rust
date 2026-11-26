@@ -6,25 +6,13 @@ import Beats from '../components/Beats.astro';
 import Download from '../components/Download.astro';
 import Faq from '../components/Faq.astro';
 import Footer from '../components/Footer.astro';
-import releasesData from '../data/releases.json';
-
-type Release = {
-  version: string;
-  tag: string;
-  publishedAt: string | null;
-  macUniversalUrl: string | null;
-  linuxUrl: string | null;
-  windowsUrl: string | null;
-};
-
-const releases = (releasesData.releases ?? []) as Release[];
 ---
 <Layout>
   <Nav />
   <main>
     <Hero />
     <Beats />
-    <Download releases={releases} />
+    <Download />
     <Faq />
   </main>
   <Footer />

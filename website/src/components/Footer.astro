@@ -1,6 +1,7 @@
 ---
 import { Image } from 'astro:assets';
-import { github, latestMacDmg } from '../data/links';
+import DownloadButton from './DownloadButton.astro';
+import { github } from '../data/links';
 import { site } from '../data/site';
 import logo from '../assets/tide.png';
 ---
@@ -9,10 +10,7 @@ import logo from '../assets/tide.png';
     <h2 class="cta-title">Your music deserves<br />better than a browser tab.</h2>
     <p>Free and open source. Sign in with TIDAL and press play.</p>
     <div class="hero-ctas">
-      <a class="btn-primary" href={latestMacDmg}>Download for macOS</a>
-      <a class="text-link" href={`${github}/releases`} target="_blank" rel="noreferrer">
-        All releases <span aria-hidden="true">↗</span>
-      </a>
+      <DownloadButton />
     </div>
   </div>
 </section>

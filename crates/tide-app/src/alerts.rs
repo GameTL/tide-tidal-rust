@@ -127,16 +127,39 @@ fn wall_clock() -> String {
 }
 
 fn format_clock(unix_secs: i64) -> String {
-    #[cfg(unix)]
-    if let Some(hms) = local_hms(unix_secs) {
-        return hms;
+    if let Some(tm) = local_tm(unix_secs) {
+        return format!("{:02}:{:02}:{:02}", tm.hour, tm.min, tm.sec);
     }
     let secs = unix_secs.rem_euclid(86_400) as u64;
     format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// Local calendar time, from the C library's time zone rules.
+struct LocalTime {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    min: i32,
+    sec: i32,
+}
+
+impl LocalTime {
+    #[cfg(unix)]
+    fn from_tm(tm: &libc::tm) -> Self {
+        Self {
+            year: tm.tm_year + 1900,
+            month: tm.tm_mon + 1,
+            day: tm.tm_mday,
+            hour: tm.tm_hour,
+            min: tm.tm_min,
+            sec: tm.tm_sec,
+        }
+    }
+}
+
 #[cfg(unix)]
-fn local_tm(unix_secs: i64) -> Option<libc::tm> {
+fn local_tm(unix_secs: i64) -> Option<LocalTime> {
     let t = unix_secs as libc::time_t;
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY: `tm` is zeroed; `localtime_r` writes the broken-down local time into it.
@@ -144,13 +167,48 @@ fn local_tm(unix_secs: i64) -> Option<libc::tm> {
         return None;
     }
     // SAFETY: a non-null return means the fields were written.
-    Some(unsafe { tm.assume_init() })
+    let tm = unsafe { tm.assume_init() };
+    Some(LocalTime::from_tm(&tm))
 }
 
-#[cfg(unix)]
-fn local_hms(unix_secs: i64) -> Option<String> {
-    let tm = local_tm(unix_secs)?;
-    Some(format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec))
+#[cfg(windows)]
+fn local_tm(unix_secs: i64) -> Option<LocalTime> {
+    use std::ffi::c_int;
+    // The C runtime's `struct tm` (same layout in UCRT, MSVCRT and mingw).
+    #[repr(C)]
+    #[derive(Default)]
+    struct Tm {
+        sec: c_int,
+        min: c_int,
+        hour: c_int,
+        mday: c_int,
+        mon: c_int,
+        year: c_int,
+        wday: c_int,
+        yday: c_int,
+        isdst: c_int,
+    }
+    unsafe extern "C" {
+        fn _localtime64_s(tm: *mut Tm, time: *const i64) -> c_int;
+    }
+    let mut tm = Tm::default();
+    // SAFETY: both pointers are valid for the call; 0 means `tm` was filled.
+    if unsafe { _localtime64_s(&mut tm, &unix_secs) } != 0 {
+        return None;
+    }
+    Some(LocalTime {
+        year: tm.year + 1900,
+        month: tm.mon + 1,
+        day: tm.mday,
+        hour: tm.hour,
+        min: tm.min,
+        sec: tm.sec,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_tm(_unix_secs: i64) -> Option<LocalTime> {
+    None
 }
 
 /// Log-file timestamps carry the date too: the file outlives the day.
@@ -162,17 +220,11 @@ impl tracing_subscriber::fmt::time::FormatTime for LocalDateTimer {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        #[cfg(unix)]
         if let Some(tm) = local_tm(unix) {
             return write!(
                 w,
                 "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                tm.tm_year + 1900,
-                tm.tm_mon + 1,
-                tm.tm_mday,
-                tm.tm_hour,
-                tm.tm_min,
-                tm.tm_sec
+                tm.year, tm.month, tm.day, tm.hour, tm.min, tm.sec
             );
         }
         write!(w, "{unix}")
