@@ -2849,8 +2849,6 @@ component LyricRow inherits Rectangle {
     in property <bool> active;
     in property <bool> synced;
     in property <length> font-size;
-    // The column's edge fade and reveal, already multiplied.
-    in property <float> fade: 1;
     callback picked();
     callback current(length, length);
 
@@ -2859,10 +2857,10 @@ component LyricRow inherits Rectangle {
     changed y => { if (root.active) { root.current(root.y, root.height); } }
     changed height => { if (root.active) { root.current(root.y, root.height); } }
 
-    // How bright the line is, before the fade: animated on its own so the
-    // fade (which follows the scroll every frame) is not.
+    // How bright the line is; edge fading is applied per-pixel by the column's
+    // bounded GPU mask so rolling lines never mutate every row's colour each frame.
     property <float> level: root.active ? 1 : !root.synced ? 0.82 : ta.has-hover ? 0.7 : 0.38;
-    animate level { duration: 320ms; easing: ease-out; }
+    animate level { duration: 280ms; easing: ease-out; }
 
     // The gap to the next line is part of the line, so a click between two
     // lines still lands on one.
@@ -2871,7 +2869,7 @@ component LyricRow inherits Rectangle {
         padding-bottom: root.font-size * 0.4;
         Text {
             text: root.text;
-            color: #ffffff.with-alpha(root.level * root.fade);
+            color: #ffffff.with-alpha(root.level);
             font-size: root.font-size;
             font-weight: 600;
             wrap: word-wrap;
@@ -2885,8 +2883,9 @@ component LyricRow inherits Rectangle {
 }
 
 // The lyrics: every line, the one being sung kept a little above the middle,
-// lines fading out at the top and bottom edges. Scrolling by hand stops the
-// following until "Sync lyrics" is clicked.
+// fading smoothly per-pixel at the top and bottom edges. Scrolling by hand
+// stops following (with macOS elastic rubber-band overscroll) until "Sync lyrics"
+// is clicked.
 component LyricsColumn inherits Rectangle {
     // Expansion times the lyrics transition: how much of the column shows.
     in property <float> reveal: 1;
@@ -2894,6 +2893,8 @@ component LyricsColumn inherits Rectangle {
     in property <bool> glass: false;
     in property <bool> interactive: true;
     clip: true;
+    opacity: root.reveal;
+    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
     accessible-role: AccessibleRole.list;
     accessible-label: "Lyrics text";
 
@@ -2905,27 +2906,33 @@ component LyricsColumn inherits Rectangle {
     property <length> active-h: 0px;
     property <length> max-offset: max(0px, lines.preferred-height - root.height);
     property <length> follow: clamp(root.active-y + root.active-h / 2 - root.anchor, 0px, root.max-offset);
-    animate follow { duration: 650ms; easing: cubic-bezier(0.33, 0, 0.2, 1); }
+    animate follow { duration: 480ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     property <length> manual: 0px;
     // 1 while following; eases back to the song on "Sync lyrics", lets go at
     // once when scrolled by hand.
     property <float> mix: root.following ? 1 : 0;
-    animate mix { duration: root.following ? 600ms : 0ms; easing: ease-in-out; }
+    animate mix { duration: root.following ? 520ms : 0ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
     property <length> offset: root.manual + (root.follow - root.manual) * root.mix;
+    // Elastic macOS rubber-band overscroll when pulling past either end.
+    property <length> over-raw: 0px;
+    property <float> over-abs: abs(root.over-raw / 1px);
+    property <length> over-damped: (root.over-raw >= 0px ? 1px : -1px) * (root.over-abs / (1 + root.over-abs / 110)) * 0.55;
+    property <length> overscroll: App.np-scroll-touching ? root.over-damped : 0px;
+    animate overscroll { duration: App.np-scroll-touching ? 0ms : 340ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    property <bool> touching: App.np-scroll-touching;
+    changed touching => {
+        if (!root.touching) {
+            root.over-raw = 0px;
+        }
+    }
+    property <length> shown-offset: root.offset + root.overscroll;
 
     // A new track starts at the top, following.
     property <string> track: App.current-id;
     changed track => { root.resync(); root.active-y = 0px; root.active-h = 0px; }
     property <bool> open: App.show-now-playing;
     changed open => { if (root.open) { root.resync(); } }
-    function resync() { root.following = true; }
-
-    // Lines fade out within `band` of the top and bottom edges.
-    pure function edge(middle: length) -> float {
-        let pos = middle - root.offset;
-        let t = clamp(min(pos, root.height - pos) / root.band, 0, 1);
-        return t * t * (3 - 2 * t);
-    }
+    function resync() { root.following = true; root.over-raw = 0px; }
 
     scroller := TouchArea {
         scroll-event(e) => {
@@ -2936,34 +2943,66 @@ component LyricsColumn inherits Rectangle {
                 root.manual = root.offset;
                 root.following = false;
             }
-            root.manual = clamp(root.manual - e.delta-y, 0px, root.max-offset);
+            if (root.over-raw != 0px) {
+                let unwound = root.over-raw - e.delta-y;
+                if ((root.over-raw < 0px && unwound < 0px) || (root.over-raw > 0px && unwound > 0px)) {
+                    root.over-raw = clamp(unwound, -240px, 240px);
+                    return accept;
+                }
+                root.over-raw = 0px;
+            }
+            let next = root.manual - e.delta-y;
+            if (next < 0px) {
+                root.manual = 0px;
+                if (App.np-scroll-touching) {
+                    root.over-raw = clamp(root.over-raw + next, -240px, 0px);
+                }
+            } else if (next > root.max-offset) {
+                let extra = next - root.max-offset;
+                root.manual = root.max-offset;
+                if (App.np-scroll-touching) {
+                    root.over-raw = clamp(root.over-raw + extra, 0px, 240px);
+                }
+            } else {
+                root.manual = next;
+            }
             return accept;
         }
-        lines := VerticalLayout {
-            y: -root.offset;
-            width: root.width;
-            height: self.preferred-height;
-            padding-top: root.band;
-            padding-bottom: root.height - root.anchor;
-            for line[i] in App.lyrics: LyricRow {
-                text: line.text;
-                active: i == App.lyric-index;
-                synced: App.lyrics-synced && line.time >= 0 && root.interactive;
-                font-size: root.font-size;
-                fade: root.reveal * root.edge(self.y + self.height / 2);
-                current(y, h) => {
-                    root.active-y = y;
-                    root.active-h = h;
-                }
-                picked => {
-                    root.resync();
-                    App.seek-lyric(i);
+
+        // Bounded vertical edge-fade mask (vendor/i-slint-renderer-skia/fade.rs)
+        // also enables subpixel glyph positioning inside so rolling lines glide at 120 Hz.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @conic-gradient(at root.band root.band, #46414401 0deg, #46414401 360deg);
+
+            lines := VerticalLayout {
+                y: -root.shown-offset;
+                width: root.width;
+                height: self.preferred-height;
+                padding-top: root.band;
+                padding-bottom: root.height - root.anchor;
+                for line[i] in App.lyrics: LyricRow {
+                    text: line.text;
+                    active: i == App.lyric-index;
+                    synced: App.lyrics-synced && line.time >= 0 && root.interactive;
+                    font-size: root.font-size;
+                    visible: self.y + self.height >= root.shown-offset - 48px
+                        && self.y <= root.shown-offset + root.height + 48px;
+                    current(y, h) => {
+                        root.active-y = y;
+                        root.active-h = h;
+                    }
+                    picked => {
+                        root.resync();
+                        App.seek-lyric(i);
+                    }
                 }
             }
         }
     }
 
-    if !root.following && App.lyrics-synced && root.reveal > 0.99: Rectangle {
+    if !root.following && App.lyrics-synced && root.reveal >= 1: Rectangle {
         x: parent.width - self.width - 4px;
         y: parent.height - self.height - 8px;
         width: sync-label.preferred-width + 28px;
@@ -3001,7 +3040,6 @@ component QueueRow inherits Rectangle {
     height: 58px;
     border-radius: 10px;
     background: root.hot ? #ffffff1a : transparent;
-    animate background { duration: 140ms; easing: ease-out; }
 
     body := TouchArea {
         enabled: root.interactive;
@@ -3033,7 +3071,6 @@ component QueueRow inherits Rectangle {
         height: 42px;
         border-radius: 6px;
         background: root.hot ? #00000073 : transparent;
-        animate background { duration: 140ms; easing: ease-out; }
         if root.hot: Icon {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
@@ -3124,7 +3161,8 @@ component QueueRow inherits Rectangle {
 }
 
 // Upcoming tracks beside the artwork in Now Playing: borderless like Lyrics,
-// floating directly over the backdrop wash.
+// floating directly over the backdrop wash with 1:1 macOS trackpad scroll,
+// elastic rubber-band overscroll, and soft per-pixel edge fades.
 component QueueColumn inherits Rectangle {
     in property <float> reveal: 1;
     in property <bool> interactive: true;
@@ -3132,16 +3170,31 @@ component QueueColumn inherits Rectangle {
     property <length> header-h: App.np-context != "" ? 56px : 36px;
     property <length> row-h: 58px;
     property <length> list-pad: 4px;
+    property <length> view-h: max(0px, root.height - root.header-h);
+    property <length> content-h: App.np-queue.length * root.row-h + 2 * root.list-pad;
+    property <length> max-scroll: max(0px, root.content-h - root.view-h);
+    property <length> scroll: 0px;
+    // Elastic macOS rubber-band overscroll when pulling past the top or bottom.
+    property <length> over-raw: 0px;
+    property <float> over-abs: abs(root.over-raw / 1px);
+    property <length> over-damped: (root.over-raw >= 0px ? 1px : -1px) * (root.over-abs / (1 + root.over-abs / 110)) * 0.55;
+    property <length> overscroll: App.np-scroll-touching ? root.over-damped : 0px;
+    animate overscroll { duration: App.np-scroll-touching ? 0ms : 340ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    property <bool> touching: App.np-scroll-touching;
+    changed touching => {
+        if (!root.touching) {
+            root.over-raw = 0px;
+        }
+    }
+    property <length> shown-scroll: root.scroll + root.overscroll;
     // Match LyricsColumn's soft edge fade (0.16 of height) so scrolled rows
     // dissolve smoothly at both edges without hard-clipping. At scroll 0 the
     // top stays crisp under the header; at the bottom the last track clears.
-    property <length> fade-band: min(list.height * 0.16, 72px);
-    property <length> scrolled: max(0px, -list.content-y);
-    property <length> remaining: max(0px, list.content-height - list.height + list.content-y);
-    property <length> top-fade: min(root.scrolled * 1.5, root.fade-band);
-    property <length> bottom-fade: min(root.remaining * 1.5, root.fade-band);
-    property <int> first: max(0, floor((-list.content-y - root.list-pad) / root.row-h));
-    property <int> visible-rows: max(1, ceil(max(1px, list.height) / root.row-h) + 2);
+    property <length> fade-band: min(root.view-h * 0.16, 72px);
+    property <length> top-fade: min(max(0px, root.shown-scroll) * 1.5, root.fade-band);
+    property <length> bottom-fade: min(max(0px, root.max-scroll - root.shown-scroll) * 1.5, root.fade-band);
+    property <int> first: max(0, floor((root.shown-scroll - root.list-pad) / root.row-h));
+    property <int> visible-rows: max(1, ceil(max(1px, root.view-h) / root.row-h) + 2);
     property <int> queue-len: App.np-queue.length;
     property <string> current-track: App.current-id;
 
@@ -3161,12 +3214,13 @@ component QueueColumn inherits Rectangle {
         App.np-queue-visible(root.first, root.visible-rows);
     }
     changed current-track => {
-        list.content-y = 0px;
+        root.scroll = 0px;
+        root.over-raw = 0px;
         App.np-queue-visible(0, root.visible-rows);
     }
     changed queue-len => {
-        if (-list.content-y > max(0px, list.content-height - list.height)) {
-            list.content-y = -max(0px, list.content-height - list.height);
+        if (root.scroll > root.max-scroll) {
+            root.scroll = root.max-scroll;
         }
         App.np-queue-visible(root.first, root.visible-rows);
     }
@@ -3215,45 +3269,76 @@ component QueueColumn inherits Rectangle {
         }
     }
 
-    // Bounded vertical edge-fade mask (vendor/i-slint-renderer-skia/fade.rs)
-    // so scrolled rows softly dissolve into the backdrop at both edges.
+    // Direct 1:1 macOS trackpad viewport with elastic overscroll and bounded
+    // vertical edge-fade mask (vendor/i-slint-renderer-skia/fade.rs).
     Rectangle {
         x: 0px;
         y: root.header-h;
         width: parent.width;
-        height: max(0px, parent.height - root.header-h);
-        background: @conic-gradient(at root.top-fade root.bottom-fade, #46414401 0deg, #46414401 360deg);
+        height: root.view-h;
+        clip: true;
 
-        list := Flickable {
-            width: 100%;
-            height: 100%;
-            content-width: parent.width;
-            content-height: App.np-queue.length * root.row-h + 2 * root.list-pad;
-            interactive: root.interactive && App.np-queue.length > 0;
+        q-scroller := TouchArea {
+            scroll-event(e) => {
+                if (e.delta-y == 0 || !root.interactive || App.np-queue.length == 0) {
+                    return reject;
+                }
+                if (root.over-raw != 0px) {
+                    let unwound = root.over-raw - e.delta-y;
+                    if ((root.over-raw < 0px && unwound < 0px) || (root.over-raw > 0px && unwound > 0px)) {
+                        root.over-raw = clamp(unwound, -240px, 240px);
+                        return accept;
+                    }
+                    root.over-raw = 0px;
+                }
+                let next = root.scroll - e.delta-y;
+                if (next < 0px) {
+                    root.scroll = 0px;
+                    if (App.np-scroll-touching) {
+                        root.over-raw = clamp(root.over-raw + next, -240px, 0px);
+                    }
+                } else if (next > root.max-scroll) {
+                    let extra = next - root.max-scroll;
+                    root.scroll = root.max-scroll;
+                    if (App.np-scroll-touching) {
+                        root.over-raw = clamp(root.over-raw + extra, 0px, 240px);
+                    }
+                } else {
+                    root.scroll = next;
+                }
+                return accept;
+            }
 
-            for i in root.visible-rows: Rectangle {
-                x: 0px;
-                y: root.list-pad + (root.first + i) * root.row-h;
-                width: max(0px, root.width - 8px);
-                height: root.row-h;
-                background: transparent;
-                visible: root.first + i < App.np-queue.length;
-                if root.first + i < App.np-queue.length: QueueRow {
-                    width: parent.width;
-                    height: parent.height;
-                    track: App.np-queue[root.first + i];
-                    interactive: root.interactive;
-                    show-divider: root.first + i + 1 < App.np-queue.length;
-                    play => { App.play-queue-index(root.first + i); }
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: @conic-gradient(at root.top-fade root.bottom-fade, #46414401 0deg, #46414401 360deg);
+
+                for i in root.visible-rows: Rectangle {
+                    x: 0px;
+                    y: root.list-pad + (root.first + i) * root.row-h - root.shown-scroll;
+                    width: max(0px, root.width - 8px);
+                    height: root.row-h;
+                    background: transparent;
+                    visible: root.first + i < App.np-queue.length;
+                    if root.first + i < App.np-queue.length: QueueRow {
+                        width: parent.width;
+                        height: parent.height;
+                        track: App.np-queue[root.first + i];
+                        interactive: root.interactive;
+                        show-divider: root.first + i + 1 < App.np-queue.length;
+                        play => { App.play-queue-index(root.first + i); }
+                    }
                 }
             }
         }
     }
 
-    if list.content-height > list.height && list.height > 20px: Rectangle {
-        property <length> track-h: list.height - 12px;
-        property <length> thumb-h: clamp(self.track-h * (list.height / max(1px, list.content-height)), 28px, self.track-h);
-        property <float> frac: clamp(-list.content-y / max(1px, list.content-height - list.height), 0, 1);
+    if root.content-h > root.view-h && root.view-h > 20px: Rectangle {
+        property <length> track-h: root.view-h - 12px;
+        property <length> base-thumb-h: clamp(self.track-h * (root.view-h / max(1px, root.content-h)), 28px, self.track-h);
+        property <length> thumb-h: max(20px, self.base-thumb-h - abs(root.overscroll / 1px) * 0.4px);
+        property <float> frac: clamp(root.shown-scroll / max(1px, root.max-scroll), 0, 1);
         x: parent.width - 4px;
         y: root.header-h + 6px + (self.track-h - self.thumb-h) * self.frac;
         width: 3px;
@@ -3406,20 +3491,26 @@ export component NowPlayingView inherits Rectangle {
     // The overlay bar shows no title when compact: Now Playing does.
     property <bool> meta: App.compact-layout;
     property <length> meta-h: root.meta ? 68px : 0px;
-    // Right-column panels: mutually exclusive Lyrics or Queue.
+    // Right-column panels: mutually exclusive Lyrics or Queue, plus live 1:1
+    // two-finger horizontal trackpad swipe (`App.np-swipe-*`).
     property <bool> lyrics-on: App.show-lyrics && !App.show-queue && App.lyrics-status == "";
     property <bool> queue-on: App.show-queue;
     property <bool> panel-on: root.lyrics-on || root.queue-on;
+    property <float> swipe-p: App.np-swipe-progress;
+    property <float> swipe-s: clamp(root.swipe-p, 0, 1);
+    property <bool> swipe-shows-lyrics: App.np-swipe-active && !App.np-swipe-from-centred && App.lyrics-status == "";
     // 0 with artwork centred, 1 with a right column open; switching between
     // Lyrics and Queue keeps the artwork steady while the columns cross-glide.
-    property <float> panel: root.panel-on ? 1 : 0;
-    animate panel { duration: 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    property <float> panel: App.np-swipe-active ? (App.np-swipe-from-centred ? root.swipe-s : 1) : (root.panel-on ? 1 : 0);
+    animate panel { duration: App.np-swipe-active ? 0ms : 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
     property <float> lyr: root.lyrics-on ? 1 : 0;
-    animate lyr { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    animate lyr { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
     property <float> que: root.queue-on ? 1 : 0;
-    animate que { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    animate que { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    property <float> lyr-eff: App.np-swipe-active ? (root.swipe-shows-lyrics ? clamp((1 - root.swipe-s) * 2.5, 0, 1) : 0) : root.lyr;
+    property <float> que-eff: App.np-swipe-active ? clamp(root.swipe-s * 2.5, 0, 1) : root.que;
     // Reclaim decoded queue covers once the Queue panel has finished hiding.
-    property <bool> queue-live: root.presenting && root.que > 0;
+    property <bool> queue-live: root.presenting && root.que-eff > 0;
     changed queue-live => {
         if (!root.queue-live) {
             App.np-queue-visible(0, 0);
@@ -3539,33 +3630,50 @@ export component NowPlayingView inherits Rectangle {
         reveal: root.expansion;
     }
 
-    // Clipped right column so sliding between Lyrics and Queue (or opening
-    // from centred art) can never overlap the artwork.
-    if root.presenting && (root.lyr > 0 || root.que > 0): Rectangle {
-        x: root.col-x;
+    // Right-column box with soft left/right edge fades while sliding or swiping
+    // so content dissolves cleanly at both sides (never hard-clipping against
+    // the box edge, and never overlapping the artwork).
+    property <length> col-w: root.narrow ? max(0px, root.width - 2 * root.pad) : root.column-w;
+    property <length> swipe-span: root.col-w + 24px;
+    property <bool> sliding: App.np-swipe-active
+        || (root.lyr > 0 && root.lyr < 1)
+        || (root.que > 0 && root.que < 1)
+        || (root.panel > 0 && root.panel < 1);
+    property <length> side-fade: root.sliding ? (root.narrow ? min(root.pad, 24px) : min(root.gap * 0.72, 48px)) : 0px;
+
+    if root.presenting && (root.lyr-eff > 0 || root.que-eff > 0): Rectangle {
+        x: root.col-x - root.side-fade;
         y: 0px;
-        width: root.narrow ? max(0px, root.width - 2 * root.pad) : max(0px, root.width - root.col-x);
+        width: root.col-w + 2 * root.side-fade;
         height: root.height;
         clip: true;
 
-        if root.lyr > 0: LyricsColumn {
-            x: (root.que > 0 ? -36px : 40px) * (1 - root.lyr);
-            y: root.top;
-            width: root.narrow ? parent.width : root.column-w;
-            height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
-            font-size: clamp(self.width * 0.045, 18px, 30px);
-            reveal: root.expansion * root.panel-fade * root.lyr;
-            glass: root.glass;
-            interactive: App.show-now-playing && root.lyrics-on;
-        }
+        // Horizontal smoothstep alpha fade along both sides while sliding/swiping
+        // (vendor/i-slint-renderer-skia/fade.rs); zero layer cost at rest.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @conic-gradient(at root.side-fade root.side-fade, #46414801 0deg, #46414801 360deg);
 
-        if root.que > 0: QueueColumn {
-            x: 44px * (1 - root.que);
-            y: root.queue-y;
-            width: root.narrow ? parent.width : root.column-w;
-            height: root.queue-h;
-            reveal: root.expansion * root.panel-fade * root.que;
-            interactive: App.show-now-playing && root.queue-on;
+            if root.lyr-eff > 0: LyricsColumn {
+                x: root.side-fade + (App.np-swipe-active ? -root.swipe-span * root.swipe-p : (root.que > 0 ? -44px : 44px) * (1 - root.lyr));
+                y: root.top;
+                width: root.col-w;
+                height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
+                font-size: clamp(self.width * 0.045, 18px, 30px);
+                reveal: root.expansion * root.panel-fade * root.lyr-eff;
+                glass: root.glass;
+                interactive: App.show-now-playing && !App.np-swipe-active && root.lyrics-on;
+            }
+
+            if root.que-eff > 0: QueueColumn {
+                x: root.side-fade + (App.np-swipe-active ? root.swipe-span * (1 - root.swipe-p) : 44px * (1 - root.que));
+                y: root.queue-y;
+                width: root.col-w;
+                height: root.queue-h;
+                reveal: root.expansion * root.panel-fade * root.que-eff;
+                interactive: App.show-now-playing && !App.np-swipe-active && root.queue-on;
+            }
         }
     }
 
@@ -3586,10 +3694,16 @@ export component NowPlayingView inherits Rectangle {
     property <bool> thumb-glide: false;
     animate thumb-slot { duration: root.thumb-glide ? 280ms : 0ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
     property <float> thumb-alpha: root.panel-mode > 0 ? 1 : 0;
-    animate thumb-alpha { duration: 200ms; easing: ease-out; }
+    animate thumb-alpha { duration: App.np-swipe-active ? 0ms : 200ms; easing: ease-out; }
+    property <float> thumb-pos: App.np-swipe-active ? (App.np-swipe-from-centred ? 1 : clamp(root.swipe-p, -0.06, 1.06)) : root.thumb-slot;
+    property <float> thumb-vis: App.np-swipe-active ? (App.np-swipe-from-centred ? root.swipe-s : 1) : root.thumb-alpha;
+    property <bool> pill-lyrics-lit: App.np-swipe-active ? (root.swipe-shows-lyrics && root.swipe-s < 0.5) : root.lyrics-on;
+    property <bool> pill-queue-lit: App.np-swipe-active ? (root.swipe-s >= 0.5) : root.queue-on;
+    property <float> lyrics-cover: root.thumb-vis * clamp(1 - root.thumb-pos, 0, 1);
+    property <float> queue-cover: root.thumb-vis * clamp(root.thumb-pos, 0, 1);
     changed panel-mode => {
         if (root.panel-mode > 0) {
-            root.thumb-glide = root.last-mode > 0 && root.last-mode != root.panel-mode;
+            root.thumb-glide = !App.np-swipe-active && root.last-mode > 0 && root.last-mode != root.panel-mode;
             root.thumb-slot = root.panel-mode == 2 ? 1 : 0;
         }
         root.last-mode = root.panel-mode;
@@ -3642,7 +3756,7 @@ export component NowPlayingView inherits Rectangle {
                 width: root.seg-w;
                 height: 30px;
                 border-radius: 15px;
-                background: !root.lyrics-on && pill-ta.has-hover ? #ffffff1f : transparent;
+                background: !root.pill-lyrics-lit && pill-ta.has-hover ? #ffffff1f : transparent;
                 animate background { duration: 150ms; }
             }
             Rectangle {
@@ -3651,18 +3765,18 @@ export component NowPlayingView inherits Rectangle {
                 width: root.seg-w;
                 height: 30px;
                 border-radius: 15px;
-                background: !root.queue-on && queue-ta.has-hover ? #ffffff1f : transparent;
+                background: !root.pill-queue-lit && queue-ta.has-hover ? #ffffff1f : transparent;
                 animate background { duration: 150ms; }
             }
 
-            // Sliding active pill thumb (glides between Lyrics and Queue).
+            // Sliding active pill thumb (tracks fingers 1:1 during swipe and glides on click).
             Rectangle {
-                x: root.pill-pad + root.seg-w * root.thumb-slot;
+                x: root.pill-pad + root.seg-w * root.thumb-pos;
                 y: root.pill-pad;
                 width: root.seg-w;
                 height: 30px;
                 border-radius: 15px;
-                background: ((root.queue-on && queue-ta.has-hover) || (root.lyrics-on && pill-ta.has-hover) ? #e6e6e6 : #ffffff).with-alpha(root.thumb-alpha);
+                background: ((root.pill-queue-lit && queue-ta.has-hover) || (root.pill-lyrics-lit && pill-ta.has-hover) ? #e6e6e6 : #ffffff).with-alpha(root.thumb-vis);
             }
 
             // Lyrics segment.
@@ -3682,8 +3796,7 @@ export component NowPlayingView inherits Rectangle {
                 }
                 Text {
                     text: "Lyrics";
-                    color: root.lyrics-on ? black : panel-group.none ? #ffffff59 : white;
-                    animate color { duration: 180ms; }
+                    color: panel-group.none ? #ffffff59 : black.mix(white, root.lyrics-cover);
                     font-size: root.compact-pill ? 12px : 13.5px;
                     font-weight: 600;
                 }
@@ -3706,8 +3819,7 @@ export component NowPlayingView inherits Rectangle {
                 }
                 Text {
                     text: "Queue";
-                    color: root.queue-on ? black : white;
-                    animate color { duration: 180ms; }
+                    color: black.mix(white, root.queue-cover);
                     font-size: root.compact-pill ? 12px : 13.5px;
                     font-weight: 600;
                 }

@@ -371,6 +371,43 @@ fn now_playing_arrangements_render() {
         )
         .unwrap();
     }
+
+    // Live 1:1 trackpad swipe mid-gesture (progress = 0.45): Lyrics glides left,
+    // Queue glides in side-by-side from the right without overlapping Lyrics,
+    // pill thumb tracks 45%, and both sides of the right-column box dissolve
+    // softly into the backdrop without hard clip.
+    app.set_show_queue(false);
+    app.set_show_lyrics(true);
+    let lyrics_base = shoot(&ui, "np-swipe-base-glass");
+    app.set_np_swipe_from_centred(false);
+    app.set_np_swipe_active(true);
+    app.set_np_swipe_progress(0.45);
+    let swipe = shoot(&ui, "np-swipe-mid-glass");
+    let diff = |a: (u8, u8, u8), b: (u8, u8, u8)| -> i32 {
+        (a.0 as i32 - b.0 as i32).abs()
+            + (a.1 as i32 - b.1 as i32).abs()
+            + (a.2 as i32 - b.2 as i32).abs()
+    };
+    // At 1440x900: col-x ≈ 757, col-w = 560, side-fade ≈ 47 -> box spans
+    // roughly x=710..1364. Compare against the settled `lyrics_base` at the
+    // exact same coordinates (outside col-x..col-x+col-w, so identical backdrop
+    // and artwork shadow) to isolate edge leakage from background gradients.
+    let mut left_max = 0;
+    let mut right_max = 0;
+    for y in (260..680).step_by(12) {
+        left_max = left_max.max(diff(at(&swipe, 712., y as f32), at(&lyrics_base, 712., y as f32)));
+        right_max = right_max.max(diff(at(&swipe, 1362., y as f32), at(&lyrics_base, 1362., y as f32)));
+    }
+    assert!(
+        left_max < 24,
+        "live swipe left box edge hard-clipped (max diff={left_max})"
+    );
+    assert!(
+        right_max < 24,
+        "live swipe right box edge hard-clipped (max diff={right_max})"
+    );
+    app.set_np_swipe_active(false);
+    app.set_np_swipe_progress(0.);
     app.set_show_queue(false);
     app.set_show_now_playing(false);
     settle();

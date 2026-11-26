@@ -672,6 +672,13 @@ export global App {
     callback seek-lyric(int);
     // The Queue panel of Now Playing (mutually exclusive with Lyrics).
     in-out property <bool> show-queue: false;
+    // Live two-finger horizontal trackpad swipe between Lyrics (0) and Queue (1).
+    in property <bool> np-swipe-active: false;
+    in property <float> np-swipe-progress: 0;
+    in property <bool> np-swipe-from-centred: false;
+    // True while fingers are down on the trackpad during a vertical scroll in
+    // Now Playing, so Lists stretch elastically at the ends and spring back on lift.
+    in property <bool> np-scroll-touching: false;
     // Upcoming tracks in play order (after the track currently playing).
     in property <[TrackData]> np-queue;
     // Jump to row `index` of `np-queue`, keeping the rest of the queue intact.

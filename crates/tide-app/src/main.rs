@@ -116,6 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     );
+    // Keep synced lyrics rolling tightly on beat while Now Playing is open.
+    let lyrics_ticker = slint::Timer::default();
+    let lyrics_ui = ui.clone();
+    lyrics_ticker.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(60),
+        move || lyrics_ui.tick_lyrics(),
+    );
 
     if let Some(dir) = snapshot_dir {
         ui.run_snapshot_tour(dir, args.iter().any(|a| a == "--play"));
