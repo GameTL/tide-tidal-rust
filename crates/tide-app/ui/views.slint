@@ -3378,10 +3378,11 @@ export component NowPlayingView inherits Rectangle {
         visible: root.presenting;
         background: @linear-gradient(180deg, App.np-tint.with-alpha(root.expansion) 0%, App.np-tint.darker(0.6).with-alpha(root.expansion) 55%, #1a1716.with-alpha(root.expansion) 100%);
     }
-    // Glass: the cover's colours wash the whole view, so the glass panes have
-    // something to show; darkened towards the bottom for the lyrics and bar.
-    property <bool> glass: App.glass && App.np-backdrop.width > 0;
-    if root.glass && root.presenting: Image {
+    // Glass: the cover's colours wash the whole view when available, while the
+    // chrome controls still render as Liquid Glass whenever App.glass is on.
+    property <bool> glass: App.glass;
+    property <bool> backdrop-glass: App.glass && App.np-backdrop.width > 0;
+    if root.backdrop-glass && root.presenting: Image {
         width: 100%;
         height: 100%;
         source: App.np-backdrop;
@@ -3389,7 +3390,7 @@ export component NowPlayingView inherits Rectangle {
         image-rendering: smooth;
         opacity: root.expansion;
     }
-    if root.glass && root.presenting: Rectangle {
+    if root.backdrop-glass && root.presenting: Rectangle {
         background: @linear-gradient(180deg, #000000.with-alpha(0.34 * root.expansion) 0%, #000000.with-alpha(0.5 * root.expansion) 60%, #000000.with-alpha(0.62 * root.expansion) 100%);
     }
     // The collapsed artwork lets the original player-bar hit area handle clicks.
