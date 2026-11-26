@@ -1,3 +1,6 @@
+// A release build on Windows is a GUI program: no console window behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod alerts;
 mod controller;
 mod logfile;
@@ -175,6 +178,14 @@ fn restore_output_on_exit(ctx: &std::sync::Arc<Ctx>) {
         atexit(at_exit);
     }
 
+    #[cfg(not(unix))]
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            // `exit` runs the handler registered above.
+            std::process::exit(0);
+        }
+    });
+    #[cfg(unix)]
     tokio::spawn(async {
         use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut interrupt), Ok(mut terminate)) = (
@@ -196,7 +207,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let cmd = args[1].as_str();
     match cmd {
         "--help" | "-h" => {
-            println!("TIDE - a pure-Rust desktop player for TIDAL (macOS)");
+            println!("TIDE - a pure-Rust desktop player for TIDAL");
             println!("Usage:");
             println!("  TIDE                  Launch the 1:1 Tidal desktop GUI");
             println!("  TIDE --login          Start OAuth2 Device Code login (tidal.com/device)");

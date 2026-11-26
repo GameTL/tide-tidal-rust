@@ -22,7 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "Nationale"
     } else {
-        "Helvetica Neue"
+        // The target's own UI font. Empty is Slint's default: fontconfig's
+        // sans-serif on Linux.
+        match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+            Ok("macos") => "Helvetica Neue",
+            Ok("windows") => "Segoe UI",
+            _ => "",
+        }
     };
     source.push_str(&format!(
         "export global Typography {{ out property <string> family: \"{family}\"; }}\n"
@@ -31,5 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = slint_build::CompilerConfiguration::new()
         .with_library_paths(HashMap::from([("typography".into(), typography)]));
     slint_build::compile_with_config("ui/app.slint", config)?;
+    // The icon Explorer and the taskbar show for TIDE.exe.
+    #[cfg(windows)]
+    winresource::WindowsResource::new()
+        .set_icon("assets/TIDE.ico")
+        .compile()?;
     Ok(())
 }
