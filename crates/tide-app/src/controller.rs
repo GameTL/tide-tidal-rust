@@ -799,6 +799,28 @@ mod tests {
     }
 
     #[test]
+    fn now_playing_swipe_toggles_between_lyrics_and_queue() {
+        // Viewing Lyrics: swipe left opens Queue; swipe right stays put.
+        assert_eq!(np_swipe_target(false, true, true, false), Some(true));
+        assert_eq!(np_swipe_target(false, true, true, true), None);
+        // Viewing Queue: swipe right returns to Lyrics (or closes Queue without lyrics); swipe left stays put.
+        assert_eq!(np_swipe_target(true, false, true, true), Some(false));
+        assert_eq!(np_swipe_target(true, false, false, true), Some(false));
+        assert_eq!(np_swipe_target(true, false, true, false), None);
+        // Centred artwork (neither open): swipe left opens Queue, swipe right opens Lyrics when available.
+        assert_eq!(np_swipe_target(false, false, true, false), Some(true));
+        assert_eq!(np_swipe_target(false, false, true, true), Some(false));
+        assert_eq!(np_swipe_target(false, false, false, true), None);
+
+        // Threshold and flick detection.
+        assert!(np_swipe_commits(56.0, 0.0));
+        assert!(np_swipe_commits(20.0, 400.0));
+        assert!(!np_swipe_commits(12.0, 500.0));
+        assert!(!np_swipe_commits(30.0, 80.0));
+        assert!(!np_swipe_commits(70.0, -350.0));
+    }
+
+    #[test]
     fn pane_is_cut_out_of_the_window_snapshot() {
         let mut window = SharedPixelBuffer::<Rgba8Pixel>::new(8, 6);
         for (i, px) in window.make_mut_slice().iter_mut().enumerate() {
@@ -1345,6 +1367,7 @@ pub struct Ui {
     ctx: Arc<Ctx>,
     state: RefCell<State>,
     nav: RefCell<Nav>,
+    np_swipe: RefCell<Option<NpSwipe>>,
     clipboard: RefCell<Option<arboard::Clipboard>>,
     video: RefCell<video::VideoState>,
     dsp: RefCell<dsp::DspState>,
@@ -1439,6 +1462,44 @@ fn ease_in_out(t: f32) -> f32 {
     } else {
         1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
     }
+}
+
+/// A horizontal two-finger swipe inside Now Playing (between Lyrics and Queue).
+struct NpSwipe {
+    /// `true` switches towards Queue (swipe left); `false` towards Lyrics (swipe right).
+    to_queue: bool,
+    /// Cumulative logical-pixel travel in the swipe's target direction.
+    travel: f32,
+    samples: VecDeque<(Instant, f32)>,
+}
+
+/// Target panel for a horizontal two-finger swipe in Now Playing.
+/// `right` is a swipe to the right (`dx > 0`, towards the left Lyrics segment);
+/// `!right` is a swipe to the left (`dx < 0`, towards the right Queue segment).
+/// Returns `Some(true)` to show Queue, `Some(false)` to show Lyrics (or close
+/// Queue when the track has no lyrics), or `None` when already on that side.
+fn np_swipe_target(
+    show_queue: bool,
+    show_lyrics: bool,
+    has_lyrics: bool,
+    right: bool,
+) -> Option<bool> {
+    if right {
+        if show_queue || (!show_lyrics && has_lyrics) {
+            Some(false)
+        } else {
+            None
+        }
+    } else if !show_queue {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Whether a released Now Playing horizontal swipe commits the panel switch.
+fn np_swipe_commits(travel: f32, velocity: f32) -> bool {
+    (travel >= 40.0 && velocity > -200.0) || (travel >= 16.0 && velocity > 280.0)
 }
 
 /// Whether a released swipe completes the page change. `p` is how far the pane
@@ -2666,6 +2727,7 @@ impl Ui {
                 ..Default::default()
             }),
             nav: RefCell::default(),
+            np_swipe: RefCell::default(),
             clipboard: RefCell::default(),
             video: RefCell::default(),
             dsp: RefCell::default(),
@@ -5298,13 +5360,54 @@ impl Ui {
     }
 
     /// A horizontal two-finger swipe started. `back` is a swipe to the right.
-    /// False when there is no page in that direction.
-    pub fn swipe_begin(self: &Rc<Self>, back: bool) -> bool {
-        self.nav_begin(if back { -1 } else { 1 })
+    /// Inside Now Playing this toggles between Lyrics (left) and Queue (right);
+    /// elsewhere it steps through page history when `allow_page` is true.
+    pub fn swipe_begin(self: &Rc<Self>, back: bool, allow_page: bool) -> bool {
+        let app = self.app();
+        if app.get_logged_in() && app.get_show_now_playing() {
+            if app.get_video_open()
+                || app.get_menu_open()
+                || app.get_debug_open()
+                || !app.get_create_kind().is_empty()
+            {
+                return false;
+            }
+            let has_lyrics = app.get_lyrics_status().is_empty();
+            let Some(to_queue) = np_swipe_target(
+                app.get_show_queue(),
+                app.get_show_lyrics(),
+                has_lyrics,
+                back,
+            ) else {
+                return false;
+            };
+            *self.np_swipe.borrow_mut() = Some(NpSwipe {
+                to_queue,
+                travel: 0.0,
+                samples: VecDeque::new(),
+            });
+            return true;
+        }
+        allow_page && self.nav_begin(if back { -1 } else { 1 })
     }
 
     /// The fingers moved `dx` logical pixels (positive to the right).
     pub fn swipe_move(&self, dx: f32) {
+        if let Some(swipe) = self.np_swipe.borrow_mut().as_mut() {
+            let dir = if swipe.to_queue { -dx } else { dx };
+            swipe.travel = (swipe.travel + dir).clamp(0.0, 320.0);
+            let now = Instant::now();
+            let travel = swipe.travel;
+            swipe.samples.push_back((now, travel));
+            while swipe
+                .samples
+                .front()
+                .is_some_and(|(t, _)| now - *t > Duration::from_millis(120))
+            {
+                swipe.samples.pop_front();
+            }
+            return;
+        }
         let width = self.app().get_pane_width().max(1.0);
         let p = {
             let mut nav = self.nav.borrow_mut();
@@ -5328,8 +5431,38 @@ impl Ui {
         self.nav_set(p);
     }
 
-    /// The fingers lifted: finish the page change or put the page back.
+    /// The fingers lifted: finish the page change or Now Playing panel switch.
     pub fn swipe_end(self: &Rc<Self>, cancelled: bool) {
+        if let Some(swipe) = self.np_swipe.borrow_mut().take() {
+            let velocity = match (swipe.samples.front(), swipe.samples.back()) {
+                (Some((t0, x0)), Some((t1, x1)))
+                    if *t1 >= *t0 + Duration::from_millis(4)
+                        && t1.elapsed() < Duration::from_millis(100) =>
+                {
+                    (x1 - x0) / (*t1 - *t0).as_secs_f32()
+                }
+                _ => 0.0,
+            };
+            let app = self.app();
+            if !cancelled
+                && app.get_show_now_playing()
+                && !app.get_video_open()
+                && np_swipe_commits(swipe.travel, velocity)
+            {
+                if swipe.to_queue {
+                    app.set_show_queue(true);
+                    app.set_show_lyrics(false);
+                } else {
+                    let has_lyrics = app.get_lyrics_status().is_empty();
+                    app.set_show_queue(false);
+                    if has_lyrics {
+                        app.set_show_lyrics(true);
+                        self.update_settings(|s| s.show_lyrics = true);
+                    }
+                }
+            }
+            return;
+        }
         let (p, velocity) = {
             let nav = self.nav.borrow();
             if !matches!(nav.phase, NavPhase::Tracking) {
@@ -8945,7 +9078,7 @@ impl Ui {
                 200,
                 "06f-swipe-held",
                 Box::new(|ui| {
-                    if ui.swipe_begin(true) {
+                    if ui.swipe_begin(true, true) {
                         ui.swipe_move(ui.app().get_pane_width() * 0.4);
                     }
                 }),

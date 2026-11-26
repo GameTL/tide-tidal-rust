@@ -1626,12 +1626,13 @@ impl SwipeTracker {
                     if x.abs() + y.abs() < Self::SLOP {
                         return false;
                     }
-                    // Mostly sideways, with a page in that direction: content
-                    // moving right uncovers the previous page.
+                    // Mostly sideways: inside Now Playing this switches between
+                    // Lyrics and Queue; elsewhere it steps through page history
+                    // when macOS "Swipe between pages" is enabled.
                     let sideways = x.abs() > 2.0 * y.abs();
                     if sideways
-                        && swipe_between_pages()
-                        && with_ui(|ui| ui.swipe_begin(x > 0.0)) == Some(true)
+                        && with_ui(|ui| ui.swipe_begin(x > 0.0, swipe_between_pages()))
+                            == Some(true)
                     {
                         with_ui(|ui| ui.swipe_move(x));
                         *self = Self::Swiping;
