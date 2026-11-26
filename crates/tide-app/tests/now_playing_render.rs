@@ -212,6 +212,33 @@ fn now_playing_arrangements_render() {
         .collect::<Vec<_>>(),
     )));
 
+    app.set_np_similar(app.get_np_queue());
+    app.set_np_radios(ModelRc::new(VecModel::from(
+        [("Artist radio", "The Fixture Ensemble"), ("Track radio", "Paper Boats")]
+            .into_iter()
+            .map(|(subtitle, title)| CardData {
+                id: title.into(),
+                kind: "mix".into(),
+                title: title.into(),
+                subtitle: subtitle.into(),
+                image: cover(320),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    app.set_np_credits(ModelRc::new(VecModel::from(
+        [
+            ("Producer", "Ada Fixture, Ben Fixture, Cleo Fixture-de-la-Longname, Dov Fixture"),
+            ("Composer", "Ada Fixture, Ben Fixture"),
+            ("Lyricist", "Ben Fixture"),
+            ("Released", "2010"),
+            ("Label", "℗ 2010 Fixture Records"),
+        ]
+        .into_iter()
+        .map(|(role, names)| CreditLine { role: role.into(), names: names.into() })
+        .collect::<Vec<_>>(),
+    )));
+
     for glass in [true, false] {
         let g = if glass { "glass" } else { "plain" };
         app.set_glass(glass);
@@ -239,6 +266,15 @@ fn now_playing_arrangements_render() {
         app.set_show_queue(false);
         app.set_show_lyrics(false);
         let centred = shoot(&ui, &format!("np-wide-centred-{g}"));
+        // Wide, Similar tracks and Credits: art left, the tab where the queue
+        // sits.
+        app.set_np_tab("similar".into());
+        let similar = shoot(&ui, &format!("np-wide-similar-{g}"));
+        app.set_np_tab("credits".into());
+        let credits = shoot(&ui, &format!("np-wide-credits-{g}"));
+        app.set_np_tab("".into());
+        assert_ne!(at(&similar, 720., 420.), at(&centred, 720., 420.));
+        assert_ne!(at(&credits, 720., 420.), at(&centred, 720., 420.));
         // Centre of the window is art without a panel; with lyrics or queue it
         // is the gap between art and column, i.e. background.
         assert_ne!(at(&lyrics, 720., 420.), at(&centred, 720., 420.));
@@ -295,6 +331,39 @@ fn now_playing_arrangements_render() {
         app.set_show_now_playing(false);
         settle();
     }
+
+    // A light cover (white sleeve): the header switches to dark ink, the
+    // chosen segment to a dark thumb, glass and plain alike.
+    let pale = {
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(32, 32);
+        for p in buffer.make_mut_slice() {
+            *p = Rgba8Pixel { r: 238, g: 236, b: 230, a: 255 };
+        }
+        slint::Image::from_rgba8(buffer)
+    };
+    let (saved_wash, saved_tint) = (app.get_np_backdrop(), app.get_np_tint());
+    app.set_np_backdrop(pale);
+    app.set_np_backdrop_luma(0.93);
+    app.set_np_tint(slint::Color::from_rgb_u8(226, 224, 218));
+    resize(&ui, 1440., 900.);
+    app.set_np_tab("similar".into());
+    app.set_show_now_playing(true);
+    for glass in [true, false] {
+        app.set_glass(glass);
+        let g = if glass { "glass" } else { "plain" };
+        assert!(app.get_np_light(), "a pale cover counts as light ({g})");
+        let shot = shoot(&ui, &format!("np-wide-light-{g}"));
+        // Inside the Similar thumb, left of its label: dark.
+        let (r, gr, b) = at(&shot, 1440. - 407. - 309. + 3. + 68. * 2. + 6., 40. + 32.);
+        assert!(r < 80 && gr < 80 && b < 80, "light backdrop gets a dark thumb ({g}: {r},{gr},{b})");
+    }
+    app.set_np_tab("".into());
+    app.set_show_now_playing(false);
+    settle();
+    app.set_np_backdrop(saved_wash);
+    app.set_np_backdrop_luma(0.);
+    app.set_np_tint(saved_tint);
+    assert!(!app.get_np_light());
 
     // Tight narrow (320px) + empty queue with glass on.
     app.set_glass(true);

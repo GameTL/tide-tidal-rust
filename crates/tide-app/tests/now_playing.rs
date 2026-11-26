@@ -267,9 +267,10 @@ fn lyrics_toggle_seek_and_sync() {
     // The window draws its menu bar here: the content starts at y 40 and is
     // 860 high. The lyric column spans x 755..1315, y 104..740; the sung
     // line rests 38% of the way down; the [ Lyrics | Queue ] pill sits left of
-    // the search field (group width 173px: 3px pad + 68px Lyrics + 68px Queue).
+    // the search field (group width 309px: 3px pads around four 68px
+    // segments, then 31px to the divider and past it).
     let top = 40.;
-    let (pill_x, pill_y) = (1440. - 407. - 173. + 3. + 34., top + 32.);
+    let (pill_x, pill_y) = (1440. - 407. - 309. + 3. + 34., top + 32.);
     let (line_x, anchor) = (790., top + 64. + 636. * 0.38);
     click(win, line_x, anchor);
     assert_eq!(*seeks.borrow(), [8], "the sung line sits at the anchor and seeks");
@@ -361,7 +362,7 @@ fn queue_panel_toggle_play_menu_and_player_bar_button() {
     advance(win, 700);
 
     let top = 40.;
-    let group_x = 1440. - 407. - 173.;
+    let group_x = 1440. - 407. - 309.;
     let (lyrics_x, queue_x, pill_y) = (group_x + 3. + 34., group_x + 3. + 68. + 34., top + 32.);
 
     // Switch from Lyrics to Queue via the top segmented pill.
@@ -423,4 +424,25 @@ fn queue_panel_toggle_play_menu_and_player_bar_button() {
     assert!(toggled, "overlay player bar Queue icon toggles Queue in-place");
     assert!(navs.borrow().is_empty(), "Queue icon in Now Playing must not navigate away");
     assert!(!app.get_show_lyrics());
+
+    // Similar tracks and Credits are the pill's third and fourth segments:
+    // each opens in place of Queue, asks for its content, and closes again.
+    let opened = Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    app.on_np_tab_opened({
+        let opened = opened.clone();
+        move |tab| opened.borrow_mut().push(tab.to_string())
+    });
+    let (similar_x, credits_x) = (group_x + 3. + 68. * 2. + 34., group_x + 3. + 68. * 3. + 34.);
+    click(win, similar_x, pill_y);
+    assert_eq!(app.get_np_tab(), "similar");
+    assert!(!app.get_show_queue());
+    click(win, credits_x, pill_y);
+    assert_eq!(app.get_np_tab(), "credits");
+    assert_eq!(*opened.borrow(), ["similar", "credits"]);
+    click(win, credits_x, pill_y);
+    assert_eq!(app.get_np_tab(), "", "the open tab's segment closes it");
+    click(win, similar_x, pill_y);
+    click(win, lyrics_x, pill_y);
+    assert_eq!(app.get_np_tab(), "");
+    assert!(app.get_show_lyrics(), "Lyrics takes over from Similar tracks");
 }

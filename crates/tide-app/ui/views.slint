@@ -3379,6 +3379,231 @@ component QueueColumn inherits Rectangle {
     }
 }
 
+// A radio mix in Now Playing's Similar tracks tab: opens the mix, or plays
+// it from the button that shows on hover.
+component RadioCard inherits Rectangle {
+    in property <CardData> card;
+    in property <bool> interactive: true;
+    property <length> art: 152px;
+    width: root.art;
+    height: root.art + 52px;
+    accessible-role: button;
+    accessible-label: root.card.title + ", " + root.card.subtitle;
+    accessible-action-default => { App.open-card(root.card); }
+    Cover {
+        y: 0px;
+        width: root.art;
+        height: root.art;
+        radius: 6px;
+        source: root.card.image;
+        // The mix's name over its artwork, as TIDAL draws radio covers.
+        Rectangle {
+            y: parent.height * 0.5;
+            height: parent.height * 0.5;
+            background: @linear-gradient(180deg, #00000000 0%, #000000b8 100%);
+        }
+        Text {
+            x: 10px;
+            y: parent.height - 46px;
+            width: parent.width - 20px;
+            text: root.card.subtitle == "Artist radio" ? "Artist Radio" : "Track Radio";
+            color: #ffffffb8;
+            font-size: 11px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            x: 10px;
+            y: parent.height - 30px;
+            width: parent.width - 20px;
+            text: root.card.title;
+            color: white;
+            font-size: 15px;
+            font-weight: 700;
+            overflow: elide;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+        clicked => { App.open-card(root.card); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                App.request-card-menu(root.card, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        // Over the art; keeps the hover while the pointer is on it.
+        if ta.has-hover: Rectangle {
+            x: root.art - self.width - 8px;
+            y: 8px;
+            width: 34px;
+            height: 34px;
+            border-radius: 17px;
+            background: play-ta.has-hover ? white : #ffffffe0;
+            accessible-role: button;
+            accessible-label: "Play " + root.card.title + " " + root.card.subtitle;
+            accessible-action-default => { App.play-card(root.card); }
+            play-ta := TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: pointer;
+                clicked => { App.play-card(root.card); }
+            }
+            Icon {
+                x: (parent.width - self.width) / 2 + 1px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("icons/play.svg");
+                size: 14px;
+                tint: black;
+            }
+        }
+    }
+    Text {
+        y: root.art + 10px;
+        width: root.art;
+        text: root.card.title;
+        color: white;
+        font-size: 14px;
+        font-weight: 600;
+        overflow: elide;
+    }
+    Text {
+        y: root.art + 30px;
+        width: root.art;
+        text: root.card.subtitle;
+        color: #ffffff94;
+        font-size: 13px;
+        overflow: elide;
+    }
+}
+
+// The scrolling body of Similar tracks and Credits, its edges fading as
+// Lyrics and Queue do (vendor/i-slint-renderer-skia/fade.rs).
+component NpTabScroll inherits Rectangle {
+    in property <bool> interactive: true;
+    in property <length> content-h;
+    out property <length> scroll: -flick.content-y;
+    property <length> fade-band: min(root.height * 0.16, 72px);
+    property <length> top-fade: min(max(0px, root.scroll) * 1.5, root.fade-band);
+    property <length> bottom-fade: min(max(0px, root.content-h - root.height - root.scroll) * 1.5, root.fade-band);
+    clip: true;
+    Rectangle {
+        background: @conic-gradient(at root.top-fade root.bottom-fade, #46414401 0deg, #46414401 360deg);
+        flick := Flickable {
+            interactive: root.interactive;
+            content-height: max(root.height, root.content-h);
+            @children
+        }
+    }
+}
+
+// Now Playing's Similar tracks tab: the artist's and the track's radio, then
+// TIDAL's suggestions for the track.
+component SimilarColumn inherits Rectangle {
+    in property <float> reveal: 1;
+    in property <bool> interactive: true;
+    opacity: root.reveal;
+    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
+    accessible-role: AccessibleRole.list;
+    accessible-label: "Similar tracks";
+    NpTabScroll {
+        interactive: root.interactive;
+        content-h: body.preferred-height;
+        body := VerticalLayout {
+            width: root.width;
+            alignment: start;
+            padding-bottom: 16px;
+            if App.np-radios.length > 0: HorizontalLayout {
+                padding-left: 8px;
+                Text {
+                    height: 40px;
+                    text: "Mixes & Radio";
+                    color: white;
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+            }
+            if App.np-radios.length > 0: HorizontalLayout {
+                alignment: start;
+                padding-left: 8px;
+                padding-bottom: 28px;
+                spacing: 16px;
+                for card in App.np-radios: RadioCard {
+                    card: card;
+                    interactive: root.interactive;
+                }
+            }
+            if App.np-similar.length > 0: HorizontalLayout {
+                padding-left: 8px;
+                Text {
+                    height: 40px;
+                    text: "Suggested tracks";
+                    color: white;
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+            }
+            for track[i] in App.np-similar: QueueRow {
+                track: track;
+                interactive: root.interactive;
+                show-divider: i + 1 < App.np-similar.length;
+                play => { App.play-np-similar(i); }
+            }
+            if App.np-similar-status != "": HorizontalLayout {
+                padding-left: 8px;
+                Text {
+                    text: App.np-similar-status;
+                    color: #ffffff94;
+                    font-size: 14px;
+                }
+            }
+        }
+    }
+}
+
+// Now Playing's Credits tab: each role and who filled it, then the release
+// year and label.
+component CreditsColumn inherits Rectangle {
+    in property <float> reveal: 1;
+    in property <bool> interactive: true;
+    opacity: root.reveal;
+    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
+    accessible-role: AccessibleRole.list;
+    accessible-label: "Credits";
+    NpTabScroll {
+        interactive: root.interactive;
+        content-h: body.preferred-height;
+        body := VerticalLayout {
+            width: root.width;
+            // Centred beside the artwork while it fits.
+            height: max(root.height, self.preferred-height);
+            alignment: center;
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 20px;
+            for line in App.np-credits: VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: line.role;
+                    color: white;
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: line.names;
+                    color: #ffffffa6;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+            }
+            if App.np-credits-status != "": Text {
+                text: App.np-credits-status;
+                color: #ffffff94;
+                font-size: 14px;
+            }
+        }
+    }
+}
+
 // Title, artist and favourite under the artwork, where the player bar has no
 // room for them (App.compact-layout).
 component NowPlayingMeta inherits Rectangle {
@@ -3493,9 +3718,12 @@ export component NowPlayingView inherits Rectangle {
     property <length> meta-h: root.meta ? 68px : 0px;
     // Right-column panels: mutually exclusive Lyrics or Queue, plus live 1:1
     // two-finger horizontal trackpad swipe (`App.np-swipe-*`).
-    property <bool> lyrics-on: App.show-lyrics && !App.show-queue && App.lyrics-status == "";
-    property <bool> queue-on: App.show-queue;
-    property <bool> panel-on: root.lyrics-on || root.queue-on;
+    property <bool> lyrics-on: App.show-lyrics && !App.show-queue && App.np-tab == "" && App.lyrics-status == "";
+    property <bool> queue-on: App.show-queue && App.np-tab == "";
+    // Similar tracks and Credits: clicked, never swiped to.
+    property <bool> similar-on: App.np-tab == "similar";
+    property <bool> credits-on: App.np-tab == "credits";
+    property <bool> panel-on: root.lyrics-on || root.queue-on || root.similar-on || root.credits-on;
     property <float> swipe-p: App.np-swipe-progress;
     property <float> swipe-s: clamp(root.swipe-p, 0, 1);
     property <bool> swipe-shows-lyrics: App.np-swipe-active && !App.np-swipe-from-centred && App.lyrics-status == "";
@@ -3507,6 +3735,10 @@ export component NowPlayingView inherits Rectangle {
     animate lyr { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
     property <float> que: root.queue-on ? 1 : 0;
     animate que { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    property <float> sim: root.similar-on ? 1 : 0;
+    animate sim { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    property <float> cre: root.credits-on ? 1 : 0;
+    animate cre { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
     property <float> lyr-eff: App.np-swipe-active ? (root.swipe-shows-lyrics ? clamp((1 - root.swipe-s) * 2.5, 0, 1) : 0) : root.lyr;
     property <float> que-eff: App.np-swipe-active ? clamp(root.swipe-s * 2.5, 0, 1) : root.que;
     // Reclaim decoded queue covers once the Queue panel has finished hiding.
@@ -3638,10 +3870,12 @@ export component NowPlayingView inherits Rectangle {
     property <bool> sliding: App.np-swipe-active
         || (root.lyr > 0 && root.lyr < 1)
         || (root.que > 0 && root.que < 1)
+        || (root.sim > 0 && root.sim < 1)
+        || (root.cre > 0 && root.cre < 1)
         || (root.panel > 0 && root.panel < 1);
     property <length> side-fade: root.sliding ? (root.narrow ? min(root.pad, 24px) : min(root.gap * 0.72, 48px)) : 0px;
 
-    if root.presenting && (root.lyr-eff > 0 || root.que-eff > 0): Rectangle {
+    if root.presenting && (root.lyr-eff > 0 || root.que-eff > 0 || root.sim > 0 || root.cre > 0): Rectangle {
         x: root.col-x - root.side-fade;
         y: 0px;
         width: root.col-w + 2 * root.side-fade;
@@ -3656,7 +3890,7 @@ export component NowPlayingView inherits Rectangle {
             background: @conic-gradient(at root.side-fade root.side-fade, #46414801 0deg, #46414801 360deg);
 
             if root.lyr-eff > 0: LyricsColumn {
-                x: root.side-fade + (App.np-swipe-active ? -root.swipe-span * root.swipe-p : (root.que > 0 ? -44px : 44px) * (1 - root.lyr));
+                x: root.side-fade + (App.np-swipe-active ? -root.swipe-span * root.swipe-p : (root.panel-mode > 1 ? -44px : 44px) * (1 - root.lyr));
                 y: root.top;
                 width: root.col-w;
                 height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
@@ -3667,28 +3901,59 @@ export component NowPlayingView inherits Rectangle {
             }
 
             if root.que-eff > 0: QueueColumn {
-                x: root.side-fade + (App.np-swipe-active ? root.swipe-span * (1 - root.swipe-p) : 44px * (1 - root.que));
+                x: root.side-fade + (App.np-swipe-active ? root.swipe-span * (1 - root.swipe-p) : (root.panel-mode > 2 ? -44px : 44px) * (1 - root.que));
                 y: root.queue-y;
                 width: root.col-w;
                 height: root.queue-h;
                 reveal: root.expansion * root.panel-fade * root.que-eff;
                 interactive: App.show-now-playing && !App.np-swipe-active && root.queue-on;
             }
+
+            if root.sim > 0: SimilarColumn {
+                x: root.side-fade + (root.panel-mode > 3 ? -44px : 44px) * (1 - root.sim);
+                y: root.queue-y;
+                width: root.col-w;
+                height: root.queue-h;
+                reveal: root.expansion * root.panel-fade * root.sim;
+                interactive: App.show-now-playing && root.similar-on;
+            }
+
+            if root.cre > 0: CreditsColumn {
+                x: root.side-fade + 44px * (1 - root.cre);
+                y: root.queue-y;
+                width: root.col-w;
+                height: root.queue-h;
+                reveal: root.expansion * root.panel-fade * root.cre;
+                interactive: App.show-now-playing && root.credits-on;
+            }
         }
     }
 
-    // [ Lyrics | Queue ] | Search, Debug, Profile, using the same tools as the
-    // other views. Narrow: the search gives way; Minimize moves up beside the
-    // segmented pill. Below 420px the segments tighten so Minimize stays clear
-    // of the traffic lights (the window's left 80px of the top row).
+    // [ Lyrics | Queue | Similar | Credits ] | Search, Debug, Profile, using
+    // the same tools as the other views. Narrow: the search gives way;
+    // Minimize moves up beside the segmented pill. Similar and Credits show
+    // only while the row has room for them clear of the traffic lights (the
+    // window's left 80px of the top row); below 420px the segments tighten.
     property <bool> tight: root.narrow && root.width < 360px;
     property <bool> compact-pill: root.narrow && root.width < 420px;
     property <length> seg-w: root.compact-pill ? 46px : 68px;
     property <length> pill-pad: 3px;
-    property <length> pill-w: root.seg-w * 2 + root.pill-pad * 2;
     property <length> divider-gap: root.compact-pill ? 5px : 15px;
-    property <length> group-w: root.pill-w + root.divider-gap + 1px + (root.compact-pill ? 4px : 15px);
-    property <int> panel-mode: root.queue-on ? 2 : root.lyrics-on ? 1 : 0;
+    property <length> header-w: root.narrow ? (root.tight ? 92px : 101px) : 407px;
+    property <length> trail-w: root.divider-gap + 1px + (root.compact-pill ? 4px : 15px);
+    property <length> lead-w: root.narrow ? 80px + 52px : 80px;
+    // Dark ink over a light backdrop (see App.np-light); the chosen segment
+    // becomes a dark thumb with light text.
+    property <bool> light: App.np-light;
+    property <int> seg-count: root.width - root.header-w - root.seg-w * 4 - root.pill-pad * 2 - root.trail-w >= root.lead-w ? 4 : 2;
+    changed seg-count => {
+        if (root.seg-count < 4) {
+            App.np-tab = "";
+        }
+    }
+    property <length> pill-w: root.seg-w * root.seg-count + root.pill-pad * 2;
+    property <length> group-w: root.pill-w + root.trail-w;
+    property <int> panel-mode: root.credits-on ? 4 : root.similar-on ? 3 : root.queue-on ? 2 : root.lyrics-on ? 1 : 0;
     property <int> last-mode: 0;
     property <float> thumb-slot: 0;
     property <bool> thumb-glide: false;
@@ -3697,25 +3962,29 @@ export component NowPlayingView inherits Rectangle {
     animate thumb-alpha { duration: App.np-swipe-active ? 0ms : 200ms; easing: ease-out; }
     property <float> thumb-pos: App.np-swipe-active ? (App.np-swipe-from-centred ? 1 : clamp(root.swipe-p, -0.06, 1.06)) : root.thumb-slot;
     property <float> thumb-vis: App.np-swipe-active ? (App.np-swipe-from-centred ? root.swipe-s : 1) : root.thumb-alpha;
-    property <bool> pill-lyrics-lit: App.np-swipe-active ? (root.swipe-shows-lyrics && root.swipe-s < 0.5) : root.lyrics-on;
-    property <bool> pill-queue-lit: App.np-swipe-active ? (root.swipe-s >= 0.5) : root.queue-on;
-    property <float> lyrics-cover: root.thumb-vis * clamp(1 - root.thumb-pos, 0, 1);
-    property <float> queue-cover: root.thumb-vis * clamp(root.thumb-pos, 0, 1);
+    // How much of the thumb lies under segment `i`: its label turns dark.
+    pure function cover(i: int) -> float {
+        root.thumb-vis * clamp(1 - abs(root.thumb-pos - i), 0, 1)
+    }
+    // The segment shown as chosen (during a swipe, the nearer of the two).
+    property <int> lit: App.np-swipe-active
+        ? (root.swipe-s >= 0.5 ? 1 : root.swipe-shows-lyrics ? 0 : -1)
+        : root.panel-mode - 1;
     changed panel-mode => {
         if (root.panel-mode > 0) {
             root.thumb-glide = !App.np-swipe-active && root.last-mode > 0 && root.last-mode != root.panel-mode;
-            root.thumb-slot = root.panel-mode == 2 ? 1 : 0;
+            root.thumb-slot = root.panel-mode - 1;
         }
         root.last-mode = root.panel-mode;
     }
     init => {
         App.bar-covered = self.expansion >= 1;
         root.last-mode = root.panel-mode;
-        root.thumb-slot = root.panel-mode == 2 ? 1 : 0;
+        root.thumb-slot = max(0, root.panel-mode - 1);
     }
 
-    // Glass capsule behind the [ Lyrics | Queue ] toggle: leaf rectangle so
-    // its opacity feeds glass::draw directly during expansion.
+    // Glass capsule behind the segmented toggle: leaf rectangle so its
+    // opacity feeds glass::draw directly during expansion.
     if root.glass && root.presenting: Rectangle {
         x: panel-group.x;
         y: 14px;
@@ -3734,7 +4003,7 @@ export component NowPlayingView inherits Rectangle {
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
         visible: root.presenting;
-        // Lit when the lyrics show; dim when the track has none.
+        // Lyrics is dim when the track has none.
         property <bool> none: App.lyrics-status != "";
 
         // Segmented pill track (plain fallback when glass is off; glass track
@@ -3745,29 +4014,9 @@ export component NowPlayingView inherits Rectangle {
             width: root.pill-w;
             height: 36px;
             border-radius: 18px;
-            background: root.glass ? transparent : #ffffff14;
+            background: root.glass ? transparent : root.light ? #0000000f : #ffffff14;
             border-width: root.glass ? 0px : 1px;
-            border-color: #ffffff1c;
-
-            // Hover washes for inactive segments.
-            Rectangle {
-                x: root.pill-pad;
-                y: root.pill-pad;
-                width: root.seg-w;
-                height: 30px;
-                border-radius: 15px;
-                background: !root.pill-lyrics-lit && pill-ta.has-hover ? #ffffff1f : transparent;
-                animate background { duration: 150ms; }
-            }
-            Rectangle {
-                x: root.pill-pad + root.seg-w;
-                y: root.pill-pad;
-                width: root.seg-w;
-                height: 30px;
-                border-radius: 15px;
-                background: !root.pill-queue-lit && queue-ta.has-hover ? #ffffff1f : transparent;
-                animate background { duration: 150ms; }
-            }
+            border-color: root.light ? #0000001f : #ffffff1c;
 
             // Sliding active pill thumb (tracks fingers 1:1 during swipe and glides on click).
             Rectangle {
@@ -3776,66 +4025,60 @@ export component NowPlayingView inherits Rectangle {
                 width: root.seg-w;
                 height: 30px;
                 border-radius: 15px;
-                background: ((root.pill-queue-lit && queue-ta.has-hover) || (root.pill-lyrics-lit && pill-ta.has-hover) ? #e6e6e6 : #ffffff).with-alpha(root.thumb-vis);
+                background: (root.light ? #1d1d1f : #ffffff).with-alpha(root.thumb-vis);
             }
 
-            // Lyrics segment.
-            Rectangle {
-                x: root.pill-pad;
+            for label[i] in ["Lyrics", "Queue", "Similar", "Credits"]: Rectangle {
+                x: root.pill-pad + root.seg-w * i;
                 y: root.pill-pad;
                 width: root.seg-w;
                 height: 30px;
+                border-radius: 15px;
+                visible: i < root.seg-count;
+                // Hover: a wash on the track, or the thumb dimmed to #e6e6e6.
+                background: !seg-ta.has-hover ? transparent
+                    : (i == root.lit) != root.light ? #0000001a : #ffffff1f;
+                animate background { duration: 150ms; }
                 accessible-role: button;
-                accessible-label: "Lyrics";
-                accessible-checked: root.lyrics-on;
-                accessible-action-default => { App.toggle-np-lyrics(); }
-                pill-ta := TouchArea {
-                    enabled: App.show-now-playing;
+                accessible-label: i == 2 ? "Similar tracks" : label;
+                accessible-checked: i == root.panel-mode - 1;
+                accessible-action-default => { root.pick(i); }
+                seg-ta := TouchArea {
+                    enabled: App.show-now-playing && i < root.seg-count;
                     mouse-cursor: pointer;
-                    clicked => { App.toggle-np-lyrics(); }
+                    clicked => { root.pick(i); }
                 }
                 Text {
-                    text: "Lyrics";
-                    color: panel-group.none ? #ffffff59 : black.mix(white, root.lyrics-cover);
-                    font-size: root.compact-pill ? 12px : 13.5px;
-                    font-weight: 600;
-                }
-            }
-
-            // Queue segment.
-            Rectangle {
-                x: root.pill-pad + root.seg-w;
-                y: root.pill-pad;
-                width: root.seg-w;
-                height: 30px;
-                accessible-role: button;
-                accessible-label: "Queue";
-                accessible-checked: root.queue-on;
-                accessible-action-default => { App.toggle-np-queue(); }
-                queue-ta := TouchArea {
-                    enabled: App.show-now-playing;
-                    mouse-cursor: pointer;
-                    clicked => { App.toggle-np-queue(); }
-                }
-                Text {
-                    text: "Queue";
-                    color: black.mix(white, root.queue-cover);
+                    text: label;
+                    color: i == 0 && panel-group.none ? (root.light ? #00000052 : #ffffff59)
+                        : root.light ? white.mix(#000000d9, root.cover(i))
+                        : black.mix(white, root.cover(i));
                     font-size: root.compact-pill ? 12px : 13.5px;
                     font-weight: 600;
                 }
             }
         }
-        Rectangle { x: root.pill-w + root.divider-gap; y: 22px; width: 1px; height: 20px; background: #ffffff40; }
+        Rectangle { x: root.pill-w + root.divider-gap; y: 22px; width: 1px; height: 20px; background: root.light ? #00000033 : #ffffff40; }
+    }
+    function pick(i: int) {
+        if (i == 0) {
+            App.toggle-np-lyrics();
+        } else if (i == 1) {
+            App.toggle-np-queue();
+        } else {
+            App.toggle-np-tab(i == 2 ? "similar" : "credits");
+        }
     }
     header := HeaderTools {
         x: parent.width - self.width;
         y: 0px;
-        width: root.narrow ? (root.tight ? 92px : 101px) : 407px;
+        width: root.header-w;
         search: !root.narrow;
         active: App.show-now-playing;
         // Glass reads what is behind it: not while it fades in a layer of its own.
         glass: root.glass && root.expansion >= 1;
         overlay: true;
+        light: root.light;
         visible: root.presenting;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
@@ -3850,6 +4093,8 @@ export component NowPlayingView inherits Rectangle {
         enabled: App.show-now-playing;
         // Glass reads what is behind it: not while it fades in a layer of its own.
         glass: root.glass && root.expansion >= 1;
+        // Up in the header only when narrow; wide, it sits low on the darker wash.
+        light: root.narrow && root.light;
         clicked => { App.show-now-playing = false; }
     }
     // The transport controls (the overlay PlayerBar, mounted after this) sit

@@ -481,6 +481,14 @@ export global App {
     // The cover reduced to a soft wash of its colours: Now Playing's backdrop
     // when the interface is glass.
     in property <image> np-backdrop;
+    // How light the backdrop's top strip is (0..1), measured in Rust.
+    in property <float> np-backdrop-luma: 0;
+    // What sits behind Now Playing's header is light: its controls switch to
+    // dark ink, as SwiftUI's glass flips its content over a light backdrop.
+    // Glass: the wash under its 34% black scrim; plain: the tint at the top.
+    out property <bool> np-light: !video-open
+        && (glass && np-backdrop.width > 0 ? np-backdrop-luma * 0.66
+            : (0.2126 * np-tint.red + 0.7152 * np-tint.green + 0.0722 * np-tint.blue) / 255) > 0.5;
     in property <bool> np-explicit: false;
     in property <bool> np-favorite: false;
     in property <bool> playing: false;
@@ -685,6 +693,18 @@ export global App {
     callback play-queue-index(int);
     // Lazily load cover artwork for visible rows [first, first + count) of `np-queue`.
     callback np-queue-visible(int, int);
+    // Now Playing's other tabs: "" | similar | credits. Open, they take the
+    // place of Lyrics and Queue.
+    in-out property <string> np-tab: "";
+    // A tab was opened: load what it shows for the current track.
+    callback np-tab-opened(string);
+    // Similar tracks: the artist's and the track's radio, then suggestions.
+    in property <[CardData]> np-radios;
+    in property <[TrackData]> np-similar;
+    in property <string> np-similar-status;
+    callback play-np-similar(int);
+    in property <[CreditLine]> np-credits;
+    in property <string> np-credits-status;
     // Toggle Now Playing's Queue panel in-place (shared by the top pill and player bar).
     public function toggle-np-queue() {
         if (show-queue) {
@@ -692,17 +712,30 @@ export global App {
         } else {
             show-queue = true;
             show-lyrics = false;
+            np-tab = "";
         }
     }
-    // Toggle Now Playing's Lyrics panel (switching off Queue if it is open).
+    // Toggle Now Playing's Lyrics panel (switching off any other tab).
     public function toggle-np-lyrics() {
-        if (show-queue) {
+        if (show-queue || np-tab != "") {
             show-queue = false;
+            np-tab = "";
             show-lyrics = true;
         } else {
             show-lyrics = !show-lyrics;
         }
         set-show-lyrics(show-lyrics);
+    }
+    // Toggle Similar tracks or Credits; the lyrics setting is left as it is.
+    public function toggle-np-tab(tab: string) {
+        if (np-tab == tab) {
+            np-tab = "";
+        } else {
+            np-tab = tab;
+            show-queue = false;
+            show-lyrics = false;
+            np-tab-opened(tab);
+        }
     }
 
     // The context menu (see context-menu.slint). One per window.
@@ -879,15 +912,17 @@ export global Keys {
 export component Kbd inherits Rectangle {
     in property <string> glyph;
     in property <bool> glass: false;
+    // Over a light backdrop (App.np-light): dark ink.
+    in property <bool> light: false;
     width: max(20px, label.preferred-width + 10px);
     height: 20px;
     border-radius: 5px;
-    background: root.glass ? #ffffff14 : #2a2a2a;
+    background: root.light ? #0000000f : root.glass ? #ffffff14 : #2a2a2a;
     border-width: 1px;
-    border-color: root.glass ? #ffffff24 : #3a3a3a;
+    border-color: root.light ? #00000024 : root.glass ? #ffffff24 : #3a3a3a;
     label := Text {
         text: root.glyph;
-        color: root.glass ? #ffffffb0 : Theme.text-secondary;
+        color: root.light ? #000000a6 : root.glass ? #ffffffb0 : Theme.text-secondary;
         font-size: 11px;
         font-weight: Theme.medium;
         horizontal-alignment: center;
@@ -1060,9 +1095,12 @@ export component MinimizeButton inherits Rectangle {
     border-radius: 18px;
     // Glass: see PlayerBar. The tint lightens as the plain button does.
     in property <bool> glass: false;
+    // Over a light backdrop (App.np-light): dark ink on a darker wash.
+    in property <bool> light: false;
     background: root.glass ? (ta.pressed ? @conic-gradient(#474c5301 0deg, #ffffff52 360deg)
             : ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff3d 360deg)
             : @conic-gradient(#474c5301 0deg, #ffffff26 360deg))
+        : root.light ? (ta.pressed ? #00000033 : ta.has-hover ? #00000024 : #00000014)
         : ta.pressed ? #ffffff42 : ta.has-hover ? #ffffff2e : #ffffff1a;
     accessible-role: button;
     accessible-label: root.label;
@@ -1078,7 +1116,7 @@ export component MinimizeButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: @image-url("icons/chevron-down.svg");
         size: 22px;
-        tint: Theme.text;
+        tint: root.light ? #000000d9 : Theme.text;
     }
     Timer {
         interval: 350ms;
@@ -1097,6 +1135,8 @@ export component DebugButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> glass: false;
     in property <bool> overlay: false;
+    // Over a light backdrop (App.np-light): dark ink.
+    in property <bool> light: false;
     out property <bool> hovered: ta.has-hover;
     width: 35px;
     height: 35px;
@@ -1104,10 +1144,11 @@ export component DebugButton inherits Rectangle {
     background: root.glass
         ? (App.debug-open || ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff30 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
         : root.overlay
-        ? (App.debug-open || ta.has-hover ? #ffffff28 : #ffffff14)
+        ? (root.light ? (App.debug-open || ta.has-hover ? #00000024 : #00000010)
+            : App.debug-open || ta.has-hover ? #ffffff28 : #ffffff14)
         : App.debug-open || ta.has-hover ? #333333 : #2a2a2a;
     border-width: App.debug-open || App.debug-active ? 1px : (root.overlay && !root.glass ? 1px : 0px);
-    border-color: App.debug-open || App.debug-active ? #f5b942 : #ffffff1c;
+    border-color: App.debug-open || App.debug-active ? #f5b942 : root.light ? #0000001f : #ffffff1c;
     accessible-role: button;
     accessible-label: "Debug";
     accessible-action-default => {
@@ -1123,7 +1164,7 @@ export component DebugButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: @image-url("icons/computer.svg");
         size: 16px;
-        tint: App.debug-open || App.debug-active ? #f5b942 : Theme.text;
+        tint: App.debug-open || App.debug-active ? #f5b942 : root.light ? #000000d9 : Theme.text;
     }
 }
 

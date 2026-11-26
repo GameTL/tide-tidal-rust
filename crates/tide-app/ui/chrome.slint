@@ -1321,6 +1321,9 @@ export component SearchField inherits Rectangle {
     in property <bool> active: true;
     in property <bool> glass: false;
     in property <bool> overlay: false;
+    // Over a light backdrop (App.np-light): dark ink.
+    in property <bool> light: false;
+    property <color> ink-dim: root.light ? #00000099 : root.overlay ? #ffffffa6 : Theme.text-secondary;
     out property <bool> focused: input.has-focus;
     out property <bool> hovered: search-ta.has-hover;
     callback activity();
@@ -1329,10 +1332,12 @@ export component SearchField inherits Rectangle {
     background: root.glass
         ? (input.has-focus || search-ta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff28 360deg) : @conic-gradient(#474c5301 0deg, #ffffff18 360deg))
         : root.overlay
-        ? (input.has-focus || search-ta.has-hover ? #ffffff24 : #ffffff14)
+        ? (root.light ? (input.has-focus || search-ta.has-hover ? #0000001f : #0000000f)
+            : input.has-focus || search-ta.has-hover ? #ffffff24 : #ffffff14)
         : Theme.pill;
     border-width: input.has-focus ? 1px : (root.overlay && !root.glass ? 1px : 0px);
-    border-color: input.has-focus ? (root.overlay ? #ffffff66 : #5a5a5a) : #ffffff1c;
+    border-color: root.light ? (input.has-focus ? #00000059 : #0000001f)
+        : input.has-focus ? (root.overlay ? #ffffff66 : #5a5a5a) : #ffffff1c;
 
     // Focus ring sits just outside the pill.
     if input.has-focus: Rectangle {
@@ -1342,7 +1347,7 @@ export component SearchField inherits Rectangle {
         height: parent.height + 6px;
         border-radius: 22.5px;
         border-width: 1.5px;
-        border-color: #ffffff;
+        border-color: root.light ? #000000b3 : #ffffff;
     }
     search-ta := TouchArea {
         enabled: root.active;
@@ -1355,7 +1360,7 @@ export component SearchField inherits Rectangle {
         y: (parent.height - self.height) / 2;
         source: @image-url("icons/search.svg");
         size: 15px;
-        tint: root.overlay ? #ffffffa6 : Theme.text-secondary;
+        tint: root.ink-dim;
     }
 
     if input.text == "": Text {
@@ -1363,7 +1368,7 @@ export component SearchField inherits Rectangle {
         y: 0px;
         height: parent.height;
         text: "Search";
-        color: root.overlay ? #ffffffa6 : Theme.text-secondary;
+        color: root.ink-dim;
         font-size: 15px;
         vertical-alignment: center;
     }
@@ -1374,7 +1379,7 @@ export component SearchField inherits Rectangle {
         width: parent.width - 48px - (self.text == "" ? 58px : 40px);
         height: 20px;
         text <=> App.search-text;
-        color: Theme.text;
+        color: root.light ? #000000e0 : Theme.text;
         font-size: 15px;
         single-line: true;
         vertical-alignment: center;
@@ -1405,8 +1410,8 @@ export component SearchField inherits Rectangle {
         y: (parent.height - 20px) / 2;
         height: 20px;
         spacing: 4px;
-        Kbd { glyph: Keys.mod; glass: root.glass || root.overlay; }
-        Kbd { glyph: "F"; glass: root.glass || root.overlay; }
+        Kbd { glyph: Keys.mod; glass: root.glass || root.overlay; light: root.light; }
+        Kbd { glyph: "F"; glass: root.glass || root.overlay; light: root.light; }
     }
 
     if input.text != "": IconButton {
@@ -1414,7 +1419,7 @@ export component SearchField inherits Rectangle {
         y: (parent.height - self.height) / 2;
         icon: @image-url("icons/x.svg");
         size: 15px;
-        tint: Theme.text;
+        tint: root.light ? #000000d9 : Theme.text;
         clicked => {
             App.search-text = "";
             input.focus();
@@ -1432,6 +1437,8 @@ export component HeaderTools inherits Rectangle {
     // Off where there is no room for the search field (narrow Now Playing,
     // whose width is then just the debug and profile buttons: 101px).
     in property <bool> search: true;
+    // Over a light backdrop (App.np-light): dark ink throughout.
+    in property <bool> light: false;
     out property <bool> engaged: field.focused || menu.is-open || field.hovered || debug-btn.hovered || pta.has-hover;
     callback activity();
     width: 407px;
@@ -1443,6 +1450,7 @@ export component HeaderTools inherits Rectangle {
         active: root.active && root.search;
         glass: root.glass;
         overlay: root.overlay;
+        light: root.light;
         x: parent.width - 101px - self.width;
         y: (parent.height - self.height) / 2;
         width: parent.width - 101px;
@@ -1456,6 +1464,7 @@ export component HeaderTools inherits Rectangle {
         enabled: root.active;
         glass: root.glass;
         overlay: root.overlay;
+        light: root.light;
     }
 
     // Profile
@@ -1468,10 +1477,11 @@ export component HeaderTools inherits Rectangle {
         background: root.glass
             ? (pta.has-hover ? @conic-gradient(#474c5301 0deg, #ffffff30 360deg) : @conic-gradient(#474c5301 0deg, #ffffff1c 360deg))
             : root.overlay
-            ? (pta.has-hover ? #ffffff28 : #ffffff14)
+            ? (root.light ? (pta.has-hover ? #00000024 : #00000010)
+                : pta.has-hover ? #ffffff28 : #ffffff14)
             : pta.has-hover ? #333333 : #2a2a2a;
         border-width: root.overlay && !root.glass ? 1px : 0px;
-        border-color: #ffffff1c;
+        border-color: root.light ? #0000001f : #ffffff1c;
         pta := TouchArea {
             enabled: root.active;
             mouse-cursor: pointer;
@@ -1485,6 +1495,7 @@ export component HeaderTools inherits Rectangle {
             y: (parent.height - self.height) / 2;
             source: @image-url("icons/user.svg");
             size: 18px;
+            tint: root.light ? #000000d9 : Theme.text;
         }
     }
 

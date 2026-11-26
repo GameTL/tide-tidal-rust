@@ -15,7 +15,7 @@ use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 use tide_api::{
-    ApiHandle, ArtistRef, Card, CatalogDetail, FavoriteIds, LaterItems, Lyrics, PlaylistDetail,
+    ApiHandle, ArtistRef, Card, CatalogDetail, Credit, FavoriteIds, LaterItems, Lyrics, PlaylistDetail,
     Section,
     TidalService, TrackItem,
 };
@@ -457,6 +457,17 @@ mod tests {
         assert_eq!(play_order, ["D", "B", "Y", "X", "A", "C"]);
         assert_eq!(play_order[state.pos], "B");
         assert_eq!(state.prefetched_for, None);
+    }
+
+    #[test]
+    fn header_lightness_reads_only_the_top_strip() {
+        // White on top, black below: the header sits on white.
+        let img = image::RgbaImage::from_fn(40, 40, |_, y| {
+            image::Rgba(if y < 4 { [255, 255, 255, 255] } else { [0, 0, 0, 255] })
+        });
+        assert!((top_luma(&img) - 1.).abs() < 1e-4);
+        let dark = image::RgbaImage::from_pixel(40, 40, image::Rgba([30, 30, 30, 255]));
+        assert!(top_luma(&dark) < 0.15);
     }
 
     #[test]
@@ -1339,6 +1350,12 @@ struct State {
     tracks_model: Option<Rc<VecModel<TrackData>>>,
     /// Upcoming queue rows shown inside Now Playing.
     np_queue_model: Option<Rc<VecModel<TrackData>>>,
+    /// Now Playing's Similar tracks: the suggestions, their rows, and the
+    /// track they were loaded for (as `np_credits_for` is for Credits).
+    np_similar: Vec<TrackItem>,
+    np_similar_model: Option<Rc<VecModel<TrackData>>>,
+    np_similar_for: String,
+    np_credits_for: String,
     sidebar_cards: Vec<Card>,
     /// When TIDE last added to each playlist (id → Unix seconds), kept so
     /// "Add to playlist" can list the ones in use first.
@@ -1824,20 +1841,37 @@ pub fn request_redraw() {
 
 /// The cover as Now Playing's glass backdrop: its colours and nothing else.
 /// 40 px and blurred, so stretched over the window it is a soft wash that
-/// costs 6 KB rather than a window-sized blur.
-fn backdrop_of(cover: &Image) -> Image {
+/// costs 6 KB rather than a window-sized blur. Also how light its top strip
+/// is (0..1), what the header controls sit on (`App.np-light`).
+fn backdrop_of(cover: &Image) -> (Image, f32) {
     const SIDE: u32 = 40;
     let Some(pixels) = cover.to_rgba8() else {
-        return Image::default();
+        return (Image::default(), 0.);
     };
     let Some(source) =
         image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec())
     else {
-        return Image::default();
+        return (Image::default(), 0.);
     };
     let small = image::imageops::resize(&source, SIDE, SIDE, image::imageops::FilterType::Triangle);
     let soft = image::imageops::blur(&small, 3.);
-    Image::from_rgba8(SharedPixelBuffer::clone_from_slice(soft.as_raw(), SIDE, SIDE))
+    let luma = top_luma(&soft);
+    (Image::from_rgba8(SharedPixelBuffer::clone_from_slice(soft.as_raw(), SIDE, SIDE)), luma)
+}
+
+/// Mean Rec. 709 luma (0..1, of the sRGB values) of the top tenth of `img`:
+/// under Now Playing's header once the wash is stretched over the window.
+fn top_luma(img: &image::RgbaImage) -> f32 {
+    let rows = (img.height() / 10).max(1);
+    let (sum, n) = img
+        .rows()
+        .take(rows as usize)
+        .flatten()
+        .fold((0., 0.), |(sum, n), p| {
+            let [r, g, b, _] = p.0;
+            (sum + 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32, n + 1.)
+        });
+    if n == 0. { 0. } else { sum / n / 255. }
 }
 
 /// `TIDE_FANCY_ANIMATION=1` (or 0) overrides the Fancy Animation setting for
@@ -3450,6 +3484,8 @@ impl Ui {
         });
         bind!(on_seek_lyric, |ui, row| ui.seek_lyric(row));
         bind!(on_play_queue_index, |ui, index| ui.play_queue_index(index));
+        bind!(on_np_tab_opened, |ui, _tab| ui.load_np_tab());
+        bind!(on_play_np_similar, |ui, index| ui.play_np_similar(index));
         bind!(on_np_queue_visible, |ui, first, count| ui
             .np_queue_visible(first.max(0) as usize, count.max(0) as usize));
         bind!(on_pkce_finish, |ui, url| ui
@@ -5549,6 +5585,10 @@ impl Ui {
                 || app.get_debug_open()
                 || !app.get_create_kind().is_empty()
             {
+                return false;
+            }
+            // Similar tracks and Credits are clicked to, not swiped between.
+            if !app.get_np_tab().is_empty() {
                 return false;
             }
             let has_lyrics = app.get_lyrics_status().is_empty();
@@ -7756,6 +7796,7 @@ impl Ui {
             st.page_tracks
                 .iter()
                 .chain(st.queue.iter())
+                .chain(st.np_similar.iter())
                 .chain(st.sections.iter().flat_map(|section| section.tracks.iter()))
                 .find(|track| track.id == id)
                 .cloned()
@@ -8203,7 +8244,9 @@ impl Ui {
                 if ui.app().get_current_id() == id.as_str() {
                     ui.app().set_np_cover(img.clone());
                     ui.app().set_np_tint(tint);
-                    ui.app().set_np_backdrop(backdrop_of(img));
+                    let (backdrop, luma) = backdrop_of(img);
+                    ui.app().set_np_backdrop(backdrop);
+                    ui.app().set_np_backdrop_luma(luma);
                     if let Some(path) =
                         ui.ctx.images.cached(&url_key(&cover_url_for_cache, 0), &cover_url_for_cache)
                     {
@@ -8221,6 +8264,7 @@ impl Ui {
         }
         if app.get_show_now_playing() {
             self.load_lyrics();
+            self.load_np_tab();
         }
         self.refresh_np_queue();
         self.ctx.with_media(|m| {
@@ -8982,9 +9026,13 @@ impl Ui {
                 st.fav_ids.remove(id);
                 st.favorites.retain(|t| t.id != id);
             }
-            (st.tracks_model.clone(), st.np_queue_model.clone())
+            [
+                st.tracks_model.clone(),
+                st.np_queue_model.clone(),
+                st.np_similar_model.clone(),
+            ]
         };
-        for model in [model.0, model.1].into_iter().flatten() {
+        for model in model.into_iter().flatten() {
             for i in 0..model.row_count() {
                 if let Some(mut row) = model.row_data(i).filter(|r| r.id == id) {
                     row.favorite = favorite;
@@ -9030,7 +9078,135 @@ impl Ui {
         app.set_show_now_playing(show);
         if show {
             self.load_lyrics();
+            self.load_np_tab();
         }
+    }
+
+    /// Load what Now Playing's open tab (Similar tracks or Credits) shows for
+    /// the current track, once per track.
+    fn load_np_tab(self: &Rc<Self>) {
+        let Some(track) = self.current_track() else {
+            return;
+        };
+        let app = self.app();
+        let id = track.id.clone();
+        match app.get_np_tab().as_str() {
+            "similar" => {
+                {
+                    let mut st = self.state.borrow_mut();
+                    if st.np_similar_for == id {
+                        return;
+                    }
+                    st.np_similar_for = id.clone();
+                    st.np_similar.clear();
+                    st.np_similar_model = None;
+                }
+                app.set_np_radios(ModelRc::default());
+                app.set_np_similar(ModelRc::default());
+                app.set_np_similar_status("Loading…".into());
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    let found = api.track_similar(&id).await;
+                    on_ui(move |ui| ui.show_np_similar(&id, found));
+                });
+            }
+            "credits" => {
+                {
+                    let mut st = self.state.borrow_mut();
+                    if st.np_credits_for == id {
+                        return;
+                    }
+                    st.np_credits_for = id.clone();
+                }
+                app.set_np_credits(ModelRc::default());
+                app.set_np_credits_status("Loading…".into());
+                self.spawn(move |ctx| async move {
+                    let Some(api) = ctx.api() else { return };
+                    let credits = api.track_credits(&id).await;
+                    on_ui(move |ui| ui.show_np_credits(&id, credits));
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn show_np_credits(&self, id: &str, credits: Result<Vec<Credit>, tide_api::ApiError>) {
+        if self.state.borrow().np_credits_for != id {
+            return;
+        }
+        let (credits, status) = match credits {
+            Ok(credits) if credits.is_empty() => (credits, "No credits available"),
+            Ok(credits) => (credits, ""),
+            Err(e) => {
+                tracing::warn!("track credits failed: {e}");
+                // Try again the next time the tab opens.
+                self.state.borrow_mut().np_credits_for.clear();
+                (Vec::new(), "Couldn’t load credits")
+            }
+        };
+        let rows: Vec<CreditLine> = credits
+            .into_iter()
+            .map(|c| CreditLine {
+                role: c.role.into(),
+                names: c.names.into(),
+            })
+            .collect();
+        let app = self.app();
+        app.set_np_credits(ModelRc::new(VecModel::from(rows)));
+        app.set_np_credits_status(status.into());
+    }
+
+    fn show_np_similar(
+        self: &Rc<Self>,
+        id: &str,
+        found: Result<(Vec<Card>, Vec<TrackItem>), tide_api::ApiError>,
+    ) {
+        if self.state.borrow().np_similar_for != id {
+            return;
+        }
+        let app = self.app();
+        let (radios, tracks) = match found {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!("similar tracks failed: {e}");
+                // Try again the next time the tab opens.
+                self.state.borrow_mut().np_similar_for.clear();
+                app.set_np_similar_status("Couldn’t load similar tracks".into());
+                return;
+            }
+        };
+        let status = if radios.is_empty() && tracks.is_empty() {
+            "No similar tracks"
+        } else {
+            ""
+        };
+        app.set_np_similar_status(status.into());
+        let radios = self.cards_model("np-radios", &radios, 320);
+        app.set_np_radios(ModelRc::from(radios));
+        let model = {
+            let mut st = self.state.borrow_mut();
+            let rows: Vec<TrackData> = tracks
+                .iter()
+                .map(|t| track_row(t, st.fav_ids.contains(&t.id)))
+                .collect();
+            let model = Rc::new(VecModel::from(rows));
+            st.np_similar = tracks;
+            st.np_similar_model = Some(model.clone());
+            model
+        };
+        // ponytail: at most 20 suggestions, so every cover is decoded at once.
+        self.keep_track_covers("np-similar", &model, 0, model.row_count(), 96);
+        app.set_np_similar(ModelRc::from(model));
+    }
+
+    /// Play suggestion `index` of Similar tracks, with the rest after it.
+    fn play_np_similar(self: &Rc<Self>, index: i32) {
+        let tracks = self.state.borrow().np_similar.clone();
+        let Some(index) = usize::try_from(index).ok().filter(|&i| i < tracks.len()) else {
+            return;
+        };
+        self.state.borrow_mut().playing_card = None;
+        self.play_queue(tracks, index, "Similar tracks", None, None);
     }
 
     fn load_lyrics(self: &Rc<Self>) {
@@ -9205,6 +9381,7 @@ impl Ui {
         app.set_tracks(ModelRc::default());
         app.set_np_queue(ModelRc::default());
         app.set_show_queue(false);
+        app.set_np_tab("".into());
         app.set_grid_cards(ModelRc::default());
         app.set_sidebar_playlists(ModelRc::default());
         self.spawn(|ctx| async move {

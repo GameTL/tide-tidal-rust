@@ -539,6 +539,66 @@ pub fn parse_track(v: &Value) -> Option<TrackItem> {
     })
 }
 
+fn parse_credits(data: &Value) -> Vec<Credit> {
+    data.as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| Credit {
+            role: s(entry, "type"),
+            names: entry["contributors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| s(c, "name"))
+                .filter(|n| !n.is_empty())
+                .collect::<Vec<_>>()
+                .join(", "),
+        })
+        .filter(|credit| !credit.role.is_empty() && !credit.names.is_empty())
+        .collect()
+}
+
+/// "Released" (the year) and "Label" (the copyright line) of a v1 track.
+fn track_release_credits(track: &Value) -> Vec<Credit> {
+    let date = [s(&track["album"], "releaseDate"), s(track, "streamStartDate")]
+        .into_iter()
+        .find(|d| d.len() >= 4)
+        .unwrap_or_default();
+    let year = date.get(..4).unwrap_or_default().to_string();
+    [("Released", year), ("Label", s(track, "copyright"))]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(role, names)| Credit {
+            role: role.into(),
+            names,
+        })
+        .collect()
+}
+
+/// The artist's and the track's radio, as mix cards; either is left out when
+/// TIDAL has no mix for it. Artwork: the artist's picture and the album cover.
+fn radio_cards(track: &Value, artist: &Value) -> Vec<Card> {
+    let picture = s(artist, "picture");
+    let cover = s(&track["album"], "cover");
+    [
+        (artist.pointer("/mixes/ARTIST_MIX"), s(artist, "name"), "Artist radio", picture),
+        (track.pointer("/mixes/TRACK_MIX"), s(track, "title"), "Track radio", cover),
+    ]
+    .into_iter()
+    .filter_map(|(mix, title, subtitle, image)| {
+        let id = mix?.as_str().filter(|m| !m.is_empty())?.to_string();
+        Some(Card {
+            id,
+            kind: "mix".into(),
+            title,
+            subtitle: subtitle.into(),
+            image_url: (!image.is_empty()).then(|| image_url(&image, 320)),
+            ..Default::default()
+        })
+    })
+    .collect()
+}
+
 fn parse_track_list(v: &Value) -> Vec<TrackItem> {
     v.get("items")
         .and_then(Value::as_array)
@@ -1225,23 +1285,61 @@ impl ApiHandle {
 
     pub async fn album_credits(&self, id: &str) -> Result<Vec<Credit>, ApiError> {
         let data = self.get(&format!("{V1}/albums/{id}/credits"), &[]).await?;
-        Ok(data
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|entry| Credit {
-                role: s(entry, "type"),
-                names: entry["contributors"]
+        Ok(parse_credits(&data))
+    }
+
+    /// Now Playing's Credits tab: who made the track, then when it came out
+    /// and on which label.
+    pub async fn track_credits(&self, id: &str) -> Result<Vec<Credit>, ApiError> {
+        let credits_url = format!("{V1}/tracks/{id}/credits");
+        let track_url = format!("{V1}/tracks/{id}");
+        let (credits, track) = tokio::join!(
+            self.get(&credits_url, &[("includeContributors", "true")]),
+            self.get(&track_url, &[]),
+        );
+        let mut lines = parse_credits(&credits?);
+        if let Ok(track) = track {
+            lines.extend(track_release_credits(&track));
+        }
+        Ok(lines)
+    }
+
+    /// Now Playing's Similar tracks tab: the artist's and the track's radio
+    /// mixes, and TIDAL's suggested tracks.
+    pub async fn track_similar(&self, id: &str) -> Result<(Vec<Card>, Vec<TrackItem>), ApiError> {
+        let track_url = format!("{V1}/tracks/{id}");
+        let suggested_url = format!("{V1}/tracks/{id}/recommendations");
+        let (track, suggested) = tokio::join!(
+            self.get(&track_url, &[]),
+            self.get(&suggested_url, &[("limit", "20")]),
+        );
+        let track = track?;
+        let artist_id = track
+            .get("artists")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .or_else(|| track.get("artist"))
+            .map(|a| s(a, "id"))
+            .unwrap_or_default();
+        let artist = if artist_id.is_empty() {
+            Value::Null
+        } else {
+            self.get(&format!("{V1}/artists/{artist_id}"), &[])
+                .await
+                .unwrap_or(Value::Null)
+        };
+        let suggested = suggested
+            .map(|v| {
+                v["items"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|c| s(c, "name"))
-                    .filter(|n| !n.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .filter_map(|it| parse_track(it.get("track").unwrap_or(it)))
+                    .filter(|t| t.id != id)
+                    .collect()
             })
-            .filter(|credit| !credit.role.is_empty() && !credit.names.is_empty())
-            .collect())
+            .unwrap_or_default();
+        Ok((radio_cards(&track, &artist), suggested))
     }
 
     /// Whether `id` is in the user's collection. `kind` is "ALBUM" or "ARTIST".
@@ -1757,6 +1855,30 @@ fn replay_gain(v: &Value) -> Option<[f32; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_credits_end_with_release_year_and_label() {
+        let track = serde_json::json!({
+            "title": "Derezzed",
+            "streamStartDate": "2010-12-03T00:00:00.000+0000",
+            "copyright": "℗ 2010 Walt Disney Records",
+            "album": { "cover": "a-b-c" },
+            "mixes": { "TRACK_MIX": "tm1" },
+        });
+        let lines = track_release_credits(&track);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].role.as_str(), lines[0].names.as_str()), ("Released", "2010"));
+        assert_eq!(lines[1].names, "℗ 2010 Walt Disney Records");
+
+        let artist = serde_json::json!({
+            "name": "Daft Punk", "picture": "p-q", "mixes": { "ARTIST_MIX": "am1" },
+        });
+        let cards = radio_cards(&track, &artist);
+        let ids: Vec<_> = cards.iter().map(|c| (c.id.as_str(), c.subtitle.as_str())).collect();
+        assert_eq!(ids, [("am1", "Artist radio"), ("tm1", "Track radio")]);
+        // No artist mix: only the track radio.
+        assert_eq!(radio_cards(&track, &Value::Null).len(), 1);
+    }
 
     #[test]
     fn playback_info_carries_replay_gain() {
