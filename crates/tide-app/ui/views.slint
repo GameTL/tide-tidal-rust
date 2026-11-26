@@ -3732,6 +3732,8 @@ export component NowPlayingView inherits Rectangle {
         width: root.narrow ? (root.tight ? 92px : 101px) : 407px;
         search: !root.narrow;
         active: App.show-now-playing;
+        // Glass reads what is behind it: not while it fades in a layer of its own.
+        glass: root.glass && root.expansion >= 1;
         visible: root.presenting;
         opacity: root.expansion;
         cache-rendering-hint: root.expansion > 0 && root.expansion < 1;
