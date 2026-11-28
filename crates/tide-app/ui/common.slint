@@ -8,6 +8,7 @@ export struct ArtistLink {
 
 export struct TrackData {
     id: string,
+    position: int,
     title: string,
     artist: string,
     artist-id: string,
@@ -25,6 +26,8 @@ export struct TrackData {
     /// Arrived with a background refresh: the row pops in once.
     fresh: bool,
 }
+
+export enum TrackSortColumn { position, title, artist, album, date-added, duration, bpm }
 
 export struct CardData {
     id: string,
@@ -296,6 +299,10 @@ export global App {
     in property <[SectionData]> sections;
     in property <[TrackData]> tracks;
     in property <bool> tracks-show-date: true;
+    in property <TrackSortColumn> track-sort-column: position;
+    in property <bool> track-sort-descending;
+    in-out property <bool> track-sort-focused;
+    callback sort-tracks(TrackSortColumn);
     in property <[CardData]> grid-cards;
     // Card grid pages (Mixes, Playlists, Albums, Profiles, folders). The cards
     // arrive filtered, sorted and split into groups; one untitled group when

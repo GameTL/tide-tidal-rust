@@ -81,7 +81,7 @@ fn settings_has_the_bpm_toggle() {
     assert_eq!(asked.borrow().as_slice(), [true, false]);
 }
 
-/// Nothing in a track list switches BPM: its heading is only a heading.
+/// Nothing in a track list changes whether the BPM column is shown.
 fn track_list_has_no_switch(view: &str) {
     let (ui, asked) = fixture(view);
     let app = ui.global::<App>();
@@ -115,4 +115,40 @@ fn album_tracks_have_no_bpm_switch() {
 #[test]
 fn playlist_tracks_have_no_bpm_switch() {
     track_list_has_no_switch("detail");
+}
+
+#[test]
+fn each_track_header_sends_its_sort_column() {
+    use TrackSortColumn::*;
+
+    let (ui, _) = fixture("tracks");
+    let app = ui.global::<App>();
+    app.set_show_audio_metadata(true);
+    app.set_tracks_show_date(true);
+    settle();
+    let columns = Rc::new(RefCell::new(Vec::new()));
+    let requested = columns.clone();
+    app.on_sort_tracks(move |column| requested.borrow_mut().push(column));
+
+    let pane_width = app.get_pane_width();
+    let padding = ((pane_width - 900.) * 0.12).clamp(24., 89.);
+    let content_x = app.get_pane_x() + padding;
+    let content_width = pane_width - 2. * padding;
+    assert!(content_width > 980.);
+    let header_y = app.get_pane_y() + 325.;
+    for x in [
+        22.,
+        60.,
+        content_width * 0.324 + 8.,
+        content_width * 0.544 + 8.,
+        content_width * 0.724 + 8.,
+        content_width * 0.839 + 8.,
+        content_width * 0.891 + 8.,
+    ] {
+        click(ui.window(), content_x + x, header_y);
+    }
+    assert_eq!(
+        *columns.borrow(),
+        [Position, Title, Artist, Album, DateAdded, Duration, Bpm]
+    );
 }

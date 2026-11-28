@@ -82,6 +82,9 @@ pub struct TrackItem {
     /// Human-readable "date added" label (e.g. "Last week") when listed from a collection.
     #[serde(default)]
     pub date_added: Option<String>,
+    /// Unix timestamp of the collection entry, in milliseconds.
+    #[serde(default)]
+    pub date_added_at: Option<i64>,
     #[serde(default)]
     pub bpm: Option<u32>,
     /// The album's animated cover (`videoCover` id), when it has one.

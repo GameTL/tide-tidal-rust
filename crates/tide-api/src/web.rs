@@ -534,6 +534,7 @@ pub fn parse_track(v: &Value) -> Option<TrackItem> {
         },
         explicit: v.get("explicit").and_then(Value::as_bool).unwrap_or(false),
         date_added: None,
+        date_added_at: None,
         bpm: v.get("bpm").and_then(Value::as_u64).map(|b| b as u32),
         video_cover: Some(s(&album, "videoCover")).filter(|x| !x.is_empty()),
     })
@@ -615,11 +616,27 @@ fn parse_track_list(v: &Value) -> Vec<TrackItem> {
                         return None;
                     }
                     let mut t = parse_track(entry.get("item").unwrap_or(entry))?;
-                    t.date_added = entry
-                        .get("created")
-                        .or_else(|| entry.pointer("/item/dateAdded"))
-                        .and_then(Value::as_str)
-                        .map(relative_date);
+                    if let Some(date) = ["/created", "/dateAdded", "/item/dateAdded"]
+                        .into_iter()
+                        .filter_map(|path| entry.pointer(path).and_then(Value::as_str))
+                        .find(|date| !date.is_empty())
+                    {
+                        t.date_added = Some(relative_date(date));
+                        let seconds = iso_seconds(date);
+                        if seconds != 0 {
+                            let millis = date
+                                .get(19..)
+                                .and_then(|s| s.strip_prefix('.'))
+                                .into_iter()
+                                .flat_map(str::bytes)
+                                .take(3)
+                                .take_while(u8::is_ascii_digit)
+                                .zip([100, 10, 1])
+                                .map(|(digit, place)| i64::from(digit - b'0') * place)
+                                .sum::<i64>();
+                            t.date_added_at = Some(seconds * 1000 + millis);
+                        }
+                    }
                     Some(t)
                 })
                 .collect()
@@ -1659,7 +1676,7 @@ impl ApiHandle {
             let count = data["items"].as_array().map_or(0, Vec::len);
             offset += count;
             let total = data["totalNumberOfItems"].as_u64().unwrap_or(0);
-            if kind != "album" || count == 0 || offset as u64 >= total {
+            if !matches!(kind, "album" | "playlist") || count == 0 || offset as u64 >= total {
                 return Ok(tracks);
             }
         }
@@ -1900,6 +1917,18 @@ mod tests {
         assert!(iso_seconds("2026-11-11T04:40:02.184+0000") > iso_seconds("2026-11-10T23:59:59"));
         assert_eq!(iso_seconds(""), 0);
         assert_eq!(iso_seconds("soon"), 0);
+    }
+
+    #[test]
+    fn track_list_keeps_precise_dates_alongside_the_labels() {
+        let tracks = parse_track_list(&serde_json::json!({"items": [
+            {"created": "2026-11-11T04:40:02.184+0000", "item": {"id": "1", "title": "A"}},
+            {"item": {"id": "2", "title": "B", "dateAdded": "2026-11-11T04:40:02.18Z"}},
+            {"item": {"id": "3", "title": "C"}}
+        ]}));
+        assert_eq!(tracks[0].date_added, tracks[1].date_added);
+        assert_eq!(tracks[0].date_added_at.unwrap() - tracks[1].date_added_at.unwrap(), 4);
+        assert_eq!(tracks[2].date_added_at, None);
     }
 
     #[test]

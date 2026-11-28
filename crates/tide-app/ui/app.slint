@@ -1,5 +1,5 @@
 import { Palette } from "std-widgets.slint";
-import { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit, UpsampleOption } from "common.slint";
+import { App, Theme, TrackData, TrackSortColumn, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit, UpsampleOption } from "common.slint";
 import { Sidebar, TopBar, PlayerBar, PhoneDock, DebugPanel, ErrorAlert, UpdateToast, CreateDialog, EditPlaylistDialog, PlaylistDrop, DragChip } from "chrome.slint";
 import { HomeView, TracksView, GridView, StubView, NowPlayingView, LoginView, ModulesPage, CollectionView } from "views.slint";
 import { FeedView } from "feed.slint";
@@ -9,7 +9,7 @@ import { DspView } from "dsp.slint";
 import { ContextMenu } from "context-menu.slint";
 import { Typography } from "@typography";
 
-export { App, Theme, TrackData, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit, UpsampleOption }
+export { App, Theme, TrackData, TrackSortColumn, CardData, SectionData, LyricLine, SignalStage, ErrorEntry, LogEntry, CreditLine, MemPart, MemSample, EqBand, EqHit, UpsampleOption }
 
 export component MainWindow inherits Window {
     title: "TIDE";
@@ -147,7 +147,7 @@ export component MainWindow inherits Window {
             MenuItem {
                 title: "Now Playing";
                 shortcut: @keys(Return);
-                enabled: App.has-track && !App.video-open && !App.show-now-playing && !App.menu-open && !App.menu-trigger-focused && App.create-kind == "" && !TextInputInterface.text-input-focused;
+                enabled: App.has-track && !App.video-open && !App.show-now-playing && !App.menu-open && !App.menu-trigger-focused && !App.track-sort-focused && App.create-kind == "" && !TextInputInterface.text-input-focused;
                 activated => { App.open-now-playing(); }
             }
             MenuItem {
@@ -284,7 +284,7 @@ export component MainWindow inherits Window {
         // routes it, so it works when nothing has focus. This binding covers
         // windows without that hook.
         KeyBinding {
-            enabled: !App.menu-open && App.create-kind == "" && !TextInputInterface.text-input-focused;
+            enabled: !App.menu-open && !App.track-sort-focused && App.create-kind == "" && !TextInputInterface.text-input-focused;
             keys: @keys(" ");
             activated => {
                 App.toggle-play();

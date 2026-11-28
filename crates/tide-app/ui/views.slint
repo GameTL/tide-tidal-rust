@@ -4,7 +4,7 @@ import { TrackMenuButton } from "context-menu.slint";
 import { HeaderTools, SearchField, NavItem, SidebarPlaylist } from "chrome.slint";
 import { MinimizeButton } from "common.slint";
 import { MaxLogin } from "settings.slint";
-import { App, Theme, EditableInput, Icon, Kbd, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, SectionData, ExplicitBadge, QualityBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
+import { App, Theme, EditableInput, Icon, Kbd, IconButton, DebugButton, Cover, CardArt, CardData, TrackData, TrackSortColumn, SectionData, ExplicitBadge, QualityBadge, TitleWithQuality, ArtistLinks, PillButton, DragArea, MenuPanel, MenuRow, CreateButton, Toggle, TideLoader } from "common.slint";
 
 // ---------------------------------------------------------------- items
 //
@@ -964,12 +964,61 @@ export component ModulesPage inherits Rectangle {
 
 // ---------------------------------------------------------------- track table
 
-component HeaderLabel inherits Text {
-    color: Theme.text-header;
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: 0.6px;
-    vertical-alignment: center;
+component TrackHeader inherits Rectangle {
+    in property <string> text;
+    in property <TrackSortColumn> column;
+    property <bool> sortable: App.view != "queue";
+    property <bool> selected: sortable && App.track-sort-column == column;
+    property <bool> numbered: column == TrackSortColumn.position;
+
+    accessible-role: button;
+    accessible-enabled: sortable;
+    accessible-label: sortable ? "Sort by " + (numbered ? "track position" : text) : text;
+    accessible-description: selected ? (App.track-sort-descending ? "Descending" : "Ascending") : "";
+    accessible-action-default => { if (sortable) { App.sort-tracks(column); } }
+
+    border-radius: 4px;
+    background: focus.has-focus ? #ffffff18 : transparent;
+
+    label := Text {
+        x: numbered ? (root.width - self.width) / 2 : 0px;
+        width: numbered ? self.preferred-width : max(0px, min(self.preferred-width, root.width - (selected ? 16px : 0px)));
+        height: root.height;
+        text: root.text;
+        color: area.has-hover || focus.has-focus ? Theme.text : Theme.text-header;
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0.6px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if selected: Icon {
+        x: label.x + label.width + 4px;
+        y: (root.height - self.height) / 2;
+        source: @image-url("icons/chevron-down.svg");
+        transform-rotation: App.track-sort-descending ? 0deg : 180deg;
+        size: 12px;
+        tint: Theme.lossless;
+    }
+
+    focus := FocusScope {
+        width: 0px;
+        enabled: root.sortable;
+        changed has-focus => { App.track-sort-focused = self.has-focus; }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                App.sort-tracks(root.column);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    area := TouchArea {
+        enabled: root.sortable;
+        mouse-cursor: pointer;
+        clicked => { App.sort-tracks(root.column); }
+    }
 }
 
 component Cell inherits Text {
@@ -1091,7 +1140,7 @@ component TrackRow inherits Rectangle {
             tint: App.accent;
         }
         if !artist-page && !active && !lit && !(root.stacked && !album-page): Text {
-            text: index + 1;
+            text: track.position > 0 ? track.position : index + 1;
             color: #7c7c7c;
             font-size: 14px;
             font-weight: 500;
@@ -2166,46 +2215,52 @@ export component TracksView inherits Rectangle {
             y: y-columns;
             width: w;
             height: 36px;
-            if !artist-page: HeaderLabel {
+            if !artist-page: TrackHeader {
                 x: 0;
                 width: 44px;
                 text: "#";
-                horizontal-alignment: center;
+                column: position;
             }
 
-            HeaderLabel {
+            TrackHeader {
                 x: artist-page ? 60px : 46px;
+                width: x-artist - self.x - 12px;
                 text: "TITLE";
+                column: title;
             }
 
-            HeaderLabel {
+            TrackHeader {
                 x: x-artist;
+                width: (show-album ? x-album : x-time) - self.x - 8px;
                 text: "ARTIST";
+                column: artist;
             }
 
-            if show-album: HeaderLabel {
+            if show-album: TrackHeader {
                 x: x-album;
+                width: (show-date ? x-date : x-time) - self.x - 8px;
                 text: "ALBUM";
+                column: album;
             }
 
-            if show-date: HeaderLabel {
+            if show-date: TrackHeader {
                 x: x-date;
+                width: x-time - self.x - 6px;
                 text: "DATE ADDED";
+                column: date-added;
             }
-            if show-date: Icon {
-                x: x-date + 91px;
-                source: @image-url("icons/chevron-down.svg");
-                size: 14px;
-                tint: Theme.lossless;
-            }
-            HeaderLabel {
+            TrackHeader {
                 x: x-time;
+                width: show-bpm ? x-bpm - self.x : 60px;
                 text: "TIME";
+                column: duration;
             }
 
-            if show-bpm: HeaderLabel {
+            if show-bpm: TrackHeader {
                 x: x-bpm;
+                width: 44px;
                 text: "BPM";
+                column: bpm;
             }
         }
 

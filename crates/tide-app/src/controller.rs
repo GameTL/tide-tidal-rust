@@ -26,7 +26,7 @@ use tide_macos::{MacMediaControls, MediaControlEvent};
 use crate::signal::signal_path;
 use crate::{
     App, ArtistLink, CardData, CreditLine, LyricLine, MainWindow, MemPart, MemSample, SectionData,
-    SignalStage, TrackData,
+    SignalStage, TrackData, TrackSortColumn,
 };
 
 /// Cache key for "best quality the account can stream".
@@ -425,12 +425,58 @@ mod tests {
                 ..Default::default()
             })
             .to_vec();
+        state.sort_page_tracks();
         assert_eq!(state.take_reveal_track(), Some(1));
         assert!(state.reveal_track.is_none());
         state.reveal_track = Some((7, "target".into()));
         state.page_gen = 8;
         assert_eq!(state.take_reveal_track(), None);
         assert!(state.reveal_track.is_none());
+    }
+
+    #[test]
+    fn track_sort_matches_rows_and_playback_in_both_directions() {
+        use TrackSortColumn::*;
+
+        let track = |title: &str, artist: &str, album: &str, duration_secs, bpm, date_added_at| {
+            TrackItem {
+                id: title.into(),
+                title: title.into(),
+                artist: artist.into(),
+                album: album.into(),
+                duration_secs,
+                bpm,
+                date_added_at,
+                ..Default::default()
+            }
+        };
+        let mut state = State {
+            page_tracks: vec![
+                track("Zebra", "beta", "Alpha", 600, Some(100), Some(2)),
+                track("apple", "Zebra", "beta", 90, None, None),
+                track("Mango", "Alpha", "Zebra", 120, Some(95), Some(1)),
+            ],
+            ..Default::default()
+        };
+        for (column, first_order, second_order) in [
+            (Title, [2, 3, 1], [1, 3, 2]),
+            (Artist, [3, 1, 2], [2, 1, 3]),
+            (Album, [1, 2, 3], [3, 2, 1]),
+            (DateAdded, [1, 3, 2], [3, 1, 2]),
+            (Duration, [2, 3, 1], [1, 3, 2]),
+            (Bpm, [3, 1, 2], [1, 3, 2]),
+            (Position, [1, 2, 3], [3, 2, 1]),
+        ] {
+            for expected in [first_order, second_order] {
+                state.track_sort.select(column);
+                state.sort_page_tracks();
+                let rows = state.track_rows();
+                assert_eq!(rows.iter().map(|row| row.position).collect::<Vec<_>>(), expected);
+                assert!(rows.iter().zip(state.ordered_page_tracks()).all(|(row, track)| row.id == track.id.as_str()));
+            }
+        }
+        state.reveal_track = Some((0, "Zebra".into()));
+        assert_eq!(state.take_reveal_track(), Some(2));
     }
 
     #[test]
@@ -1323,6 +1369,61 @@ type SectionModel = (Rc<VecModel<CardData>>, Rc<VecModel<TrackData>>, usize);
 type ImageWaiters = HashMap<String, Vec<Box<dyn FnOnce(&Image, Color)>>>;
 
 #[derive(Default)]
+struct TrackSort {
+    column: TrackSortColumn,
+    descending: bool,
+}
+
+impl TrackSort {
+    fn select(&mut self, column: TrackSortColumn) {
+        self.descending = if self.column == column {
+            !self.descending
+        } else {
+            column == TrackSortColumn::DateAdded
+        };
+        self.column = column;
+    }
+
+    fn order(&self, tracks: &[TrackItem], favorites: bool) -> Vec<usize> {
+        use TrackSortColumn::*;
+
+        let mut order: Vec<_> = (0..tracks.len()).collect();
+        match self.column {
+            Position if self.descending => order.reverse(),
+            Position => (),
+            // Older favorites caches only have the server's newest-first order.
+            DateAdded if favorites && tracks.iter().all(|track| track.date_added_at.is_none()) => {
+                if !self.descending {
+                    order.reverse();
+                }
+            }
+            Title => self.sort_by(&mut order, |i| Some(tracks[i].title.to_lowercase())),
+            Artist => self.sort_by(&mut order, |i| Some(tracks[i].artist.to_lowercase())),
+            Album => self.sort_by(&mut order, |i| Some(tracks[i].album.to_lowercase())),
+            DateAdded => self.sort_by(&mut order, |i| tracks[i].date_added_at),
+            Duration => self.sort_by(&mut order, |i| Some(tracks[i].duration_secs)),
+            Bpm => self.sort_by(&mut order, |i| tracks[i].bpm),
+        }
+        order
+    }
+
+    fn sort_by<K: Ord>(&self, order: &mut [usize], key: impl Fn(usize) -> Option<K>) {
+        // The stable sort keeps equal values in source order. Missing values stay at the end.
+        if self.descending {
+            order.sort_by_cached_key(|&i| {
+                let value = key(i);
+                (value.is_none(), std::cmp::Reverse(value))
+            });
+        } else {
+            order.sort_by_cached_key(|&i| {
+                let value = key(i);
+                (value.is_none(), value)
+            });
+        }
+    }
+}
+
+#[derive(Default)]
 struct State {
     history: Vec<Page>,
     hist_pos: usize,
@@ -1351,8 +1452,10 @@ struct State {
     /// Background refreshes running for the page on screen.
     sync: SyncState,
 
-    /// Tracks behind the table on screen (after filtering) and its model.
+    /// Tracks behind the table on screen in source order, after filtering.
     page_tracks: Vec<TrackItem>,
+    track_sort: TrackSort,
+    track_order: Vec<usize>,
     page_context: String,
     tracks_model: Option<Rc<VecModel<TrackData>>>,
     /// Upcoming queue rows shown inside Now Playing.
@@ -1421,6 +1524,27 @@ struct State {
 }
 
 impl State {
+    fn sort_page_tracks(&mut self) {
+        let favorites = matches!(self.history.get(self.hist_pos), Some(Page::Tracks));
+        self.track_order = self.track_sort.order(&self.page_tracks, favorites);
+    }
+
+    fn ordered_page_tracks(&self) -> impl Iterator<Item = &TrackItem> {
+        self.track_order.iter().map(|&i| &self.page_tracks[i])
+    }
+
+    fn track_rows(&self) -> Vec<TrackData> {
+        self.track_order
+            .iter()
+            .map(|&i| {
+                let track = &self.page_tracks[i];
+                let mut row = track_row(track, self.fav_ids.contains(&track.id));
+                row.position = (i + 1) as i32;
+                row
+            })
+            .collect()
+    }
+
     fn playback_page(&self) -> Page {
         self.playback_source.clone().unwrap_or_else(|| {
             if self.context == "My Tracks" || self.context == "Tracks" {
@@ -1437,7 +1561,9 @@ impl State {
             self.reveal_track = None;
             return None;
         }
-        let index = self.page_tracks.iter().position(|track| track.id == *id)?;
+        let index = self
+            .ordered_page_tracks()
+            .position(|track| track.id == *id)?;
         self.reveal_track = None;
         Some(index)
     }
@@ -1751,6 +1877,7 @@ pub fn space_toggles_play(pressed: bool, repeat: bool) -> bool {
     let app = ui.app();
     if !app.get_logged_in()
         || app.get_menu_open()
+        || app.get_track_sort_focused()
         || !app.get_create_kind().is_empty()
         || ui.win.get_typing()
     {
@@ -2247,6 +2374,7 @@ fn link_model(links: Vec<ArtistLink>) -> ModelRc<ArtistLink> {
 fn track_row(t: &TrackItem, favorite: bool) -> TrackData {
     TrackData {
         id: t.id.as_str().into(),
+        position: 0,
         title: t.title.as_str().into(),
         artist: t.artist.as_str().into(),
         artist_id: t.artist_id.as_deref().unwrap_or_default().into(),
@@ -3362,6 +3490,7 @@ impl Ui {
             ui.show(Page::Search(q), true);
         });
         bind!(on_filter, |ui, text| ui.apply_filter(&text));
+        bind!(on_sort_tracks, |ui, column| ui.sort_tracks(column));
         bind!(on_rows_visible, |ui, first, count| ui
             .rows_visible(first.max(0) as usize, count.max(0) as usize));
         bind!(on_request_track_menu, |ui, id, x, y| ui
@@ -5098,15 +5227,36 @@ impl Ui {
 
     /// Replace the track table.
     fn set_tracks(self: &Rc<Self>, tracks: Vec<TrackItem>, context: &str) {
-        let model = {
+        {
             let mut st = self.state.borrow_mut();
-            let rows: Vec<TrackData> = tracks
-                .iter()
-                .map(|t| track_row(t, st.fav_ids.contains(&t.id)))
-                .collect();
-            let model = Rc::new(VecModel::from(rows));
             st.page_tracks = tracks;
             st.page_context = context.to_string();
+            st.sort_page_tracks();
+        }
+        self.present_tracks();
+    }
+
+    fn sort_tracks(self: &Rc<Self>, column: TrackSortColumn) {
+        let app = self.app();
+        if app.get_view() == "queue" {
+            return;
+        }
+        let descending = {
+            let mut st = self.state.borrow_mut();
+            st.track_sort.select(column);
+            st.sort_page_tracks();
+            st.track_sort.descending
+        };
+        app.set_track_sort_column(column);
+        app.set_track_sort_descending(descending);
+        self.present_tracks();
+        app.set_pick_index(0);
+    }
+
+    fn present_tracks(self: &Rc<Self>) {
+        let model = {
+            let mut st = self.state.borrow_mut();
+            let model = Rc::new(VecModel::from(st.track_rows()));
             st.tracks_model = Some(model.clone());
             model
         };
@@ -5132,15 +5282,14 @@ impl Ui {
             self.set_tracks(tracks, context);
             return;
         };
-        let rows: Vec<TrackData> = {
-            let st = self.state.borrow();
-            tracks
-                .iter()
-                .map(|t| track_row(t, st.fav_ids.contains(&t.id)))
-                .collect()
+        let rows = {
+            let mut st = self.state.borrow_mut();
+            st.page_tracks = tracks;
+            st.sort_page_tracks();
+            st.track_rows()
         };
         let inserted = patch_rows(&model, rows, track_key, merge_track, |row| row.fresh = true);
-        self.state.borrow_mut().page_tracks = tracks;
+        self.reveal_playing_track();
         let (from, upto) = self
             .state
             .borrow()
@@ -5900,11 +6049,25 @@ impl Ui {
                 st.hist_pos = st.history.len() - 1;
             }
             st.page_gen += 1;
+            st.track_sort = if matches!(page, Page::Tracks) {
+                TrackSort {
+                    column: TrackSortColumn::DateAdded,
+                    descending: true,
+                }
+            } else {
+                TrackSort::default()
+            };
             // Artwork of the page we are leaving is dropped with its model.
             st.images.clear();
             st.page_gen
         };
         let app = self.app();
+        {
+            let st = self.state.borrow();
+            app.set_track_sort_column(st.track_sort.column);
+            app.set_track_sort_descending(st.track_sort.descending);
+        }
+        app.set_track_sort_focused(false);
         app.set_page_title("".into());
         // A page reached through history comes back where it was left.
         let scroll = {
@@ -7009,7 +7172,13 @@ impl Ui {
                     .page_card()
                     .is_some_and(|page| page.kind == card.kind && page.id == card.id);
                 let loaded = on_page
-                    .then(|| self.state.borrow().page_tracks.clone())
+                    .then(|| {
+                        self.state
+                            .borrow()
+                            .ordered_page_tracks()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
                     .filter(|t| !t.is_empty());
                 if let Some(tracks) = loaded {
                     self.card_tracks_action(&action, &arg, &card, tracks);
@@ -7454,7 +7623,13 @@ impl Ui {
                     .page_card()
                     .is_some_and(|page| page.kind == card.kind && page.id == card.id);
                 let loaded = on_page
-                    .then(|| self.state.borrow().page_tracks.clone())
+                    .then(|| {
+                        self.state
+                            .borrow()
+                            .ordered_page_tracks()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
                     .filter(|t| !t.is_empty());
                 if let Some(tracks) = loaded {
                     self.card_tracks_action("play", "", &card, tracks);
@@ -7993,7 +8168,10 @@ impl Ui {
     fn play_from_page(self: &Rc<Self>, id: &str) {
         let (tracks, context) = {
             let st = self.state.borrow();
-            (st.page_tracks.clone(), st.page_context.clone())
+            (
+                st.ordered_page_tracks().cloned().collect::<Vec<_>>(),
+                st.page_context.clone(),
+            )
         };
         if let Some(index) = tracks.iter().position(|t| t.id == id) {
             let playing = self.page_card().map(|c| (c.kind, c.id));
@@ -8026,7 +8204,10 @@ impl Ui {
     fn play_all(self: &Rc<Self>, shuffle: bool) {
         let (tracks, context) = {
             let st = self.state.borrow();
-            (st.page_tracks.clone(), st.page_context.clone())
+            (
+                st.ordered_page_tracks().cloned().collect::<Vec<_>>(),
+                st.page_context.clone(),
+            )
         };
         if tracks.is_empty() {
             return;
@@ -9049,6 +9230,10 @@ impl Ui {
                         .cloned();
                     if let Some(mut track) = known {
                         track.date_added = Some("Today".into());
+                        track.date_added_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|age| age.as_millis() as i64);
                         st.favorites.insert(0, track);
                     }
                 }
