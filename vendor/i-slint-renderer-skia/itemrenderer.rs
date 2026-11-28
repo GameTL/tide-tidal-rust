@@ -104,8 +104,11 @@ impl<'a> SkiaItemRenderer<'a> {
             return None;
         }
 
+        // TIDE patch: the upstream one-blur padding cuts a Gaussian off at
+        // two sigma. Give it four sigma so its edge reaches transparency.
+        let extra_pad = shadow_options.blur.get();
         let canvas_size: skia_safe::Size = {
-            let size = shadow_options.drop_texture_size();
+            let size = shadow_options.drop_texture_size() + euclid::size2(2. * extra_pad, 2. * extra_pad);
             (size.width, size.height).into()
         };
 
@@ -116,7 +119,7 @@ impl<'a> SkiaItemRenderer<'a> {
         );
 
         let rounded_rect = to_skia_rrect(
-            &PhysicalRect::new(shadow_options.shape_origin(), shape_size),
+            &PhysicalRect::new(shadow_options.shape_origin() + euclid::vec2(extra_pad, extra_pad), shape_size),
             &shadow_options.outer_radius(),
         );
 
@@ -883,7 +886,7 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             );
         } else {
             let blur = box_shadow.blur() * self.scale_factor;
-            let pad = blur.get() + spread.get().max(0.);
+            let pad = 2. * blur.get() + spread.get().max(0.);
             self.canvas.draw_image(
                 cached_shadow_image,
                 to_skia_point(offset - PhysicalPoint::new(pad, pad).to_vector()),

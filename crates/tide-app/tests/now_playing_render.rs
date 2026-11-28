@@ -266,6 +266,14 @@ fn now_playing_arrangements_render() {
         app.set_show_queue(false);
         app.set_show_lyrics(false);
         let centred = shoot(&ui, &format!("np-wide-centred-{g}"));
+        if !glass {
+            // Above the old shadow texture boundary, the fade must already be
+            // present rather than appearing abruptly at that boundary.
+            let fade: i32 = (85..=91)
+                .map(|y| at(&centred, 100., y as f32).0 as i32 - at(&centred, 720., y as f32).0 as i32)
+                .sum();
+            assert!(fade > 0, "artwork shadow was cut off above its old edge");
+        }
         // Wide, Similar tracks and Credits: art left, the tab where the queue
         // sits.
         app.set_np_tab("similar".into());

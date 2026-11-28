@@ -95,3 +95,6 @@ release and re-apply them, or drop the patch if upstream has fixed them.
    the all but transparent gradient and clip children normally.
    - Unit tests in `fade.rs` (`cargo test -p i-slint-renderer-skia fade`);
      the app's `tests/now_playing_render.rs` verifies scrolled queue and side edge fades.
+9. `itemrenderer.rs` (`render_drop_shadow_image`, `draw_box_shadow`) – pad drop
+   shadows to four Gaussian standard deviations instead of two, preventing a
+   visible hard edge where the cached shadow texture ends.
