@@ -456,7 +456,6 @@ fn now_playing_arrangements_render() {
     app.set_show_queue(false);
     app.set_show_lyrics(true);
     let lyrics_base = shoot(&ui, "np-swipe-base-glass");
-    app.set_np_swipe_from_centred(false);
     app.set_np_swipe_active(true);
     app.set_np_swipe_progress(0.45);
     let swipe = shoot(&ui, "np-swipe-mid-glass");
@@ -483,9 +482,34 @@ fn now_playing_arrangements_render() {
         right_max < 24,
         "live swipe right box edge hard-clipped (max diff={right_max})"
     );
+    // The swipe carries on through every tab: Queue -> Similar tracks ->
+    // Credits, each pair side by side mid-way, never on top of each other.
+    for (p, name) in [(1.5, "np-swipe-queue-similar"), (2.5, "np-swipe-similar-credits"), (3.0, "np-swipe-credits")] {
+        app.set_np_swipe_progress(p);
+        shoot(&ui, name);
+    }
     app.set_np_swipe_active(false);
     app.set_np_swipe_progress(0.);
     app.set_show_queue(false);
+    app.set_show_now_playing(false);
+    settle();
+
+    // A click from Lyrics to Credits glides the pages; caught part-way.
+    app.set_show_lyrics(true);
+    app.set_show_now_playing(true);
+    settle();
+    app.invoke_toggle_np_tab("credits".into());
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        slint::platform::update_timers_and_animations();
+    }
+    let glide = ui.window().take_snapshot().unwrap();
+    if let Some(dir) = std::env::var_os("TIDE_GLASS_SHOTS") {
+        let dir = std::path::PathBuf::from(dir);
+        image::save_buffer(dir.join("np-click-glide-mid.png"), glide.as_bytes(), glide.width(), glide.height(), image::ColorType::Rgba8)
+            .unwrap();
+    }
+    app.set_np_tab("".into());
     app.set_show_now_playing(false);
     settle();
 

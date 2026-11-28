@@ -1441,6 +1441,17 @@ pub fn configure_input(window: &slint::Window, ctx: std::sync::Arc<crate::contro
         {
             return EventResult::PreventDefault;
         }
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && let Key::Named(key @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) = &event.logical_key
+            && !(modifiers.super_key() || modifiers.control_key() || modifiers.alt_key() || modifiers.shift_key())
+            && crate::controller::now_playing_arrow(
+                if *key == NamedKey::ArrowLeft { -1 } else { 1 },
+                event.state == ElementState::Pressed,
+                event.repeat,
+            )
+        {
+            return EventResult::PreventDefault;
+        }
         // Single keys open the sidebar pages ("/" the page's filter), on the
         // same terms as Space.
         if let WindowEvent::KeyboardInput { event, .. } = event

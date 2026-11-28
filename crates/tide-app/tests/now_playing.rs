@@ -422,8 +422,38 @@ fn queue_panel_toggle_play_menu_and_player_bar_button() {
         }
     }
     assert!(toggled, "overlay player bar Queue icon toggles Queue in-place");
+    advance(win, 700);
+    assert!(
+        art_windows.borrow().last().is_some_and(|&(_, count)| count > 0),
+        "back on Queue, its covers are asked for again (got {:?})",
+        art_windows.borrow().last()
+    );
     assert!(navs.borrow().is_empty(), "Queue icon in Now Playing must not navigate away");
     assert!(!app.get_show_lyrics());
+
+    // Swiping away from Queue (to Similar or Lyrics) and back also drops then
+    // re-requests Queue's covers.
+    for away in [2.0_f32, 0.0_f32] {
+        app.set_np_swipe_progress(1.0);
+        app.set_np_swipe_active(true);
+        advance(win, 16);
+        app.set_np_swipe_progress(away);
+        advance(win, 16);
+        assert_eq!(
+            art_windows.borrow().last().copied(),
+            Some((0, 0)),
+            "swiping away from Queue to {away} drops decoded queue covers"
+        );
+        app.set_np_swipe_progress(1.0);
+        advance(win, 16);
+        app.set_np_swipe_active(false);
+        advance(win, 16);
+        assert!(
+            art_windows.borrow().last().is_some_and(|&(_, count)| count > 0),
+            "swiping back to Queue from {away} requests its covers again (got {:?})",
+            art_windows.borrow().last()
+        );
+    }
 
     // Similar tracks and Credits are the pill's third and fourth segments:
     // each opens in place of Queue, asks for its content, and closes again.

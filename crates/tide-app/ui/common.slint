@@ -682,8 +682,12 @@ export global App {
     in-out property <bool> show-queue: false;
     // Live two-finger horizontal trackpad swipe between Lyrics (0) and Queue (1).
     in property <bool> np-swipe-active: false;
+    // Where a swipe has the tabs: 0 Lyrics, 1 Queue, 2 Similar tracks,
+    // 3 Credits, fractional between them; one below the first tab there is
+    // (Queue without lyrics) is the artwork centred.
     in property <float> np-swipe-progress: 0;
-    in property <bool> np-swipe-from-centred: false;
+    // Tabs the pill shows (2 or 4), set by Now Playing for the swipe's bounds.
+    in-out property <int> np-tab-count: 4;
     // True while fingers are down on the trackpad during a vertical scroll in
     // Now Playing, so Lists stretch elastically at the ends and spring back on lift.
     in property <bool> np-scroll-touching: false;
@@ -725,6 +729,22 @@ export global App {
             show-lyrics = !show-lyrics;
         }
         set-show-lyrics(show-lyrics);
+    }
+    // Open tab `mode` (0 Lyrics … 3 Credits; -1: none), as a swipe lands.
+    // Landing on Lyrics, or leaving it for the centred artwork, is the
+    // Lyrics toggle and is remembered.
+    public function set-np-mode(mode: int) {
+        if (mode == 0 || (mode == -1 && show-lyrics)) {
+            show-lyrics = mode == 0;
+            set-show-lyrics(show-lyrics);
+        } else {
+            show-lyrics = false;
+        }
+        show-queue = mode == 1;
+        np-tab = mode == 2 ? "similar" : mode == 3 ? "credits" : "";
+        if (np-tab != "") {
+            np-tab-opened(np-tab);
+        }
     }
     // Toggle Similar tracks or Credits; the lyrics setting is left as it is.
     public function toggle-np-tab(tab: string) {

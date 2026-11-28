@@ -3205,24 +3205,41 @@ component QueueColumn inherits Rectangle {
     accessible-label: "Play queue";
 
     init => {
-        App.np-queue-visible(root.first, root.visible-rows);
+        if (self.visible) {
+            App.np-queue-visible(root.first, root.visible-rows);
+        }
     }
     changed first => {
-        App.np-queue-visible(root.first, root.visible-rows);
+        if (self.visible) {
+            App.np-queue-visible(root.first, root.visible-rows);
+        }
     }
     changed visible-rows => {
-        App.np-queue-visible(root.first, root.visible-rows);
+        if (self.visible) {
+            App.np-queue-visible(root.first, root.visible-rows);
+        }
     }
     changed current-track => {
         root.scroll = 0px;
         root.over-raw = 0px;
-        App.np-queue-visible(0, root.visible-rows);
+        if (self.visible) {
+            App.np-queue-visible(0, root.visible-rows);
+        }
+    }
+    // Now Playing keeps the column while another tab is on screen, and lets
+    // its covers go meanwhile: ask for them again when it comes back.
+    changed visible => {
+        if (self.visible) {
+            App.np-queue-visible(root.first, root.visible-rows);
+        }
     }
     changed queue-len => {
         if (root.scroll > root.max-scroll) {
             root.scroll = root.max-scroll;
         }
-        App.np-queue-visible(root.first, root.visible-rows);
+        if (self.visible) {
+            App.np-queue-visible(root.first, root.visible-rows);
+        }
     }
 
     // Header: Continue Playing and clickable source context.
@@ -3501,8 +3518,12 @@ component NpTabScroll inherits Rectangle {
 component SimilarColumn inherits Rectangle {
     in property <float> reveal: 1;
     in property <bool> interactive: true;
-    opacity: root.reveal;
-    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
+    // Fades in when the first answer for a track arrives (loaded ahead, so
+    // usually before the tab is opened).
+    property <float> ready: App.np-similar.length > 0 || App.np-radios.length > 0 || App.np-similar-status != "" ? 1 : 0;
+    animate ready { duration: 220ms; easing: ease-out; }
+    opacity: root.reveal * root.ready;
+    cache-rendering-hint: self.opacity > 0 && self.opacity < 1;
     accessible-role: AccessibleRole.list;
     accessible-label: "Similar tracks";
     NpTabScroll {
@@ -3565,8 +3586,10 @@ component SimilarColumn inherits Rectangle {
 component CreditsColumn inherits Rectangle {
     in property <float> reveal: 1;
     in property <bool> interactive: true;
-    opacity: root.reveal;
-    cache-rendering-hint: root.reveal > 0 && root.reveal < 1;
+    property <float> ready: App.np-credits.length > 0 || App.np-credits-status != "" ? 1 : 0;
+    animate ready { duration: 220ms; easing: ease-out; }
+    opacity: root.reveal * root.ready;
+    cache-rendering-hint: self.opacity > 0 && self.opacity < 1;
     accessible-role: AccessibleRole.list;
     accessible-label: "Credits";
     NpTabScroll {
@@ -3716,33 +3739,38 @@ export component NowPlayingView inherits Rectangle {
     // The overlay bar shows no title when compact: Now Playing does.
     property <bool> meta: App.compact-layout;
     property <length> meta-h: root.meta ? 68px : 0px;
-    // Right-column panels: mutually exclusive Lyrics or Queue, plus live 1:1
-    // two-finger horizontal trackpad swipe (`App.np-swipe-*`).
+    // Right-column tabs, after TIDAL's: Lyrics (0), Queue (1), Similar
+    // tracks (2) and Credits (3), one at a time. They sit side by side as
+    // pages: a click glides between them, a two-finger swipe drags through
+    // them 1:1 (`App.np-swipe-*`), and swiping back past the first closes
+    // the column.
     property <bool> lyrics-on: App.show-lyrics && !App.show-queue && App.np-tab == "" && App.lyrics-status == "";
     property <bool> queue-on: App.show-queue && App.np-tab == "";
-    // Similar tracks and Credits: clicked, never swiped to.
     property <bool> similar-on: App.np-tab == "similar";
     property <bool> credits-on: App.np-tab == "credits";
     property <bool> panel-on: root.lyrics-on || root.queue-on || root.similar-on || root.credits-on;
-    property <float> swipe-p: App.np-swipe-progress;
-    property <float> swipe-s: clamp(root.swipe-p, 0, 1);
-    property <bool> swipe-shows-lyrics: App.np-swipe-active && !App.np-swipe-from-centred && App.lyrics-status == "";
-    // 0 with artwork centred, 1 with a right column open; switching between
-    // Lyrics and Queue keeps the artwork steady while the columns cross-glide.
-    property <float> panel: App.np-swipe-active ? (App.np-swipe-from-centred ? root.swipe-s : 1) : (root.panel-on ? 1 : 0);
+    // The first tab there is: Queue when the track has no lyrics.
+    property <int> first-tab: App.lyrics-status == "" ? 0 : 1;
+    // The pages' position at rest: the open tab, gliding to a newly picked one.
+    property <float> rest: 0;
+    property <bool> glide: false;
+    animate rest { duration: root.glide ? 340ms : 0ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
+    // While fingers drive it, the swipe's position (one below the first tab
+    // is the artwork centred).
+    property <float> pos: App.np-swipe-active ? App.np-swipe-progress : root.rest;
+    // Never left of the first tab: swiping back past it grows the artwork
+    // rather than sliding a blank page in.
+    property <float> page: max(root.pos, root.first-tab);
+    // 0 with artwork centred, 1 with a right column open; moving between
+    // tabs keeps the artwork steady while the pages slide.
+    property <float> panel: App.np-swipe-active ? clamp(root.pos - root.first-tab + 1, 0, 1) : (root.panel-on ? 1 : 0);
     animate panel { duration: App.np-swipe-active ? 0ms : 480ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
-    property <float> lyr: root.lyrics-on ? 1 : 0;
-    animate lyr { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
-    property <float> que: root.queue-on ? 1 : 0;
-    animate que { duration: App.np-swipe-active ? 0ms : 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
-    property <float> sim: root.similar-on ? 1 : 0;
-    animate sim { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
-    property <float> cre: root.credits-on ? 1 : 0;
-    animate cre { duration: 360ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
-    property <float> lyr-eff: App.np-swipe-active ? (root.swipe-shows-lyrics ? clamp((1 - root.swipe-s) * 2.5, 0, 1) : 0) : root.lyr;
-    property <float> que-eff: App.np-swipe-active ? clamp(root.swipe-s * 2.5, 0, 1) : root.que;
-    // Reclaim decoded queue covers once the Queue panel has finished hiding.
-    property <bool> queue-live: root.presenting && root.que-eff > 0;
+    // How much of tab `i` is on screen: its page is that far from the middle.
+    pure function near(i: int) -> float {
+        clamp(1 - abs(root.page - i), 0, 1)
+    }
+    // Reclaim decoded queue covers once the Queue page has left the screen.
+    property <bool> queue-live: root.presenting && root.panel > 0 && root.near(1) > 0;
     changed queue-live => {
         if (!root.queue-live) {
             App.np-queue-visible(0, 0);
@@ -3866,16 +3894,15 @@ export component NowPlayingView inherits Rectangle {
     // so content dissolves cleanly at both sides (never hard-clipping against
     // the box edge, and never overlapping the artwork).
     property <length> col-w: root.narrow ? max(0px, root.width - 2 * root.pad) : root.column-w;
-    property <length> swipe-span: root.col-w + 24px;
+    // One page to the next: a neighbour starts just past the box's edge fade.
+    property <length> span: root.col-w + root.side-fade;
     property <bool> sliding: App.np-swipe-active
-        || (root.lyr > 0 && root.lyr < 1)
-        || (root.que > 0 && root.que < 1)
-        || (root.sim > 0 && root.sim < 1)
-        || (root.cre > 0 && root.cre < 1)
+        || abs(root.rest - round(root.rest)) > 0.001
         || (root.panel > 0 && root.panel < 1);
     property <length> side-fade: root.sliding ? (root.narrow ? min(root.pad, 24px) : min(root.gap * 0.72, 48px)) : 0px;
+    property <bool> interactive: App.show-now-playing && !App.np-swipe-active && !root.sliding;
 
-    if root.presenting && (root.lyr-eff > 0 || root.que-eff > 0 || root.sim > 0 || root.cre > 0): Rectangle {
+    if root.presenting && root.panel > 0: Rectangle {
         x: root.col-x - root.side-fade;
         y: 0px;
         width: root.col-w + 2 * root.side-fade;
@@ -3889,42 +3916,48 @@ export component NowPlayingView inherits Rectangle {
             height: 100%;
             background: @conic-gradient(at root.side-fade root.side-fade, #46414801 0deg, #46414801 360deg);
 
-            if root.lyr-eff > 0: LyricsColumn {
-                x: root.side-fade + (App.np-swipe-active ? -root.swipe-span * root.swipe-p : (root.panel-mode > 1 ? -44px : 44px) * (1 - root.lyr));
+            // Kept while the column is open, hidden off screen: its
+            // scroll and sung line are where they were when it comes back.
+            LyricsColumn {
+                visible: root.near(0) > 0;
+                x: root.side-fade + (0 - root.page) * root.span;
                 y: root.top;
                 width: root.col-w;
                 height: root.narrow ? root.narrow-meta-on - 12px - root.top : root.height - App.player-height - 64px - root.top;
                 font-size: clamp(self.width * 0.045, 18px, 30px);
-                reveal: root.expansion * root.panel-fade * root.lyr-eff;
+                reveal: root.expansion * root.panel-fade * root.near(0);
                 glass: root.glass;
-                interactive: App.show-now-playing && !App.np-swipe-active && root.lyrics-on;
+                interactive: root.interactive && root.lyrics-on;
             }
 
-            if root.que-eff > 0: QueueColumn {
-                x: root.side-fade + (App.np-swipe-active ? root.swipe-span * (1 - root.swipe-p) : (root.panel-mode > 2 ? -44px : 44px) * (1 - root.que));
+            QueueColumn {
+                visible: root.near(1) > 0;
+                x: root.side-fade + (1 - root.page) * root.span;
                 y: root.queue-y;
                 width: root.col-w;
                 height: root.queue-h;
-                reveal: root.expansion * root.panel-fade * root.que-eff;
-                interactive: App.show-now-playing && !App.np-swipe-active && root.queue-on;
+                reveal: root.expansion * root.panel-fade * root.near(1);
+                interactive: root.interactive && root.queue-on;
             }
 
-            if root.sim > 0: SimilarColumn {
-                x: root.side-fade + (root.panel-mode > 3 ? -44px : 44px) * (1 - root.sim);
+            SimilarColumn {
+                visible: root.near(2) > 0;
+                x: root.side-fade + (2 - root.page) * root.span;
                 y: root.queue-y;
                 width: root.col-w;
                 height: root.queue-h;
-                reveal: root.expansion * root.panel-fade * root.sim;
-                interactive: App.show-now-playing && root.similar-on;
+                reveal: root.expansion * root.panel-fade * root.near(2);
+                interactive: root.interactive && root.similar-on;
             }
 
-            if root.cre > 0: CreditsColumn {
-                x: root.side-fade + 44px * (1 - root.cre);
+            CreditsColumn {
+                visible: root.near(3) > 0;
+                x: root.side-fade + (3 - root.page) * root.span;
                 y: root.queue-y;
                 width: root.col-w;
                 height: root.queue-h;
-                reveal: root.expansion * root.panel-fade * root.cre;
-                interactive: App.show-now-playing && root.credits-on;
+                reveal: root.expansion * root.panel-fade * root.near(3);
+                interactive: root.interactive && root.credits-on;
             }
         }
     }
@@ -3947,6 +3980,7 @@ export component NowPlayingView inherits Rectangle {
     property <bool> light: App.np-light;
     property <int> seg-count: root.width - root.header-w - root.seg-w * 4 - root.pill-pad * 2 - root.trail-w >= root.lead-w ? 4 : 2;
     changed seg-count => {
+        App.np-tab-count = root.seg-count;
         if (root.seg-count < 4) {
             App.np-tab = "";
         }
@@ -3955,32 +3989,33 @@ export component NowPlayingView inherits Rectangle {
     property <length> group-w: root.pill-w + root.trail-w;
     property <int> panel-mode: root.credits-on ? 4 : root.similar-on ? 3 : root.queue-on ? 2 : root.lyrics-on ? 1 : 0;
     property <int> last-mode: 0;
-    property <float> thumb-slot: 0;
-    property <bool> thumb-glide: false;
-    animate thumb-slot { duration: root.thumb-glide ? 280ms : 0ms; easing: cubic-bezier(0.32, 0.72, 0, 1); }
     property <float> thumb-alpha: root.panel-mode > 0 ? 1 : 0;
     animate thumb-alpha { duration: App.np-swipe-active ? 0ms : 200ms; easing: ease-out; }
-    property <float> thumb-pos: App.np-swipe-active ? (App.np-swipe-from-centred ? 1 : clamp(root.swipe-p, -0.06, 1.06)) : root.thumb-slot;
-    property <float> thumb-vis: App.np-swipe-active ? (App.np-swipe-from-centred ? root.swipe-s : 1) : root.thumb-alpha;
+    // The thumb rides with the pages; past the last tab it gives a little.
+    property <float> thumb-pos: min(root.page, root.seg-count - 1 + 0.06);
+    property <float> thumb-vis: App.np-swipe-active ? root.panel : root.thumb-alpha;
     // How much of the thumb lies under segment `i`: its label turns dark.
     pure function cover(i: int) -> float {
         root.thumb-vis * clamp(1 - abs(root.thumb-pos - i), 0, 1)
     }
-    // The segment shown as chosen (during a swipe, the nearer of the two).
+    // The segment shown as chosen (during a swipe, the nearest).
     property <int> lit: App.np-swipe-active
-        ? (root.swipe-s >= 0.5 ? 1 : root.swipe-shows-lyrics ? 0 : -1)
+        ? (root.panel >= 0.5 ? round(root.page) : -1)
         : root.panel-mode - 1;
     changed panel-mode => {
         if (root.panel-mode > 0) {
-            root.thumb-glide = !App.np-swipe-active && root.last-mode > 0 && root.last-mode != root.panel-mode;
-            root.thumb-slot = root.panel-mode - 1;
+            // From the centred artwork the column fades in on its tab; from
+            // another tab the pages glide. A swipe has already put them there.
+            root.glide = !App.np-swipe-active && root.last-mode > 0 && root.last-mode != root.panel-mode;
+            root.rest = root.panel-mode - 1;
         }
         root.last-mode = root.panel-mode;
     }
     init => {
         App.bar-covered = self.expansion >= 1;
+        App.np-tab-count = root.seg-count;
         root.last-mode = root.panel-mode;
-        root.thumb-slot = max(0, root.panel-mode - 1);
+        root.rest = max(0, root.panel-mode - 1);
     }
 
     // Glass capsule behind the segmented toggle: leaf rectangle so its

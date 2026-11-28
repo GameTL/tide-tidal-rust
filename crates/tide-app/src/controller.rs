@@ -844,31 +844,38 @@ mod tests {
     }
 
     #[test]
-    fn now_playing_swipe_toggles_between_lyrics_and_queue() {
-        // Viewing Lyrics or Centred: swipe left tracks towards Queue; swipe right stays put.
-        assert_eq!(np_swipe_target(false, false), Some(true));
-        assert_eq!(np_swipe_target(false, true), None);
-        // Viewing Queue: swipe right tracks towards Lyrics (or closes Queue without lyrics); swipe left stays put.
-        assert_eq!(np_swipe_target(true, true), Some(false));
-        assert_eq!(np_swipe_target(true, false), None);
+    fn now_playing_swipe_pages_through_every_tab() {
+        // Lyrics..Credits, centred one before Lyrics.
+        let (lo, hi) = (-1.0, 3.0);
+        // A slow drag settles on the nearest tab, however far it went.
+        assert_eq!(np_swipe_settle(0.0, 2.3, 0.0, false, lo, hi), 2.0);
+        assert_eq!(np_swipe_settle(1.0, 1.4, 0.0, false, lo, hi), 1.0);
+        assert_eq!(np_swipe_settle(1.0, 1.1, 0.9, false, lo, hi), 1.0);
+        // A flick moves on one tab from a short drag, either way.
+        assert_eq!(np_swipe_settle(1.0, 1.1, 1.2, false, lo, hi), 2.0);
+        assert_eq!(np_swipe_settle(2.0, 1.9, -1.2, false, lo, hi), 1.0);
+        // Past either end: the centred artwork, or the last tab.
+        assert_eq!(np_swipe_settle(0.0, -0.8, -2.0, false, lo, hi), -1.0);
+        assert_eq!(np_swipe_settle(3.0, 3.5, 2.0, false, lo, hi), 3.0);
+        // Cancelled: back where it began.
+        assert_eq!(np_swipe_settle(2.0, 2.8, 1.0, true, lo, hi), 2.0);
 
-        // Rubber-band keeps 0..=1 linear and damps overscroll softly.
-        assert_eq!(np_swipe_rubber_band(0.4), 0.4);
-        assert!(np_swipe_rubber_band(-0.2) < 0.0 && np_swipe_rubber_band(-0.2) > -0.14);
-        assert!(np_swipe_rubber_band(1.2) > 1.0 && np_swipe_rubber_band(1.2) < 1.14);
+        // Rubber-band keeps lo..=hi linear and damps overscroll softly.
+        assert_eq!(np_swipe_rubber_band(0.4, lo, hi), 0.4);
+        let under = np_swipe_rubber_band(-1.2, lo, hi);
+        assert!(under < -1.0 && under > -1.14);
+        let over = np_swipe_rubber_band(3.2, lo, hi);
+        assert!(over > 3.0 && over - 3.0 < 0.14);
+    }
 
-        // Settle target: past 35% or a crisp flick commits; pull-back or cancel reverts.
-        assert!(np_swipe_settle_target(false, 0.4, 0.0, false));
-        assert!(np_swipe_settle_target(false, 0.1, 1.2, false));
-        assert!(!np_swipe_settle_target(false, 0.2, 0.2, false));
-        assert!(!np_swipe_settle_target(false, 0.5, -1.0, false));
-        assert!(!np_swipe_settle_target(false, 0.8, 1.0, true));
-
-        assert!(!np_swipe_settle_target(true, 0.6, 0.0, false));
-        assert!(!np_swipe_settle_target(true, 0.9, -1.2, false));
-        assert!(np_swipe_settle_target(true, 0.8, -0.2, false));
-        assert!(np_swipe_settle_target(true, 0.5, 1.0, false));
-        assert!(np_swipe_settle_target(true, 0.2, -1.0, true));
+    #[test]
+    fn now_playing_arrow_skips_unavailable_lyrics_and_stops_at_edges() {
+        assert_eq!(np_arrow_target(-1, 1, 0, 4), 0);
+        assert_eq!(np_arrow_target(-1, 1, 1, 4), 1);
+        assert_eq!(np_arrow_target(1, -1, 1, 4), -1);
+        assert_eq!(np_arrow_target(1, 1, 1, 4), 2);
+        assert_eq!(np_arrow_target(3, 1, 0, 4), 3);
+        assert_eq!(np_arrow_target(-1, -1, 0, 4), -1);
     }
 
     #[test]
@@ -1571,73 +1578,58 @@ enum NpSwipePhase {
     Idle,
     /// Fingers are down on the trackpad; columns and pill thumb track 1:1.
     Tracking,
-    /// Fingers lifted; easing smoothly to Lyrics (0) or Queue (1).
+    /// Fingers lifted; easing to the tab (or the centred artwork) at `to`.
     Settling {
         from: f32,
         to: f32,
         start: Instant,
         secs: f32,
-        commit_queue: bool,
     },
 }
 
-/// Live horizontal two-finger swipe state inside Now Playing (Lyrics 0 ↔ Queue 1).
+/// A live horizontal swipe through Now Playing's tabs, as a pager: positions
+/// 0 Lyrics, 1 Queue, 2 Similar tracks, 3 Credits; `lo`, one before the
+/// first tab there is, is the artwork centred with no tab open.
 #[derive(Default)]
 struct NpSwipe {
     phase: NpSwipePhase,
-    /// Un-clamped progress in 0..=1 (0 = Lyrics or Centred, 1 = Queue).
+    /// Un-damped position under the fingers.
     raw: f32,
-    /// Rubber-banded progress currently shown on screen.
+    /// Rubber-banded position shown on screen.
     visual: f32,
-    /// Whether the swipe began on Queue (`true`) or Lyrics / Centred (`false`).
-    start_queue: bool,
-    /// True when `0.0` is centred artwork (neither panel open or track has no lyrics).
-    from_centred: bool,
-    /// True when the current track has lyrics available.
-    has_lyrics: bool,
+    /// Where the swipe began.
+    start: f32,
+    lo: f32,
+    hi: f32,
     samples: VecDeque<(Instant, f32)>,
     timer: slint::Timer,
 }
 
-/// Target panel for a horizontal two-finger swipe in Now Playing.
-/// `right` is a swipe to the right (`dx > 0`, towards the left Lyrics segment);
-/// `!right` is a swipe to the left (`dx < 0`, towards the right Queue segment).
-/// Returns `Some(true)` to swipe towards Queue, `Some(false)` to swipe towards
-/// Lyrics (or close Queue when the track has no lyrics), or `None` when already
-/// at that boundary.
-fn np_swipe_target(show_queue: bool, right: bool) -> Option<bool> {
-    if right {
-        show_queue.then_some(false)
-    } else {
-        (!show_queue).then_some(true)
-    }
-}
-
-/// Apple-style logarithmic rubber-band damping past the `0..=1` swipe bounds.
-fn np_swipe_rubber_band(raw: f32) -> f32 {
-    if raw < 0.0 {
-        let d = -raw;
-        -(d / (1.0 + d / 0.14))
-    } else if raw > 1.0 {
-        let d = raw - 1.0;
-        1.0 + d / (1.0 + d / 0.14)
+/// Apple-style logarithmic rubber-band damping past the `lo..=hi` bounds.
+fn np_swipe_rubber_band(raw: f32, lo: f32, hi: f32) -> f32 {
+    let damp = |d: f32| d / (1.0 + d / 0.14);
+    if raw < lo {
+        lo - damp(lo - raw)
+    } else if raw > hi {
+        hi + damp(raw - hi)
     } else {
         raw
     }
 }
 
-/// Whether a released Now Playing horizontal swipe lands on Queue (`true`) or
-/// Lyrics / Centred (`false`). `raw` is the un-clamped progress (`0..=1`) and
-/// `velocity` is progress/sec (positive towards Queue, negative towards Lyrics).
-fn np_swipe_settle_target(start_queue: bool, raw: f32, velocity: f32, cancelled: bool) -> bool {
+/// Where a released Now Playing swipe settles: the position nearest to where
+/// it would coast (`velocity` in positions per second), and a crisp flick
+/// moves at least one position its way. Cancelled, it goes back to `start`.
+fn np_swipe_settle(start: f32, raw: f32, velocity: f32, cancelled: bool, lo: f32, hi: f32) -> f32 {
     if cancelled {
-        return start_queue;
+        return start;
     }
-    if !start_queue {
-        (raw >= 0.35 && velocity > -0.6) || (raw >= 0.06 && velocity > 0.85)
-    } else {
-        !((raw <= 0.65 && velocity < 0.6) || (raw <= 0.94 && velocity < -0.85))
+    let mut target = (raw + velocity * 0.10).round();
+    if velocity.abs() > 1.0 && (raw - start).abs() > 0.06 {
+        let step = start + velocity.signum();
+        target = if velocity > 0.0 { target.max(step) } else { target.min(step) };
     }
+    target.clamp(lo, hi)
 }
 
 /// Whether a released swipe completes the page change. `p` is how far the pane
@@ -1768,6 +1760,51 @@ pub fn space_toggles_play(pressed: bool, repeat: bool) -> bool {
         ui.toggle_play();
     }
     true
+}
+
+/// Move between Now Playing tabs, leaving arrow keys to focused text fields.
+pub fn now_playing_arrow(delta: i32, pressed: bool, repeat: bool) -> bool {
+    let Some(ui) = UI.with(|u| u.borrow().clone()) else {
+        return false;
+    };
+    let app = ui.app();
+    if !app.get_logged_in()
+        || !app.get_show_now_playing()
+        || app.get_video_open()
+        || app.get_menu_open()
+        || app.get_menu_trigger_focused()
+        || app.get_debug_open()
+        || !app.get_create_kind().is_empty()
+        || ui.win.get_typing()
+        || app.get_np_swipe_active()
+    {
+        return false;
+    }
+    if pressed && !repeat {
+        let first = if app.get_lyrics_status().is_empty() { 0 } else { 1 };
+        let current = match app.get_np_tab().as_str() {
+            "credits" => 3,
+            "similar" => 2,
+            _ if app.get_show_queue() => 1,
+            _ if app.get_show_lyrics() && first == 0 => 0,
+            _ => -1,
+        };
+        let target = np_arrow_target(current, delta, first, app.get_np_tab_count());
+        if target != current {
+            app.invoke_set_np_mode(target);
+        }
+    }
+    true
+}
+
+fn np_arrow_target(current: i32, delta: i32, first: i32, count: i32) -> i32 {
+    if current == -1 && delta > 0 {
+        first
+    } else if current == first && delta < 0 {
+        -1
+    } else {
+        (current + delta).clamp(-1, (count - 1).max(first))
+    }
 }
 
 /// ⌘ (Ctrl off macOS) is down: the sidebar shows its page keys.
@@ -5575,8 +5612,8 @@ impl Ui {
     }
 
     /// A horizontal two-finger swipe started. `back` is a swipe to the right.
-    /// Inside Now Playing this tracks Lyrics (0) ↔ Queue (1) 1:1 under the
-    /// fingers; elsewhere it steps through page history when `allow_page` is true.
+    /// Inside Now Playing this pages through its tabs 1:1 under the fingers
+    /// (see `NpSwipe`); elsewhere it steps through page history when `allow_page` is true.
     pub fn swipe_begin(self: &Rc<Self>, back: bool, allow_page: bool) -> bool {
         let app = self.app();
         if app.get_logged_in() && app.get_show_now_playing() {
@@ -5587,38 +5624,38 @@ impl Ui {
             {
                 return false;
             }
-            // Similar tracks and Credits are clicked to, not swiped between.
-            if !app.get_np_tab().is_empty() {
-                return false;
-            }
-            let has_lyrics = app.get_lyrics_status().is_empty();
             let mut swipe = self.np_swipe.borrow_mut();
             // Interrupt an in-flight settle cleanly from its live position.
             if matches!(swipe.phase, NpSwipePhase::Settling { .. }) {
                 swipe.timer.stop();
                 swipe.phase = NpSwipePhase::Tracking;
-                swipe.raw = swipe.visual.clamp(0.0, 1.0);
-                swipe.start_queue = swipe.raw >= 0.5;
+                swipe.raw = swipe.visual.clamp(swipe.lo, swipe.hi);
+                swipe.start = swipe.raw.round();
                 swipe.samples.clear();
                 return true;
             }
-            let show_queue = app.get_show_queue();
-            let show_lyrics = app.get_show_lyrics();
-            if np_swipe_target(show_queue, back).is_none() {
+            let lo = if app.get_lyrics_status().is_empty() { -1.0 } else { 0.0 };
+            let hi = (app.get_np_tab_count() - 1).max(1) as f32;
+            let start = match app.get_np_tab().as_str() {
+                "credits" => 3.0,
+                "similar" => 2.0,
+                _ if app.get_show_queue() => 1.0,
+                _ if app.get_show_lyrics() && lo < 0.0 => 0.0,
+                _ => lo,
+            };
+            // Nothing further that way: let the swipe go.
+            if (back && start <= lo) || (!back && start >= hi) {
                 return false;
             }
             swipe.timer.stop();
-            let start = if show_queue { 1.0 } else { 0.0 };
-            let from_centred = (!show_queue && !show_lyrics) || !has_lyrics;
             swipe.phase = NpSwipePhase::Tracking;
             swipe.raw = start;
             swipe.visual = start;
-            swipe.start_queue = show_queue;
-            swipe.from_centred = from_centred;
-            swipe.has_lyrics = has_lyrics;
+            swipe.start = start;
+            swipe.lo = lo;
+            swipe.hi = hi;
             swipe.samples.clear();
             drop(swipe);
-            app.set_np_swipe_from_centred(from_centred);
             app.set_np_swipe_progress(start);
             app.set_np_swipe_active(true);
             return true;
@@ -5633,10 +5670,10 @@ impl Ui {
             if matches!(swipe.phase, NpSwipePhase::Tracking) {
                 let win_w = self.app().get_pane_width().max(320.0);
                 // Comfortable trackpad drag span across the column.
-                let span = (win_w * 0.34).clamp(220.0, 340.0);
-                // Swipe left (dx < 0) moves 0 -> 1 towards Queue; swipe right (dx > 0) moves 1 -> 0 towards Lyrics.
-                swipe.raw = (swipe.raw - dx / span).clamp(-0.6, 1.6);
-                swipe.visual = np_swipe_rubber_band(swipe.raw);
+                let span = (win_w * 0.40).clamp(260.0, 400.0);
+                // Swipe left (dx < 0) moves on to the next tab; right, back.
+                swipe.raw = (swipe.raw - dx / span).clamp(swipe.lo - 0.6, swipe.hi + 0.6);
+                swipe.visual = np_swipe_rubber_band(swipe.raw, swipe.lo, swipe.hi);
                 let now = Instant::now();
                 let raw = swipe.raw;
                 swipe.samples.push_back((now, raw));
@@ -5693,20 +5730,24 @@ impl Ui {
                     }
                     _ => 0.0,
                 };
-                let commit_queue =
-                    np_swipe_settle_target(swipe.start_queue, swipe.raw, velocity, cancelled);
-                let to = if commit_queue { 1.0 } else { 0.0 };
+                let to = np_swipe_settle(
+                    swipe.start,
+                    swipe.raw,
+                    velocity,
+                    cancelled,
+                    swipe.lo,
+                    swipe.hi,
+                );
                 let from = swipe.visual;
                 let dist = (to - from).abs();
                 // Carry release speed into a crisp ease-out duration.
                 let speed_boost = (velocity.abs() * 0.04).min(0.08);
-                let secs = (0.14 + 0.18 * dist - speed_boost).clamp(0.10, 0.32);
+                let secs = (0.14 + 0.18 * dist.min(1.5) - speed_boost).clamp(0.10, 0.36);
                 swipe.phase = NpSwipePhase::Settling {
                     from,
                     to,
                     start: Instant::now(),
                     secs,
-                    commit_queue,
                 };
                 true
             } else {
@@ -5760,14 +5801,13 @@ impl Ui {
     }
 
     fn np_swipe_step(self: &Rc<Self>) {
-        let (visual, finished) = {
+        let (visual, landed) = {
             let mut swipe = self.np_swipe.borrow_mut();
             let NpSwipePhase::Settling {
                 from,
                 to,
                 start,
                 secs,
-                commit_queue,
             } = swipe.phase
             else {
                 return;
@@ -5778,25 +5818,17 @@ impl Ui {
             if t >= 1.0 {
                 swipe.timer.stop();
                 swipe.phase = NpSwipePhase::Idle;
-                (to, Some((commit_queue, swipe.from_centred, swipe.has_lyrics)))
+                // The centred artwork is -1, whatever `lo` was.
+                (to, Some(if to <= swipe.lo { -1 } else { to as i32 }))
             } else {
                 (value, None)
             }
         };
         let app = self.app();
         app.set_np_swipe_progress(visual);
-        if let Some((commit_queue, from_centred, has_lyrics)) = finished {
+        if let Some(mode) = landed {
             if app.get_show_now_playing() && !app.get_video_open() {
-                if commit_queue {
-                    app.set_show_queue(true);
-                    app.set_show_lyrics(false);
-                } else {
-                    app.set_show_queue(false);
-                    if !from_centred && has_lyrics {
-                        app.set_show_lyrics(true);
-                        self.update_settings(|s| s.show_lyrics = true);
-                    }
-                }
+                app.invoke_set_np_mode(mode);
             }
             // Clear `np-swipe-active` on the next frame after Slint's 0ms
             // panel animations have snapped to the already-landed end state.
@@ -5808,9 +5840,7 @@ impl Ui {
                     if let Some(ui) = weak.upgrade()
                         && matches!(ui.np_swipe.borrow().phase, NpSwipePhase::Idle)
                     {
-                        let app = ui.app();
-                        app.set_np_swipe_active(false);
-                        app.set_np_swipe_from_centred(false);
+                        ui.app().set_np_swipe_active(false);
                     }
                 },
             );
@@ -9082,51 +9112,37 @@ impl Ui {
         }
     }
 
-    /// Load what Now Playing's open tab (Similar tracks or Credits) shows for
-    /// the current track, once per track.
+    /// Load Now Playing's Similar tracks and Credits for the current track,
+    /// once per track, whichever tab is open: a tab swiped or clicked to is
+    /// then already filled. The last track's content stays until the new
+    /// arrives, so nothing blinks empty in between.
     fn load_np_tab(self: &Rc<Self>) {
         let Some(track) = self.current_track() else {
             return;
         };
-        let app = self.app();
         let id = track.id.clone();
-        match app.get_np_tab().as_str() {
-            "similar" => {
-                {
-                    let mut st = self.state.borrow_mut();
-                    if st.np_similar_for == id {
-                        return;
-                    }
-                    st.np_similar_for = id.clone();
-                    st.np_similar.clear();
-                    st.np_similar_model = None;
-                }
-                app.set_np_radios(ModelRc::default());
-                app.set_np_similar(ModelRc::default());
-                app.set_np_similar_status("Loading…".into());
-                self.spawn(move |ctx| async move {
-                    let Some(api) = ctx.api() else { return };
-                    let found = api.track_similar(&id).await;
-                    on_ui(move |ui| ui.show_np_similar(&id, found));
-                });
-            }
-            "credits" => {
-                {
-                    let mut st = self.state.borrow_mut();
-                    if st.np_credits_for == id {
-                        return;
-                    }
-                    st.np_credits_for = id.clone();
-                }
-                app.set_np_credits(ModelRc::default());
-                app.set_np_credits_status("Loading…".into());
-                self.spawn(move |ctx| async move {
-                    let Some(api) = ctx.api() else { return };
-                    let credits = api.track_credits(&id).await;
-                    on_ui(move |ui| ui.show_np_credits(&id, credits));
-                });
-            }
-            _ => {}
+        let (similar, credits) = {
+            let mut st = self.state.borrow_mut();
+            let similar = st.np_similar_for != id;
+            let credits = st.np_credits_for != id;
+            st.np_similar_for = id.clone();
+            st.np_credits_for = id.clone();
+            (similar, credits)
+        };
+        if similar {
+            let id = id.clone();
+            self.spawn(move |ctx| async move {
+                let Some(api) = ctx.api() else { return };
+                let found = api.track_similar(&id).await;
+                on_ui(move |ui| ui.show_np_similar(&id, found));
+            });
+        }
+        if credits {
+            self.spawn(move |ctx| async move {
+                let Some(api) = ctx.api() else { return };
+                let credits = api.track_credits(&id).await;
+                on_ui(move |ui| ui.show_np_credits(&id, credits));
+            });
         }
     }
 
@@ -9170,7 +9186,14 @@ impl Ui {
             Err(e) => {
                 tracing::warn!("similar tracks failed: {e}");
                 // Try again the next time the tab opens.
-                self.state.borrow_mut().np_similar_for.clear();
+                {
+                    let mut st = self.state.borrow_mut();
+                    st.np_similar_for.clear();
+                    st.np_similar.clear();
+                    st.np_similar_model = None;
+                }
+                app.set_np_radios(ModelRc::default());
+                app.set_np_similar(ModelRc::default());
                 app.set_np_similar_status("Couldn’t load similar tracks".into());
                 return;
             }
